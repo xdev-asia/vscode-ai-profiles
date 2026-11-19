@@ -8,7 +8,7 @@ Use VS Code **1.95 or later**, or a code-server release that includes VS Code 1.
 
 - **VS Code Desktop.** Run **Extensions: Install from VSIX…** from the Command Palette and select the downloaded `.vsix` file.
 - **VS Code Remote.** Open a workspace over Remote SSH, WSL, Dev Containers, or Remote Tunnels. Run **Extensions: Install from VSIX…** in the remote window, then confirm xDev AI appears under the remote host in the Extensions view.
-- **code-server.** Copy the VSIX to the server and run `code-server --install-extension xdev-ai-0.2.1.vsix`, substituting your downloaded filename. Reload the browser window.
+- **code-server.** Copy the VSIX to the server and run `code-server --install-extension xdev-ai-0.2.2.vsix`, substituting your downloaded filename. Reload the browser window.
 
 The extension runs on the machine that hosts the workspace. For remote workspaces, that machine needs access to the provider's API and resolves any `localhost` addresses in custom endpoints. [VS Code Remote](https://code.visualstudio.com/api/advanced-topics/remote-extensions) · [code-server installation](https://coder.com/docs/code-server/FAQ#how-do-i-install-an-extension-manually)
 
@@ -78,7 +78,11 @@ npm run package
 
 ## Release an extension version
 
-[GitHub Actions](https://github.com/xdev-asia/vscode-ai-profiles/actions/workflows/publish.yml) tests and packages every pull request and push to `main`. Push a version tag such as `v0.2.1` that matches `package.json` to attach the tested VSIX to a GitHub Release and publish the same file to both registries.
+[GitHub Actions](https://github.com/xdev-asia/vscode-ai-profiles/actions/workflows/publish.yml) tests and packages every pull request and push to `main`. Push a version tag such as `v0.2.2` that matches `package.json` to attach the tested VSIX to a GitHub Release and publish the same file to both registries.
 
 - **VS Code Marketplace.** Create or select the `xdev-asia` publisher and add a Trusted Publishing policy in [Manage Publishers & Extensions](https://marketplace.visualstudio.com/manage). Set the repository owner to `xdev-asia`, repository to `vscode-ai-profiles`, and workflow to `publish.yml`. Leave the environment blank.
 - **Open VSX (code-server).** Declare the extension license in `package.json` and include the license file. Sign the [Open VSX Publisher Agreement](https://open-vsx.org/publisher-agreement-v1.1), create the `xdev-asia` namespace, and save the access token as `OVSX_PAT` in the [repository's Actions secrets](https://github.com/xdev-asia/vscode-ai-profiles/settings/secrets/actions) for the first release. After the first version is active, the namespace owner can register the same owner, repository, and workflow for `xdev-asia.xdev-ai` under [Trusted Publishers](https://open-vsx.org/user-settings/trusted-publishers). Remove `OVSX_PAT` after registration to use short-lived credentials for subsequent releases. [Open VSX trusted publishing](https://github.com/eclipse-openvsx/openvsx/wiki/Trusted-Publishing)
+
+## License
+
+xDev AI is licensed under the [Apache License 2.0](https://github.com/xdev-asia/vscode-ai-profiles/blob/main/LICENSE).
