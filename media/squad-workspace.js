@@ -69,6 +69,7 @@ function mountSquadWorkspace(vscode) {
 
   function renderCustomizations() {
     const { skills: savedSkills, disabledTools } = state.customizations;
+    const nativeTools = state.nativeChatTools;
     skills.replaceChildren(...savedSkills.map(skill => {
       const row = document.createElement('li');
       const label = document.createElement('span');
@@ -92,14 +93,15 @@ function mountSquadWorkspace(vscode) {
     }));
     byId('add-skill').disabled = Boolean(pending);
     for (const control of skillForm.elements) control.disabled = Boolean(pending);
-    byId('tool-hint').textContent = state.nativeChatTools
+    byId('tool-hint').textContent = nativeTools.length
       ? 'Set which xDev tools Copilot can call in this workspace.'
       : 'Copilot tools require a supported VS Code chat session. Use the Squad tabs in this workspace.';
-    byId('native-customizations').hidden = !state.nativeChatTools;
+    byId('native-customizations').hidden = !nativeTools.length;
     byId('native-tools').disabled = byId('native-skills').disabled = Boolean(pending);
     for (const tool of tools) {
-      tool.disabled = !state.nativeChatTools || Boolean(pending);
-      tool.checked = !disabledTools.includes(tool.id);
+      const available = nativeTools.includes(tool.id);
+      tool.disabled = !available || Boolean(pending);
+      tool.checked = available && !disabledTools.includes(tool.id);
     }
   }
 

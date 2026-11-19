@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { chatPromptLimit, type SquadChat, type SquadChatEntry } from './squad-chat';
+import type { squadTools } from './squad-customizations';
 import { workflowStage, workflowStages } from './workflow';
 
 interface AskInput {
@@ -63,9 +64,20 @@ function formatReplies(entries: SquadChatEntry[]): string {
   return entries.map(({ author, profile, text }) => `${author}${profile ? ` (${profile})` : ''}\n${text}`).join('\n\n');
 }
 
-export function registerSquadTools(context: vscode.ExtensionContext, squad: SquadChat): void {
-  if (typeof vscode.lm?.registerTool !== 'function') return;
-  context.subscriptions.push(vscode.lm.registerTool<AskInput>('xdev_squad_ask', {
+export function registerSquadTools(context: vscode.ExtensionContext, squad: SquadChat): string[] {
+  const registered: string[] = [];
+  if (typeof vscode.lm?.registerTool !== 'function') return registered;
+
+  function register<Input>(name: keyof typeof squadTools, tool: vscode.LanguageModelTool<Input>): void {
+    try {
+      context.subscriptions.push(vscode.lm.registerTool(name, tool));
+      registered.push(name);
+    } catch (error) {
+      console.warn(`[xDev AI] Could not register optional chat tool ${name}.`, error);
+    }
+  }
+
+  register<AskInput>('xdev_squad_ask', {
     prepareInvocation({ input }) {
       squad.customizations.requireTool('xdev_squad_ask');
       return {
@@ -87,9 +99,9 @@ export function registerSquadTools(context: vscode.ExtensionContext, squad: Squa
         return plan ? `${replies}\n\n${describePlan(plan)}` : replies;
       });
     }
-  }));
+  });
 
-  context.subscriptions.push(vscode.lm.registerTool<PlanInput>('xdev_squad_plan', {
+  register<PlanInput>('xdev_squad_plan', {
     prepareInvocation({ input }) {
       squad.customizations.requireTool('xdev_squad_plan');
       if (input.action === 'view') return { invocationMessage: 'Reading the pending xDev Squad plan' };
@@ -131,9 +143,9 @@ export function registerSquadTools(context: vscode.ExtensionContext, squad: Squa
         return formatReplies(await run.finished);
       });
     }
-  }));
+  });
 
-  context.subscriptions.push(vscode.lm.registerTool<WorkflowInput>('xdev_sdlc', {
+  register<WorkflowInput>('xdev_sdlc', {
     prepareInvocation({ input }) {
       squad.customizations.requireTool('xdev_sdlc');
       if (input?.action === 'view') return { invocationMessage: 'Reading the xDev SDLC stage' };
@@ -166,5 +178,6 @@ export function registerSquadTools(context: vscode.ExtensionContext, squad: Squa
         return `${formatReplies(await run.finished)}\n\nReview and approve the result in xDev Squad → Workflow.`;
       });
     }
-  }));
+  });
+  return registered;
 }

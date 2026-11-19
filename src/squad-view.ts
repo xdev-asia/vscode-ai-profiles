@@ -16,7 +16,6 @@ export function registerSquad(
   context: vscode.ExtensionContext, accounts: Accounts, profiles: TerminalProfiles, onProfilesChanged: vscode.Event<void>
 ): void {
   const view = new SquadView(context, accounts, profiles);
-  registerSquadTools(context, view.teamChat);
   context.subscriptions.push(
     view,
     vscode.window.registerWebviewViewProvider(viewId, view),
@@ -31,6 +30,7 @@ export function registerSquad(
       if (focused) void view.refresh();
     })
   );
+  view.registerChatTools();
 }
 
 class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
@@ -40,6 +40,7 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
   private readonly errors = new Map<Role, string>();
   private view?: vscode.WebviewView;
   private requestedTab?: SquadTab;
+  private chatTools: string[] = [];
   private ready = false;
   private refreshId = 0;
   private actions = Promise.resolve();
@@ -51,6 +52,10 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
   ) {
     this.store = new SquadStore(context.workspaceState);
     this.teamChat = new SquadChat(context.workspaceState, accounts, this.store, () => void this.refresh());
+  }
+
+  registerChatTools(): void {
+    this.chatTools = registerSquadTools(this.context, this.teamChat);
   }
 
   resolveWebviewView(view: vscode.WebviewView): void {
@@ -122,7 +127,7 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
         ...this.store.read(),
         teamChat: this.teamChat.snapshot(),
         customizations: this.teamChat.customizations.read(),
-        nativeChatTools: typeof vscode.lm?.registerTool === 'function',
+        nativeChatTools: this.chatTools,
         accounts,
         running: [...this.running.keys()],
         errors: Object.fromEntries(this.errors)

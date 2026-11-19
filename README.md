@@ -78,6 +78,8 @@ VS Code manages the chat session's agent harness and model picker. To change the
 
 Each AI draft sends the project brief, excerpts of earlier approved results, and enabled workspace skills to the assigned API provider. Each stage produces a text result. Run code changes, tests, and releases in your editor, CLI, or CI. Open **Workflow** to approve results from either chat interface. Each workspace keeps one current workflow, with a reset action to start another.
 
+If VS Code reports that the workflow command is missing after an update, check **Extensions** for the installed xDev AI version on the workspace host, then run **Developer: Reload Window**. To diagnose a failed activation, open **Output** and select **Log (Extension Host)** or **Log (Remote Extension Host)**.
+
 ### Manage Skills and Tools
 
 - Under **xDev Squad → Skills & Tools**, add, edit, disable, or delete workspace skills. A skill is a named set of instructions that xDev AI includes in SDLC drafting when enabled.
