@@ -1,0 +1,61 @@
+{
+  "name": "xdev-ai",
+  "displayName": "xDev AI",
+  "description": "Chat with AI providers and open Claude Code terminals for multiple accounts in VS Code.",
+  "version": "0.2.0",
+  "publisher": "xdev",
+  "private": true,
+  "engines": {
+    "vscode": "^1.95.0",
+    "node": ">=20.3"
+  },
+  "categories": ["AI"],
+  "extensionKind": ["workspace"],
+  "main": "./dist/extension.js",
+  "exports": {
+    ".": {
+      "types": "./dist/core.d.ts",
+      "default": "./dist/core.js"
+    }
+  },
+  "types": "./dist/core.d.ts",
+  "files": ["dist", "media"],
+  "contributes": {
+    "commands": [
+      { "command": "xdevAi.chat", "title": "Open Chat", "category": "xDev AI" },
+      { "command": "xdevAi.addAccount", "title": "Add Account", "category": "xDev AI" },
+      { "command": "xdevAi.switchAccount", "title": "Switch Account", "category": "xDev AI" },
+      { "command": "xdevAi.manageAccounts", "title": "Manage Accounts", "category": "xDev AI" },
+      { "command": "xdevAi.claude.addAccount", "title": "Add Claude Account", "category": "xDev AI" },
+      { "command": "xdevAi.claude.openTerminal", "title": "Open Claude Terminal", "category": "xDev AI" },
+      { "command": "xdevAi.claude.signIn", "title": "Sign In to Claude Account", "category": "xDev AI" }
+    ],
+    "terminal": {
+      "profiles": [{ "id": "xdevAi.claude.terminal", "title": "xDev AI: Claude Code", "icon": "terminal" }]
+    },
+    "configuration": {
+      "title": "xDev AI",
+      "properties": {
+        "xdevAi.claudeExecutable": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Absolute path to Claude Code on the machine hosting the workspace. Leave empty to detect a native installation or search PATH."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test",
+    "vscode:prepublish": "npm run build",
+    "prepack": "npm run build",
+    "package": "vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "@types/vscode": "1.95.0",
+    "@vscode/vsce": "4.1.1",
+    "typescript": "5.9.3"
+  }
+}
