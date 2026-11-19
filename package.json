@@ -2,8 +2,8 @@
   "name": "xdev-ai",
   "displayName": "xDev AI",
   "description": "Chat with AI providers and open Claude Code terminals for multiple accounts in VS Code.",
-  "version": "0.2.0",
-  "publisher": "xdev",
+  "version": "0.2.1",
+  "publisher": "xdev-asia",
   "private": true,
   "repository": {
     "type": "git",
