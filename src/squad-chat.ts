@@ -3,6 +3,8 @@ import type { Memento } from 'vscode';
 import { Accounts, type Account } from './accounts';
 import { chat } from './core';
 import { isRole, roles, SquadStore, type Role } from './squad';
+import { SquadCustomizations, type Skill } from './squad-customizations';
+import { workflowBriefLimit, workflowOutputLimit, workflowStage, workflowStages, workflowText, type Workflow } from './workflow';
 
 const storageKey = 'squadChat.v1';
 const workerRoles = ['Implement', 'Review', 'Tests'] as const satisfies readonly Role[];
@@ -34,6 +36,7 @@ interface Plan {
 interface Thread {
   entries: SquadChatEntry[];
   plan?: Plan;
+  workflow?: Workflow;
   inFlight?: boolean;
 }
 
@@ -62,20 +65,27 @@ function shorten(text: string, limit: number): string {
 
 export class SquadChat {
   private active?: ActiveRun;
+  private workflowIssue?: { id: string; step: number; text: string };
   private writes = Promise.resolve();
+  readonly customizations: SquadCustomizations;
 
   constructor(
     private readonly storage: Memento,
     private readonly accounts: Accounts,
     private readonly squad: SquadStore,
     private readonly changed: () => void
-  ) {}
+  ) {
+    this.customizations = new SquadCustomizations(storage);
+  }
 
   snapshot() {
-    const { entries, inFlight } = this.read();
+    const { entries, inFlight, workflow } = this.read();
     const plan = this.pendingPlan();
     return {
       entries,
+      workflow,
+      workflowIssue: this.workflowIssue?.id === workflow?.id && this.workflowIssue?.step === workflow?.approved.length
+        ? this.workflowIssue?.text : undefined,
       plan: plan && { id: plan.id, jobs: plan.jobs },
       busy: Boolean(this.active),
       status: this.active?.status ?? (inFlight ? 'The previous run was interrupted. Send a new message to continue.' : '')
@@ -185,6 +195,96 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
       state.plan = undefined;
       state.entries.push({ author: 'Squad', text: 'Plan discarded.' });
     });
+  }
+
+  startWorkflow(input: unknown): Promise<void> {
+    this.requireIdle();
+    const brief = workflowText(input, workflowBriefLimit, 'a project brief');
+    return this.write(state => {
+      if (state.workflow) throw new Error('A workflow is already open in this workspace.');
+      state.workflow = { id: randomUUID(), brief, approved: [] };
+    });
+  }
+
+  approveStage(id: unknown, step: unknown, input: unknown): Promise<void> {
+    this.requireIdle();
+    const output = workflowText(input, workflowOutputLimit, 'a stage result');
+    return this.write(state => {
+      const { workflow, stage } = this.currentStage(state, id, step);
+      workflow.approved.push(output);
+      workflow.draft = undefined;
+      state.entries.push({ author: 'Squad', text: `SDLC stage approved · ${stage.name}` });
+    });
+  }
+
+  resetWorkflow(id: unknown): Promise<void> {
+    this.requireIdle();
+    return this.write(state => {
+      if (!state.workflow || state.workflow.id !== id) throw new Error('The workflow has changed.');
+      state.workflow = undefined;
+    });
+  }
+
+  stageRequest(id: unknown, step: unknown): {
+    instruction: string;
+    brief: string;
+    approved: { stage: string; result: string }[];
+    skills: Pick<Skill, 'name' | 'instructions'>[];
+  } {
+    const { workflow, stage } = this.currentStage(this.read(), id, step);
+    return {
+      instruction: stage.instruction,
+      brief: workflow.brief,
+      approved: workflow.approved.map((result, index) => ({
+        stage: workflowStages[index].name, result: shorten(result, 2_000)
+      })),
+      skills: this.customizations.activeSkills()
+    };
+  }
+
+  async draftStage(id: unknown, step: unknown, signal?: AbortSignal): Promise<StartedRun> {
+    this.requireIdle();
+    const { workflow, stage } = this.currentStage(this.read(), id, step);
+    const request = this.stageRequest(id, step);
+    const { accounts } = await this.accounts.read();
+    const account = this.accountFor(stage.role, accounts);
+    if (!account) throw new Error(`Assign an API profile to ${stage.role} under Roles or copy the stage brief to a terminal.`);
+    const run = await this.launch(`Drafting ${stage.name}…`, signal, state => {
+      this.currentStage(state, id, step);
+      if (state.plan) throw new Error('Approve or discard the pending Squad plan before drafting a stage.');
+      this.workflowIssue = undefined;
+      state.entries.push({ author: 'You', to: stage.role, text: `Draft the SDLC ${stage.name} stage.` });
+    }, async run => {
+      const answer = await chat(account, [
+        { role: 'system', content: `You are ${stage.role}, drafting the ${stage.name} stage. ${textOnly} Use the provided project brief, approved results, and workspace skill instructions. Reply in the user's language.` },
+        { role: 'user', content: JSON.stringify(request) }
+      ], { signal: run.signal });
+      run.signal.throwIfAborted();
+      const draft = answer.trim().slice(0, workflowOutputLimit);
+      if (!draft) throw new Error('The API returned an empty draft.');
+      await this.write(state => {
+        run.signal.throwIfAborted();
+        this.currentStage(state, id, step).workflow.draft = draft;
+        state.entries.push(this.reply(stage.role, account, draft));
+      }, run);
+    });
+    return { finished: run.finished.then(entries => {
+      const issue = entries.find(entry => entry.author === 'Squad');
+      if (issue) {
+        this.workflowIssue = { id: workflow.id, step: workflow.approved.length, text: issue.text };
+        this.changed();
+      }
+      return entries;
+    }) };
+  }
+
+  private currentStage(state: Thread, id: unknown, step: unknown) {
+    const workflow = state.workflow;
+    const stage = workflowStage(workflow);
+    if (!workflow || !stage || workflow.id !== id || workflow.approved.length !== step) {
+      throw new Error('This workflow stage is no longer current.');
+    }
+    return { workflow, stage };
   }
 
   cancel(): void {

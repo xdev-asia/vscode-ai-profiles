@@ -1,9 +1,5 @@
 function mountSquadChat(vscode, roles) {
   const byId = id => document.getElementById(id);
-  const chatPanel = byId('chat-panel');
-  const rolesPanel = byId('roles-panel');
-  const showChat = byId('show-chat');
-  const showRoles = byId('show-roles');
   const log = byId('chat-messages');
   const message = byId('chat-message');
   const error = byId('chat-error');
@@ -11,18 +7,6 @@ function mountSquadChat(vscode, roles) {
   let snapshot;
   let pending;
   let transcript;
-
-  function show(view) {
-    chatPanel.hidden = view !== 'chat';
-    rolesPanel.hidden = view === 'chat';
-    showChat.setAttribute('aria-pressed', String(view === 'chat'));
-    showRoles.setAttribute('aria-pressed', String(view !== 'chat'));
-    vscode.setState({ ...vscode.getState(), view });
-  }
-
-  show(vscode.getState()?.view === 'roles' ? 'roles' : 'chat');
-  showChat.addEventListener('click', () => show('chat'));
-  showRoles.addEventListener('click', () => show('roles'));
 
   function render(state) {
     snapshot = state.teamChat;

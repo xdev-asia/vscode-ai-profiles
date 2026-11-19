@@ -2,6 +2,8 @@ const vscode = acquireVsCodeApi();
 const byId = id => document.getElementById(id);
 const roles = byId('roles').dataset.roles.split(',');
 const chatUi = mountSquadChat(vscode, roles);
+const workspaceUi = mountSquadWorkspace(vscode);
+const tabs = ['chat', 'roles', 'workflow', 'customizations'];
 const summary = byId('summary');
 const fields = byId('fields');
 const account = byId('account');
@@ -21,6 +23,18 @@ const previousRole = vscode.getState()?.role;
 let role = roles.includes(previousRole) ? previousRole : 'Lead';
 let state;
 let pending;
+
+function showTab(tab) {
+  if (!tabs.includes(tab)) tab = 'chat';
+  for (const name of tabs) {
+    byId(`${name}-panel`).hidden = name !== tab;
+    byId(`show-${name}`).setAttribute('aria-pressed', String(name === tab));
+  }
+  vscode.setState({ ...vscode.getState(), view: tab });
+}
+
+for (const tab of tabs) byId(`show-${tab}`).addEventListener('click', () => showTab(tab));
+showTab(vscode.getState()?.view);
 
 for (const item of roles) {
   const button = document.createElement('button');
@@ -166,11 +180,15 @@ window.addEventListener('message', ({ data }) => {
     state = data;
     render();
     chatUi.render(state);
+    workspaceUi.render(state);
   }
   if (data.type === 'loadError') {
     summary.textContent = data.error;
     chatUi.loadError(data.error);
+    workspaceUi.loadError(data.error);
   }
+  if (data.type === 'selectTab') showTab(data.tab);
+  if (data.type === 'workspaceSettled') workspaceUi.settle(data);
   if (data.type === 'chatSettled') chatUi.settle(data);
   if (data.type === 'settled' && pending) {
     const { type, role: target } = pending;

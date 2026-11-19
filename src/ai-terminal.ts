@@ -1,11 +1,12 @@
 import { extname, join } from 'node:path';
 import * as vscode from 'vscode';
+import { claudeLoginScript } from './claude-login';
 import {
   findTerminalExecutable, terminalProfileEnv, terminalProfileId, terminalProviderIds, terminalProviders,
   validTerminalProfileName, type TerminalProfile, type TerminalProfiles, type TerminalProvider
 } from './terminal-profiles';
 
-type Action = 'add' | 'open' | 'signIn' | 'usage' | 'rename';
+type Action = 'add' | 'open' | 'signIn' | 'usage' | 'rename' | 'remove';
 type AccountTarget = TerminalAccountItem | string;
 const accountsViewId = 'xdevAi.claude.accounts';
 
@@ -64,7 +65,8 @@ export function registerAiTerminals(context: vscode.ExtensionContext, profiles: 
     }
     const title = {
       add: 'Add AI Account', open: 'Choose an AI terminal account', signIn: 'Choose an account to sign in',
-      usage: 'Choose an account to check usage', rename: 'Choose an account to rename'
+      usage: 'Choose an account to check usage', rename: 'Choose an account to rename',
+      remove: 'Choose a terminal account to delete'
     }[action];
     const choices: (vscode.QuickPickItem & { profile?: TerminalProfile })[] = accounts.map(profile => ({
       label: profile.name,
@@ -92,7 +94,7 @@ export function registerAiTerminals(context: vscode.ExtensionContext, profiles: 
   }
 
   async function prepareTerminal(
-    action: Exclude<Action, 'rename'>,
+    action: Exclude<Action, 'rename' | 'remove'>,
     target?: AccountTarget,
     token?: vscode.CancellationToken,
     provider?: TerminalProvider
@@ -150,6 +152,11 @@ export function registerAiTerminals(context: vscode.ExtensionContext, profiles: 
       const argumentsLiteral = args.map(argument => `'${argument}'`).join(' ');
       shellArgs = ['-NoLogo', '-NoProfile', '-Command', `& $env:XDEV_AI_CLI_PATH ${argumentsLiteral}; exit $LASTEXITCODE`];
     }
+    if (provider === 'claude' && signIn && process.platform !== 'win32') {
+      env.XDEV_AI_CLI_PATH = cli;
+      shellPath = '/bin/sh';
+      shellArgs = ['-c', claudeLoginScript];
+    }
     const document = vscode.window.activeTextEditor?.document.uri;
     const folder = (document && vscode.workspace.getWorkspaceFolder(document)) ?? vscode.workspace.workspaceFolders?.[0];
     return {
@@ -168,6 +175,27 @@ export function registerAiTerminals(context: vscode.ExtensionContext, profiles: 
 
   async function run(action: Action, provider?: TerminalProvider, target?: AccountTarget): Promise<void> {
     try {
+      if (action === 'remove') {
+        const profile = (await selectProfile(action, provider, target))?.profile;
+        if (!profile) return;
+        const choice = 'Delete Account';
+        if (await vscode.window.showWarningMessage(`Delete “${profile.name}” (${terminalProviders[profile.provider].name})?`, {
+          modal: true,
+          detail: 'This closes its terminals and deletes the local profile, sign-in data, and CLI history stored in its directory.'
+        }, choice) !== choice) return;
+        const profileEnvironment = terminalProfileEnv(profile);
+        for (const terminal of vscode.window.terminals) {
+          const options = terminal.creationOptions;
+          if ('env' in options && options.env && Object.entries(profileEnvironment).some(([key, value]) =>
+            value === profile.configDir && options.env?.[key] === value)) terminal.dispose();
+        }
+        try {
+          await profiles.remove(profile);
+        } finally {
+          accountsChanged.fire();
+        }
+        return;
+      }
       if (action === 'rename') {
         const profile = (await selectProfile(action, provider, target))?.profile;
         if (!profile) return;
@@ -186,6 +214,9 @@ export function registerAiTerminals(context: vscode.ExtensionContext, profiles: 
       }
       if (terminal.provider === 'gemini' && terminal.signIn) {
         void vscode.window.showInformationMessage('Choose Sign in with Google in Gemini CLI. For an existing session, enter /auth to switch accounts.');
+      }
+      if (terminal.provider === 'claude' && terminal.signIn && (vscode.env.remoteName || vscode.env.uiKind === vscode.UIKind.Web)) {
+        void vscode.window.showInformationMessage('Open the URL from the Claude terminal in your browser, then paste the code in that same terminal if prompted.');
       }
     } catch (error) {
       void vscode.window.showErrorMessage(error instanceof Error ? error.message : 'Unable to open the AI terminal.');
@@ -222,6 +253,7 @@ export function registerAiTerminals(context: vscode.ExtensionContext, profiles: 
     command('xdevAi.signInTerminal', 'signIn'),
     command('xdevAi.checkUsage', 'usage'),
     command('xdevAi.renameTerminalAccount', 'rename'),
+    command('xdevAi.removeTerminalAccount', 'remove'),
     vscode.window.registerTerminalProfileProvider('xdevAi.terminal', terminalProvider()),
     // Keep the commands and profile used by older VS Code settings and workflows.
     vscode.commands.registerCommand('xdevAi.claude.manageAccounts', focus),

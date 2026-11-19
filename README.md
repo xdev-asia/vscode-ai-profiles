@@ -23,7 +23,8 @@ Open **xDev AI** in the Activity Bar. The sidebar contains **Terminal Accounts**
 1. Click **Add AI Account (+)** next to **Terminal Accounts**. Choose **Claude Code**, **Codex**, **Gemini CLI**, or **API Profile**. For a terminal account, give the profile a name and complete sign-in with the provider. Gemini opens its authentication menu in the terminal. Codex uses device code sign-in on remote hosts and code-server, which requires device code sign-in to be enabled for the account.
 2. Select an account to open its terminal. Use the **xDev AI** status bar item, **Open AI Terminal** on the Terminal toolbar, or **xDev AI: Choose Account** in the terminal profile menu to pick an account without opening the sidebar.
 3. Right-click a terminal account to rename it or sign in again. Click **Check AI Usage** next to a terminal account to open its session and see the provider's usage command.
-4. In **API Profiles**, click **+** to add a profile. Select a profile to open xDev Chat with it, or right-click it to make it active, edit it, or remove it.
+4. In **API Profiles**, click **+** to add a profile. Select a profile to open xDev Chat with it, or right-click it to make it active or edit it.
+5. Click the trash icon next to a terminal account or API profile, or use its right-click **Delete** command. Deleting a terminal account closes its matching terminals in the current window and removes the profile directory, including saved sign-in data and CLI history. Deleting an API profile removes its saved key from xDev AI.
 
 Install each CLI on the workspace host. If xDev AI cannot find one, enter its absolute executable path in User Settings or Remote Settings.
 
@@ -34,6 +35,14 @@ Install each CLI on the workspace host. If xDev AI cannot find one, enter its ab
 | [Gemini CLI](https://geminicli.com/docs/get-started/) | `xdevAi.geminiExecutable` | `/stats model` |
 
 Each account has its own configuration directory on the workspace host. The CLIs manage their sign-in, credentials, and history there. Terminal and API profiles are configured separately. [Claude Code authentication](https://code.claude.com/docs/en/authentication#log-in-with-multiple-accounts) · [Codex authentication](https://developers.openai.com/codex/auth) · [Gemini CLI authentication](https://geminicli.com/docs/get-started/authentication/)
+
+### Sign in to Claude Code from code-server
+
+1. In **Terminal Accounts**, right-click your Claude Code account and choose **Sign In to Terminal Account**. Keep the xDev AI terminal open.
+2. Open the URL printed by Claude Code in your browser. If Claude Code shows **Paste code here**, use the URL directly above that prompt. After authorizing in the browser, return to the original terminal and paste the code, then press Enter.
+3. Once Claude Code confirms sign-in, xDev AI opens the Claude session in the same terminal and profile. If sign-in exits with an error, the terminal stays open with the original CLI output and retry and status commands.
+
+On the code-server host, check `claude --version` and update Claude Code if your version lacks the manual code prompt. Run `claude update` if you installed Claude Code with its native installer. [Claude Code remote OAuth troubleshooting](https://code.claude.com/docs/en/troubleshoot-install#oauth-login-fails-in-wsl2-ssh-or-containers) · [Claude Code updates](https://code.claude.com/docs/en/setup)
 
 ## Coordinate work with Squad
 
@@ -60,6 +69,19 @@ The most recent 60 chat entries and the pending plan are stored in local VS Code
 Both interfaces use the same workspace profiles, pending plan, and Squad context. Copilot receives the responses to its Squad tool calls. Each assigned API profile receives the request and context described above. On code-server, open **xDev Squad → Chat** for the same workflow. [VS Code extension tools](https://code.visualstudio.com/docs/agents/run/tools?select-tools-by-harness=copilot-harness#_add-extension-tools-for-the-copilot-harness)
 
 VS Code manages the chat session's agent harness and model picker. To change the native harness, start a new chat and choose a session target. xDev terminal profiles open in their own terminals. Use the API profiles assigned under **Roles** for xDev Squad tool calls in a Copilot session. [VS Code agent harnesses](https://code.visualstudio.com/docs/agents/run/agent-harnesses)
+
+### Run an AI SDLC workflow
+
+1. Open **xDev Squad → Workflow** or run **xDev AI: Open SDLC Workflow**. Enter the project brief to start **Plan → Implement → Review → Test → Release**.
+2. For an AI draft, assign the stage's role an API profile in **Roles**, then click **Draft with AI** in **Workflow**. The draft also appears in the shared **Chat**. In Copilot Chat, `#xdevSdlc` can show the current stage or request a draft.
+3. Edit the draft or enter your own result, then click **Approve stage**. For terminal accounts, use **Copy stage brief** and open the role's terminal. Check approved results in the same workflow after reloading the workspace.
+
+Each AI draft sends the project brief, excerpts of earlier approved results, and enabled workspace skills to the assigned API provider. Each stage produces a text result. Run code changes, tests, and releases in your editor, CLI, or CI. Open **Workflow** to approve results from either chat interface. Each workspace keeps one current workflow, with a reset action to start another.
+
+### Manage Skills and Tools
+
+- Under **xDev Squad → Skills & Tools**, add, edit, disable, or delete workspace skills. A skill is a named set of instructions that xDev AI includes in SDLC drafting when enabled.
+- Use the tool switches to control Copilot access to **Ask xDev Squad**, **Manage xDev Squad Plan**, and **xDev SDLC Workflow** in this workspace. In supported VS Code versions, use the panel shortcuts to open native **Agent Skills** and **Tools & MCP** management. [VS Code agent customizations](https://code.visualstudio.com/docs/agent-customization/overview)
 
 ### Manage a role manually
 

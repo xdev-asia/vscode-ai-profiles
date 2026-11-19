@@ -6,8 +6,11 @@ import { chat, providers } from './core';
 import { isRole, noteLimit, readTask, roles, SquadStore, taskLimit, taskStatuses, type Role } from './squad';
 import { chatPromptLimit, SquadChat } from './squad-chat';
 import { registerSquadTools } from './squad-tools';
+import { skillInstructionsLimit, skillNameLimit, squadTools } from './squad-customizations';
+import { workflowBriefLimit, workflowOutputLimit, workflowStages } from './workflow';
 
 const viewId = 'xdevAi.squad';
+type SquadTab = 'workflow' | 'customizations';
 
 export function registerSquad(
   context: vscode.ExtensionContext, accounts: Accounts, profiles: TerminalProfiles, onProfilesChanged: vscode.Event<void>
@@ -18,6 +21,8 @@ export function registerSquad(
     view,
     vscode.window.registerWebviewViewProvider(viewId, view),
     vscode.commands.registerCommand('xdevAi.squad.open', () => vscode.commands.executeCommand(`${viewId}.focus`)),
+    vscode.commands.registerCommand('xdevAi.squad.workflow', () => view.open('workflow')),
+    vscode.commands.registerCommand('xdevAi.squad.customizations', () => view.open('customizations')),
     context.secrets.onDidChange(({ key }) => {
       if (key === accountStorageKey) void view.refresh();
     }),
@@ -34,6 +39,8 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
   private readonly running = new Map<Role, AbortController>();
   private readonly errors = new Map<Role, string>();
   private view?: vscode.WebviewView;
+  private requestedTab?: SquadTab;
+  private ready = false;
   private refreshId = 0;
   private actions = Promise.resolve();
 
@@ -48,16 +55,20 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
 
   resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view;
+    this.ready = false;
     const media = vscode.Uri.joinPath(this.context.extensionUri, 'media');
     view.webview.options = { enableScripts: true, localResourceRoots: [media] };
     const receiver = view.webview.onDidReceiveMessage(message => {
       if (message?.type === 'ready') {
+        this.ready = true;
+        this.showRequestedTab();
         void this.refresh();
         return;
       }
       this.actions = this.actions.then(async () => {
         if (this.view !== view) return;
-        const type = message?.type === 'squadChat' ? 'chatSettled' : 'settled';
+        const type = message?.type === 'squadChat' ? 'chatSettled' :
+          message?.type === 'workspace' ? 'workspaceSettled' : 'settled';
         try {
           await this.receive(message);
           await this.refresh();
@@ -81,6 +92,18 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
     view.webview.html = squadHtml(view.webview, media);
   }
 
+  async open(tab: SquadTab): Promise<void> {
+    this.requestedTab = tab;
+    await vscode.commands.executeCommand(`${viewId}.focus`);
+    this.showRequestedTab();
+  }
+
+  private showRequestedTab(): void {
+    if (!this.ready || !this.view?.visible || !this.requestedTab) return;
+    void this.view.webview.postMessage({ type: 'selectTab', tab: this.requestedTab });
+    this.requestedTab = undefined;
+  }
+
   dispose(): void {
     this.view = undefined;
     this.teamChat.cancel();
@@ -98,6 +121,8 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
         type: 'state',
         ...this.store.read(),
         teamChat: this.teamChat.snapshot(),
+        customizations: this.teamChat.customizations.read(),
+        nativeChatTools: typeof vscode.lm?.registerTool === 'function',
         accounts,
         running: [...this.running.keys()],
         errors: Object.fromEntries(this.errors)
@@ -124,6 +149,7 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
   private async receive(input: unknown): Promise<void> {
     if (!input || typeof input !== 'object') return;
     const message = input as Record<string, unknown>;
+    if (message.type === 'workspace') return this.updateWorkflowOrCustomizations(message);
     if (message.type === 'squadChat') {
       switch (message.action) {
         case 'send':
@@ -185,6 +211,53 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
     }
   }
 
+  private async updateWorkflowOrCustomizations(message: Record<string, unknown>): Promise<void> {
+    const squad = this.teamChat;
+    const { id, step } = message;
+    switch (message.action) {
+      case 'start': return squad.startWorkflow(message.brief);
+      case 'approve': return squad.approveStage(id, step, message.output);
+      case 'draft':
+        await squad.draftStage(id, step);
+        return;
+      case 'stop': return squad.cancel();
+      case 'copy': {
+        const { instruction, brief, approved, skills } = squad.stageRequest(id, step);
+        const text = [instruction, `Project brief\n${brief}`,
+          ...approved.map(result => `${result.stage} · approved\n${result.result}`),
+          ...skills.map(skill => `${skill.name}\n${skill.instructions}`)].join('\n\n');
+        return vscode.env.clipboard.writeText(text);
+      }
+      case 'reset': {
+        const reset = 'Reset Workflow';
+        if (await vscode.window.showWarningMessage('Reset the current SDLC workflow?', {
+          modal: true,
+          detail: 'The brief and stage results will be removed. Messages already in Squad Chat remain there.'
+        }, reset) === reset) await squad.resetWorkflow(id);
+        return;
+      }
+      case 'saveSkill': return squad.customizations.saveSkill(message);
+      case 'removeSkill': {
+        const skill = squad.customizations.read().skills.find(candidate => candidate.id === id);
+        const remove = 'Delete Skill';
+        if (skill && await vscode.window.showWarningMessage(`Delete the skill “${skill.name}”?`, { modal: true }, remove) === remove) {
+          await squad.customizations.removeSkill(id);
+        }
+        return;
+      }
+      case 'setTool': return squad.customizations.setTool(id, message.enabled);
+      case 'nativeTools':
+      case 'nativeSkills': {
+        const page = message.action === 'nativeTools' ? 'tools' : 'skills';
+        const uri = vscode.Uri.parse(`${vscode.env.uriScheme}://chat-customizations/open?page=${page}`);
+        if (!await vscode.env.openExternal(uri)) {
+          throw new Error('Open Chat: Open Customizations in a supported VS Code session.');
+        }
+        return;
+      }
+    }
+  }
+
   private async startRequest(role: Role, profileId: string, brief: string): Promise<void> {
     const { accounts } = await this.accounts.read();
     const account = accounts.find(candidate => `api:${candidate.id}` === profileId);
@@ -214,6 +287,7 @@ function squadHtml(webview: vscode.Webview, media: vscode.Uri): string {
   const nonce = randomBytes(16).toString('base64');
   const script = webview.asWebviewUri(vscode.Uri.joinPath(media, 'squad.js'));
   const chatScript = webview.asWebviewUri(vscode.Uri.joinPath(media, 'squad-chat.js'));
+  const workspaceScript = webview.asWebviewUri(vscode.Uri.joinPath(media, 'squad-workspace.js'));
   const style = webview.asWebviewUri(vscode.Uri.joinPath(media, 'squad.css'));
   return `<!doctype html>
 <html lang="en">
@@ -230,6 +304,8 @@ function squadHtml(webview: vscode.Webview, media: vscode.Uri): string {
     <nav aria-label="Squad views">
       <button type="button" id="show-chat" aria-pressed="true">Chat</button>
       <button type="button" id="show-roles" aria-pressed="false">Roles</button>
+      <button type="button" id="show-workflow" aria-pressed="false">Workflow</button>
+      <button type="button" id="show-customizations" aria-pressed="false">Skills &amp; Tools</button>
     </nav>
   </header>
   <main id="chat-panel">
@@ -307,7 +383,61 @@ function squadHtml(webview: vscode.Webview, media: vscode.Uri): string {
       <ol id="events"></ol>
     </details>
   </main>
+  <main id="workflow-panel" class="workspace-panel" hidden>
+    <ol id="workflow-stages" class="workflow-stages" aria-label="SDLC stages">${workflowStages.map(stage =>
+      `<li data-stage="${stage.name}" data-role="${stage.role}" data-instruction="${stage.instruction}"><strong>${stage.name}</strong><small>${stage.role}</small></li>`
+    ).join('')}</ol>
+    <form id="workflow-start" class="detail" hidden>
+      <label>Project brief <textarea id="workflow-brief" maxlength="${workflowBriefLimit}" rows="4" required
+        placeholder="What should ship? Include scope and acceptance criteria."></textarea></label>
+      <button type="submit" class="primary">Start workflow</button>
+    </form>
+    <section id="workflow-current" class="detail" hidden>
+      <div class="workspace-heading"><h2 id="workflow-title"></h2><button type="button" id="workflow-reset">Reset workflow</button></div>
+      <p id="workflow-instruction" class="subtle"></p>
+      <details><summary>Project brief</summary><p id="workflow-project" class="preserve-lines"></p></details>
+      <div class="actions" id="workflow-actions">
+        <button type="button" id="workflow-draft" class="primary">Draft with AI</button>
+        <button type="button" id="workflow-copy">Copy stage brief</button>
+        <button type="button" id="workflow-stop" hidden>Stop run</button>
+      </div>
+      <form id="workflow-approve">
+        <label>Stage result <textarea id="workflow-output" rows="5" maxlength="${workflowOutputLimit}" required
+          placeholder="Review the AI draft or enter the result from your terminal."></textarea></label>
+        <button type="submit" id="workflow-approve-button" class="primary">Approve stage</button>
+      </form>
+      <p id="workflow-status" class="subtle" role="status"></p>
+    </section>
+    <section id="workflow-results" class="detail" hidden><h2>Approved results</h2><div id="workflow-artifacts"></div></section>
+    <p id="workflow-notice" class="workspace-notice" role="status">Loading workflow…</p>
+  </main>
+  <main id="customizations-panel" class="workspace-panel" hidden>
+    <section class="detail">
+      <div class="workspace-heading"><h2>Workspace skills</h2><button type="button" id="add-skill" class="primary" disabled>Add skill</button></div>
+      <p class="subtle">Enabled skills are included in AI SDLC drafts for this workspace.</p>
+      <ul class="workspace-list" id="skills"></ul>
+      <form id="skill-form" hidden>
+        <label>Name <input id="skill-name" maxlength="${skillNameLimit}" required></label>
+        <label>Instructions <textarea id="skill-instructions" rows="4" maxlength="${skillInstructionsLimit}" required></textarea></label>
+        <label class="checkbox"><input id="skill-enabled" type="checkbox"> Enable for SDLC drafts</label>
+        <div class="actions"><button type="submit" class="primary">Save skill</button><button type="button" id="cancel-skill">Cancel</button></div>
+      </form>
+    </section>
+    <section class="detail">
+      <h2>Copilot tools</h2>
+      <p id="tool-hint" class="subtle"></p>
+      <ul id="squad-tools" class="workspace-list">${Object.entries(squadTools).map(([id, tool]) =>
+        `<li><label class="checkbox"><input type="checkbox" id="${id}" disabled> ${tool.name}</label><code>#${tool.reference}</code></li>`
+      ).join('')}</ul>
+      <div id="native-customizations" class="actions" hidden>
+        <button type="button" id="native-skills">VS Code Skills</button>
+        <button type="button" id="native-tools">VS Code Tools and MCP</button>
+      </div>
+    </section>
+    <p id="customizations-notice" class="workspace-notice" role="status"></p>
+  </main>
   <script nonce="${nonce}" src="${chatScript}"></script>
+  <script nonce="${nonce}" src="${workspaceScript}"></script>
   <script nonce="${nonce}" src="${script}"></script>
 </body>
 </html>`;

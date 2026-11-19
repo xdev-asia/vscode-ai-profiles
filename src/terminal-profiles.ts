@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
-import { access, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, delimiter, extname, isAbsolute, join } from 'node:path';
 
@@ -90,6 +90,17 @@ export class TerminalProfiles {
       await unlink(temporaryManifest).catch(() => undefined);
       throw error;
     }
+  }
+
+  async remove({ provider, configDir }: TerminalProfile): Promise<void> {
+    const profile = (await this.list(provider)).find(candidate => candidate.configDir === configDir);
+    if (!profile) throw new Error('This terminal profile is no longer available.');
+    const root = await realpath(this.root);
+    const target = await realpath(profile.configDir);
+    if (target !== join(root, provider, basename(profile.configDir))) {
+      throw new Error('The terminal profile points outside its account directory.');
+    }
+    await rm(target, { recursive: true, force: false, maxRetries: 3 });
   }
 }
 

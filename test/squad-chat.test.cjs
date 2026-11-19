@@ -27,7 +27,7 @@ async function setup(t, answerTask) {
     const { model, messages } = JSON.parse(options.body);
     const request = JSON.parse(messages.at(-1).content);
     requests.push({ model, auth: new Headers(options.headers).get('authorization'), request });
-    const content = model === 'lead'
+    const content = model === 'lead' && !request.instruction
       ? JSON.stringify({
         reply: 'Proposed release validation',
         tasks: [{ role: 'Tests', brief: 'Draft smoke cases' }, { role: 'Review', brief: 'Review compatibility' },
@@ -128,4 +128,53 @@ test('cancelling a tool invocation stops its run without affecting the shared ch
   assert.deepEqual(await running.finished, [{ author: 'Squad', text: 'Run stopped.' }]);
   assert.equal(chat.snapshot().busy, false);
   assert.equal(requests.length, 2);
+});
+
+test('SDLC drafts use approved results and enabled skills without advancing the workflow', async t => {
+  const { openChat, requests } = await setup(t);
+  let chat = openChat();
+  await chat.customizations.saveSkill({ name: 'API compatibility', instructions: 'Keep v1 clients working.', enabled: true });
+  await chat.customizations.saveSkill({ name: 'Timing', instructions: 'Include a timeline.', enabled: false });
+  await chat.startWorkflow('Add a paging cursor');
+  const { id } = chat.snapshot().workflow;
+  await assert.rejects(chat.startWorkflow('Another project'), /already open/);
+  await assert.rejects(chat.approveStage('old-workflow', 0, 'Stale plan'), /no longer current/);
+
+  await (await chat.draftStage(id, 0)).finished;
+  assert.deepEqual(chat.snapshot().workflow, { id, brief: 'Add a paging cursor', approved: [], draft: 'lead result' });
+  await chat.approveStage(id, 0, 'Keep offset paging and add the cursor');
+  await assert.rejects(chat.approveStage(id, 0, 'Duplicate approval'), /no longer current/);
+  chat = openChat();
+  await (await chat.draftStage(id, 1)).finished;
+  assert.equal(requests.at(-1).model, 'implement');
+  assert.deepEqual(requests.at(-1).request.approved, [{ stage: 'Plan', result: 'Keep offset paging and add the cursor' }]);
+  assert.deepEqual(requests.at(-1).request.skills, [{ name: 'API compatibility', instructions: 'Keep v1 clients working.' }]);
+  assert.equal(chat.snapshot().workflow.draft, 'implement result');
+  await chat.approveStage(id, 1, 'Add a cursor parameter and next cursor');
+  await chat.approveStage(id, 2, 'Preserve the old response format');
+  await chat.approveStage(id, 3, 'Cursor and offset tests passed');
+  await chat.approveStage(id, 4, 'Update the API changelog');
+  chat = openChat();
+  assert.equal(chat.snapshot().workflow.approved.length, 5);
+  assert.equal(chat.snapshot().entries.at(-1).text, 'SDLC stage approved · Release');
+  await assert.rejects(chat.draftStage(id, 5), /no longer current/);
+  await chat.resetWorkflow(id);
+  assert.equal(openChat().snapshot().workflow, undefined);
+});
+
+test('workspace customizations persist across sessions and disable tool use', async t => {
+  const { openChat } = await setup(t);
+  const { customizations } = openChat();
+  await customizations.saveSkill({ name: 'Review', instructions: 'Check compatibility.', enabled: true });
+  const [{ id }] = customizations.read().skills;
+  await customizations.saveSkill({ id, name: 'Review changes', instructions: 'Check migrations.', enabled: false });
+  await customizations.setTool('xdev_sdlc', false);
+
+  const { customizations: restored } = openChat();
+  assert.deepEqual(restored.read().skills, [{ id, name: 'Review changes', instructions: 'Check migrations.', enabled: false }]);
+  assert.throws(() => restored.requireTool('xdev_sdlc'), /disabled in this workspace/);
+  await restored.setTool('xdev_sdlc', true);
+  assert.doesNotThrow(() => restored.requireTool('xdev_sdlc'));
+  await restored.removeSkill(id);
+  assert.deepEqual(openChat().customizations.read().skills, []);
 });

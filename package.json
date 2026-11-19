@@ -2,7 +2,7 @@
   "name": "xdev-ai",
   "displayName": "xDev AI",
   "description": "Manage AI accounts, open Claude Code, Codex, and Gemini terminals, and coordinate AI tasks in VS Code.",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "publisher": "xdev-asia",
   "icon": "media/icon.png",
   "private": true,
@@ -38,12 +38,16 @@
       { "command": "xdevAi.manageAccounts", "title": "Manage API Profiles", "category": "xDev AI" },
       { "command": "xdevAi.openAccountChat", "title": "Open API Chat with this Profile", "category": "xDev AI", "icon": "$(comment-discussion)" },
       { "command": "xdevAi.squad.open", "title": "Open Squad", "category": "xDev AI", "icon": "$(organization)" },
+      { "command": "xdevAi.squad.workflow", "title": "Open SDLC Workflow", "category": "xDev AI" },
+      { "command": "xdevAi.squad.customizations", "title": "Manage Skills and Tools", "category": "xDev AI" },
       { "command": "xdevAi.manageTerminalAccounts", "title": "Open AI Accounts Sidebar", "category": "xDev AI", "icon": "$(account)" },
       { "command": "xdevAi.addAiAccount", "title": "Add AI Account", "category": "xDev AI", "icon": "$(add)" },
       { "command": "xdevAi.openTerminal", "title": "Open AI Terminal", "category": "xDev AI", "icon": "$(terminal)" },
       { "command": "xdevAi.checkUsage", "title": "Check AI Usage", "category": "xDev AI", "icon": "$(graph)" },
       { "command": "xdevAi.signInTerminal", "title": "Sign In to Terminal Account", "category": "xDev AI" },
-      { "command": "xdevAi.renameTerminalAccount", "title": "Rename Terminal Account", "category": "xDev AI" }
+      { "command": "xdevAi.renameTerminalAccount", "title": "Rename Terminal Account", "category": "xDev AI" },
+      { "command": "xdevAi.removeTerminalAccount", "title": "Delete Terminal Account", "category": "xDev AI", "icon": "$(trash)" },
+      { "command": "xdevAi.removeAccount", "title": "Delete API Profile", "category": "xDev AI", "icon": "$(trash)" }
     ],
     "viewsContainers": {
       "activitybar": [
@@ -74,6 +78,8 @@
         { "command": "xdevAi.addAiAccount", "when": "view == xdevAi.claude.accounts || view == xdevAi.squad", "group": "navigation@1" },
         { "command": "xdevAi.checkUsage", "when": "view == xdevAi.claude.accounts", "group": "navigation@2" },
         { "command": "xdevAi.squad.open", "when": "view == xdevAi.claude.accounts", "group": "navigation@3" },
+        { "command": "xdevAi.squad.workflow", "when": "view == xdevAi.claude.accounts", "group": "1_workspace@1" },
+        { "command": "xdevAi.squad.customizations", "when": "view == xdevAi.claude.accounts", "group": "1_workspace@2" },
         { "command": "xdevAi.addAccount", "when": "view == xdevAi.apiAccounts", "group": "navigation@1" },
         { "command": "xdevAi.chat", "when": "view == xdevAi.apiAccounts", "group": "navigation@2" },
         { "command": "xdevAi.manageTerminalAccounts", "when": "view == xdevAi.squad", "group": "navigation@2" }
@@ -81,11 +87,15 @@
       "view/item/context": [
         { "command": "xdevAi.openTerminal", "when": "view == xdevAi.claude.accounts && viewItem == aiTerminalAccount", "group": "inline@1" },
         { "command": "xdevAi.checkUsage", "when": "view == xdevAi.claude.accounts && viewItem == aiTerminalAccount", "group": "inline@2" },
+        { "command": "xdevAi.removeTerminalAccount", "when": "view == xdevAi.claude.accounts && viewItem == aiTerminalAccount", "group": "inline@3" },
         { "command": "xdevAi.signInTerminal", "when": "view == xdevAi.claude.accounts && viewItem == aiTerminalAccount", "group": "1_account@1" },
         { "command": "xdevAi.renameTerminalAccount", "when": "view == xdevAi.claude.accounts && viewItem == aiTerminalAccount", "group": "1_account@2" },
+        { "command": "xdevAi.removeTerminalAccount", "when": "view == xdevAi.claude.accounts && viewItem == aiTerminalAccount", "group": "1_account@3" },
         { "command": "xdevAi.openAccountChat", "when": "view == xdevAi.apiAccounts && viewItem == aiApiAccount", "group": "inline@1" },
+        { "command": "xdevAi.removeAccount", "when": "view == xdevAi.apiAccounts && viewItem == aiApiAccount", "group": "inline@2" },
         { "command": "xdevAi.switchAccount", "when": "view == xdevAi.apiAccounts && viewItem == aiApiAccount", "group": "1_account@1" },
-        { "command": "xdevAi.manageAccounts", "when": "view == xdevAi.apiAccounts && viewItem == aiApiAccount", "group": "1_account@2" }
+        { "command": "xdevAi.manageAccounts", "when": "view == xdevAi.apiAccounts && viewItem == aiApiAccount", "group": "1_account@2" },
+        { "command": "xdevAi.removeAccount", "when": "view == xdevAi.apiAccounts && viewItem == aiApiAccount", "group": "1_account@3" }
       ],
       "commandPalette": [
         { "command": "xdevAi.openAccountChat", "when": "false" }
@@ -126,6 +136,24 @@
           "properties": {
             "action": { "type": "string", "enum": ["view", "run", "discard"] },
             "planId": { "type": "string", "description": "The exact ID from the pending plan. Required for run and discard." }
+          },
+          "required": ["action"],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "xdev_sdlc",
+        "displayName": "xDev SDLC Workflow",
+        "toolReferenceName": "xdevSdlc",
+        "canBeReferencedInPrompt": true,
+        "userDescription": "See the current SDLC stage or draft its result with the assigned xDev Squad API profile.",
+        "modelDescription": "Use view to read progress of the xDev SDLC workflow. When the user asks to draft the current stage, first obtain its workflow ID and zero-based step using view, then call draft with those values. Drafting sends the project brief, approved results, and enabled skills to the assigned text API. It cannot approve a stage, edit files, run tests, or deploy. The user reviews and approves results under xDev Squad Workflow.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "action": { "type": "string", "enum": ["view", "draft"] },
+            "workflowId": { "type": "string", "description": "The exact workflow ID from view. Required for draft." },
+            "step": { "type": "integer", "minimum": 0, "maximum": 4, "description": "The current zero-based step from view. Required for draft." }
           },
           "required": ["action"],
           "additionalProperties": false

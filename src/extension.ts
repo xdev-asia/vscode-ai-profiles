@@ -109,11 +109,7 @@ async function manageAccounts(accounts: Accounts, item?: ApiAccountTarget): Prom
   const edit = 'Sửa tên, model hoặc API key';
   const remove = 'Xóa hồ sơ';
   const action = await vscode.window.showQuickPick([edit, remove], { title: account.name });
-  if (action === remove) {
-    if (await vscode.window.showWarningMessage(`Xóa hồ sơ “${account.name}”?`, { modal: true }, remove) === remove) {
-      await accounts.remove(account.id);
-    }
-  }
+  if (action === remove) await removeAccount(accounts, account);
   if (action === edit) {
     const name = await vscode.window.showInputBox({
       title: 'Tên hồ sơ', value: account.name, validateInput: required
@@ -129,6 +125,15 @@ async function manageAccounts(accounts: Accounts, item?: ApiAccountTarget): Prom
     });
     if (apiKey === undefined) return;
     await accounts.edit(account.id, { name: name.trim(), model: model.trim(), apiKey: apiKey.trim() || undefined });
+  }
+}
+
+async function removeAccount(accounts: Accounts, account: Account): Promise<void> {
+  const remove = 'Delete Profile';
+  if (await vscode.window.showWarningMessage(`Delete “${account.name}”?`, {
+    modal: true, detail: 'This removes the API profile and its saved key from xDev AI.'
+  }, remove) === remove) {
+    await accounts.remove(account.id);
   }
 }
 
@@ -179,7 +184,11 @@ export function activate(context: vscode.ExtensionContext): XDevAI {
       await accounts.select(account.id);
       panel.show();
     }),
-    command('xdevAi.manageAccounts', item => manageAccounts(accounts, item))
+    command('xdevAi.manageAccounts', item => manageAccounts(accounts, item)),
+    command('xdevAi.removeAccount', async item => {
+      const account = await pickAccount(accounts, 'Choose an API profile to delete', item);
+      if (account) await removeAccount(accounts, account);
+    })
   );
 
   return {

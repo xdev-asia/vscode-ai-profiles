@@ -27,7 +27,7 @@ h2 { font-size: 14px; font-weight: 600; }
 }
 
 #summary, time, .profile, .seat-state { color: var(--muted); }
-.top nav { display: flex; gap: 4px; }
+.top nav { display: flex; flex-wrap: wrap; gap: 4px; }
 .top nav button { background: transparent; color: var(--muted); }
 .top nav button[aria-pressed="true"] {
   color: var(--vscode-foreground);
@@ -53,6 +53,25 @@ h2 { font-size: 14px; font-weight: 600; }
 #approve-plan:hover:not(:disabled) { background: var(--vscode-button-hoverBackground); }
 #chat-terminal select { width: auto; max-width: 240px; }
 #chat-composer { margin-top: 0; }
+.workspace-panel { display: grid; gap: 12px; max-width: 840px; margin-inline: auto; }
+.workspace-heading, .workspace-list li { display: flex; align-items: center; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; }
+.workspace-panel .detail { display: grid; gap: 8px; }
+.workspace-panel .subtle { color: var(--muted); }
+.workspace-panel .subtle:empty, .workspace-notice:empty { display: none; }
+.workspace-panel .primary { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+.workspace-panel .primary:hover:not(:disabled) { background: var(--vscode-button-hoverBackground); }
+.workspace-panel .checkbox { display: flex; align-items: center; gap: 6px; }
+.workspace-panel input[type="checkbox"] { width: auto; }
+.workspace-list, .workflow-stages { list-style: none; margin: 0; padding: 0; }
+.workspace-list li { padding-block: 6px; border-block-end: 1px solid var(--border); }
+.workspace-list:empty { display: none; }
+.workflow-stages { display: grid; grid-template-columns: repeat(auto-fit, minmax(76px, 1fr)); gap: 6px; }
+.workflow-stages li { display: grid; gap: 2px; padding: 6px 8px; border: 1px solid var(--border); border-block-start: 3px solid var(--border); border-radius: 4px; }
+.workflow-stages small { color: var(--muted); }
+.workflow-stages li[aria-current="step"] { border-block-start-color: var(--accent); }
+.workflow-stages li.approved { border-block-start-color: var(--vscode-testing-iconPassed, var(--accent)); }
+.preserve-lines { white-space: pre-wrap; overflow-wrap: anywhere; margin-block-start: 6px; }
+.workspace-panel input:not([type="checkbox"]) { width: 100%; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--border); border-radius: 3px; padding: 6px; }
 .board, .detail, .activity { border: 1px solid var(--border); border-radius: 6px; padding: 12px; }
 .board, .activity { background: var(--surface); }
 .activity { grid-column: 1 / -1; }
