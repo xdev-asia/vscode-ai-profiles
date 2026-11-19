@@ -5,6 +5,7 @@ import { TerminalProfiles } from './terminal-profiles';
 import { registerAiTerminals } from './ai-terminal';
 import { ChatPanel } from './panel';
 import { registerSquad } from './squad-view';
+import { registerXdevMcp } from './mcp';
 import { chat, normalizeBaseUrl, providers, type ChatMessage, type ChatOptions, type Provider } from './core';
 
 export interface XDevAI {
@@ -141,7 +142,7 @@ export function activate(context: vscode.ExtensionContext): XDevAI {
   const accounts = new Accounts(context.secrets);
   const panel = new ChatPanel(context.extensionUri, accounts);
   const profiles = new TerminalProfiles(context.globalStorageUri.fsPath);
-  registerSquad(context, accounts, profiles, registerAiTerminals(context, profiles));
+  const squad = registerSquad(context, accounts, profiles, registerAiTerminals(context, profiles));
   const apiProfilesChanged = new vscode.EventEmitter<void>();
   const apiProfiles = vscode.window.createTreeView<ApiAccountItem>('xdevAi.apiAccounts', {
     treeDataProvider: {
@@ -190,6 +191,8 @@ export function activate(context: vscode.ExtensionContext): XDevAI {
       if (account) await removeAccount(accounts, account);
     })
   );
+
+  registerXdevMcp(context, squad, accounts, profiles);
 
   return {
     async listAccounts() {

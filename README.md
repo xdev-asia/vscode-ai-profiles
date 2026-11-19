@@ -36,6 +36,12 @@ Install each CLI on the workspace host. If xDev AI cannot find one, enter its ab
 
 Each account has its own configuration directory on the workspace host. The CLIs manage their sign-in, credentials, and history there. Terminal and API profiles are configured separately. [Claude Code authentication](https://code.claude.com/docs/en/authentication#log-in-with-multiple-accounts) · [Codex authentication](https://developers.openai.com/codex/auth) · [Gemini CLI authentication](https://geminicli.com/docs/get-started/authentication/)
 
+### Open a terminal with bypass permissions
+
+Right-click a signed-in terminal account and choose **Open AI Terminal with Bypass Permissions**, or choose **xDev AI: Bypass Permissions** from the terminal profile menu. Confirm the mode for the session. Use a trusted workspace, and use a separate VM or container when running Codex without its sandbox.
+
+Claude Code skips permission prompts, Codex skips approval prompts and disables its sandbox, and Gemini CLI uses YOLO approval mode. The option applies to the new terminal and uses the selected account's existing sign-in. Normal terminal and sign-in actions use the CLI defaults. Managed provider policies may restrict these modes. [Claude Code options](https://code.claude.com/docs/en/cli-reference) · [Codex CLI options](https://developers.openai.com/codex/cli/reference/) · [Gemini CLI options](https://geminicli.com/docs/reference/configuration/)
+
 ### Sign in to Claude Code from code-server
 
 1. In **Terminal Accounts**, right-click your Claude Code account and choose **Sign In to Terminal Account**. Keep the xDev AI terminal open.
@@ -83,7 +89,18 @@ If VS Code reports that the workflow command is missing after an update, check *
 ### Manage Skills and Tools
 
 - Under **xDev Squad → Skills & Tools**, add, edit, disable, or delete workspace skills. A skill is a named set of instructions that xDev AI includes in SDLC drafting when enabled.
-- Use the tool switches to control Copilot access to **Ask xDev Squad**, **Manage xDev Squad Plan**, and **xDev SDLC Workflow** in this workspace. In supported VS Code versions, use the panel shortcuts to open native **Agent Skills** and **Tools & MCP** management. [VS Code agent customizations](https://code.visualstudio.com/docs/agent-customization/overview)
+- Use the tool switches to control Copilot access to **Ask xDev Squad**, **Manage xDev Squad Plan**, and **xDev SDLC Workflow** in this workspace. The SDLC switch also controls MCP access to the workflow. In supported VS Code versions, use the panel shortcuts to open native **Agent Skills** and **Tools & MCP** management. [VS Code agent customizations](https://code.visualstudio.com/docs/agent-customization/overview)
+
+### Control the workflow through MCP
+
+1. In a trusted workspace, open **xDev Squad → Skills & Tools → Manage MCP** or run **xDev AI: Manage MCP**. Choose **Start MCP**.
+2. In VS Code builds with native MCP support, run **MCP: List Servers** and start **xDev AI** if needed. Select its tools in Copilot Agent Chat. [VS Code MCP server management](https://code.visualstudio.com/docs/agents/run/manage-mcp-servers)
+3. For a terminal client, reopen **Manage MCP** and choose **Copy Client Configuration**, then choose Claude Code, Codex, or Gemini CLI. Merge the snippet into the client's private config on the workspace host. For an xDev terminal profile, use `$CODEX_HOME/config.toml` for Codex or `$GEMINI_CLI_HOME/.gemini/settings.json` for Gemini CLI. In Claude Code, you can use `claude mcp add-json xdev_ai '<server definition>'` with the `mcpServers.xdev_ai` object from the snippet. Restart the client or refresh its MCP connections. [Claude Code configuration](https://code.claude.com/docs/en/mcp) · [Codex configuration](https://developers.openai.com/codex/config-reference/) · [Gemini CLI configuration](https://geminicli.com/docs/tools/mcp-server/)
+4. Ask your agent to “Use xDev AI to show the current SDLC stage and submit a draft for review.” The draft appears in **Workflow**. Approve it there, or ask the agent to request approval in a VS Code dialog.
+
+The MCP server exposes workflow status, start, stage context, draft submission, approval requests, and account aliases. It shares the same workspace state as the Squad panel. A confirmed approval advances the current stage. The server exposes no account credentials or shell execution tools. Stage context includes the project brief, excerpts of approved results, and enabled skills, so only connect clients you trust with that context.
+
+MCP listens on a loopback address on the workspace host, including on code-server. The client must run on that same host. Keep the copied configuration private and out of source control. **Stop MCP** ends access and invalidates the token. Reloading the window stops the server. A new start issues a new address and token.
 
 ### Manage a role manually
 

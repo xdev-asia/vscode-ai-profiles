@@ -5,7 +5,18 @@ const { tmpdir } = require('node:os');
 const { basename, dirname, join } = require('node:path');
 const { test } = require('node:test');
 const { claudeLoginScript } = require('../dist/claude-login.js');
-const { TerminalProfiles, terminalProfileId, terminalProfileEnv, findTerminalExecutable } = require('../dist/terminal-profiles.js');
+const { TerminalProfiles, terminalArguments, terminalProfileId, terminalProfileEnv, findTerminalExecutable } = require('../dist/terminal-profiles.js');
+
+test('bypass uses fixed provider flags for one session and preserves normal sign-in', () => {
+  assert.deepEqual(terminalArguments('claude', 'bypass', true), ['--dangerously-skip-permissions']);
+  assert.deepEqual(terminalArguments('codex', 'bypass', false), [
+    '-c', 'cli_auth_credentials_store=file', '--dangerously-bypass-approvals-and-sandbox'
+  ]);
+  assert.deepEqual(terminalArguments('gemini', 'bypass', false), ['--approval-mode=yolo']);
+  assert.deepEqual(terminalArguments('claude', 'open', true), []);
+  assert.deepEqual(terminalArguments('claude', 'signIn', true), ['auth', 'login', '--claudeai']);
+  assert.deepEqual(terminalArguments('codex', 'signIn', true), ['-c', 'cli_auth_credentials_store=file', 'login', '--device-auth']);
+});
 
 test('Claude profiles remain independent across VS Code windows', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'xdev-claude-'));

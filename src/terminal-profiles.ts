@@ -13,6 +13,23 @@ export const terminalProviders = {
 export type TerminalProvider = keyof typeof terminalProviders;
 export const terminalProviderIds = Object.keys(terminalProviders) as TerminalProvider[];
 
+const bypassArguments: Record<TerminalProvider, readonly string[]> = {
+  claude: ['--dangerously-skip-permissions'],
+  codex: ['--dangerously-bypass-approvals-and-sandbox'],
+  gemini: ['--approval-mode=yolo']
+};
+
+export function terminalArguments(provider: TerminalProvider, launch: 'open' | 'signIn' | 'bypass', remote: boolean): string[] {
+  const args = provider === 'codex' ? ['-c', 'cli_auth_credentials_store=file'] : [];
+  if (launch === 'bypass') args.push(...bypassArguments[provider]);
+  if (launch === 'signIn' && provider === 'codex') {
+    args.push('login');
+    if (remote) args.push('--device-auth');
+  }
+  if (launch === 'signIn' && provider === 'claude') args.push('auth', 'login', '--claudeai');
+  return args;
+}
+
 export interface TerminalProfile {
   provider: TerminalProvider;
   name: string;

@@ -94,12 +94,13 @@ function mountSquadWorkspace(vscode) {
     byId('add-skill').disabled = Boolean(pending);
     for (const control of skillForm.elements) control.disabled = Boolean(pending);
     byId('tool-hint').textContent = nativeTools.length
-      ? 'Set which xDev tools Copilot can call in this workspace.'
-      : 'Copilot tools require a supported VS Code chat session. Use the Squad tabs in this workspace.';
+      ? 'Set which xDev tools Copilot can call. The SDLC switch also controls the MCP workflow tools.'
+      : 'The SDLC switch controls MCP workflow access. Copilot tools require a supported chat session.';
     byId('native-customizations').hidden = !nativeTools.length;
     byId('native-tools').disabled = byId('native-skills').disabled = Boolean(pending);
+    byId('manage-mcp').disabled = Boolean(pending);
     for (const tool of tools) {
-      const available = nativeTools.includes(tool.id);
+      const available = tool.id === 'xdev_sdlc' || nativeTools.includes(tool.id);
       tool.disabled = !available || Boolean(pending);
       tool.checked = available && !disabledTools.includes(tool.id);
     }
@@ -167,6 +168,7 @@ function mountSquadWorkspace(vscode) {
     tool.addEventListener('change', () => send('setTool', { id: tool.id, enabled: tool.checked }));
   }
   byId('native-tools').addEventListener('click', () => send('nativeTools'));
+  byId('manage-mcp').addEventListener('click', () => send('manageMcp'));
   byId('native-skills').addEventListener('click', () => send('nativeSkills'));
   return { render, settle, loadError(error) {
     byId('workflow-notice').textContent = error;

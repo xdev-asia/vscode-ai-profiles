@@ -2,7 +2,7 @@
   "name": "xdev-ai",
   "displayName": "xDev AI",
   "description": "Manage AI accounts, open Claude Code, Codex, and Gemini terminals, and coordinate AI tasks in VS Code.",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "publisher": "xdev-asia",
   "icon": "media/icon.png",
   "private": true,
@@ -40,9 +40,11 @@
       { "command": "xdevAi.squad.open", "title": "Open Squad", "category": "xDev AI", "icon": "$(organization)" },
       { "command": "xdevAi.squad.workflow", "title": "Open SDLC Workflow", "category": "xDev AI" },
       { "command": "xdevAi.squad.customizations", "title": "Manage Skills and Tools", "category": "xDev AI" },
+      { "command": "xdevAi.manageMcp", "title": "Manage MCP", "category": "xDev AI", "icon": "$(plug)" },
       { "command": "xdevAi.manageTerminalAccounts", "title": "Open AI Accounts Sidebar", "category": "xDev AI", "icon": "$(account)" },
       { "command": "xdevAi.addAiAccount", "title": "Add AI Account", "category": "xDev AI", "icon": "$(add)" },
       { "command": "xdevAi.openTerminal", "title": "Open AI Terminal", "category": "xDev AI", "icon": "$(terminal)" },
+      { "command": "xdevAi.openTerminalBypass", "title": "Open AI Terminal with Bypass Permissions", "category": "xDev AI" },
       { "command": "xdevAi.checkUsage", "title": "Check AI Usage", "category": "xDev AI", "icon": "$(graph)" },
       { "command": "xdevAi.signInTerminal", "title": "Sign In to Terminal Account", "category": "xDev AI" },
       { "command": "xdevAi.renameTerminalAccount", "title": "Rename Terminal Account", "category": "xDev AI" },
@@ -80,6 +82,7 @@
         { "command": "xdevAi.squad.open", "when": "view == xdevAi.claude.accounts", "group": "navigation@3" },
         { "command": "xdevAi.squad.workflow", "when": "view == xdevAi.claude.accounts", "group": "1_workspace@1" },
         { "command": "xdevAi.squad.customizations", "when": "view == xdevAi.claude.accounts", "group": "1_workspace@2" },
+        { "command": "xdevAi.manageMcp", "when": "view == xdevAi.claude.accounts || view == xdevAi.squad", "group": "1_workspace@3" },
         { "command": "xdevAi.addAccount", "when": "view == xdevAi.apiAccounts", "group": "navigation@1" },
         { "command": "xdevAi.chat", "when": "view == xdevAi.apiAccounts", "group": "navigation@2" },
         { "command": "xdevAi.manageTerminalAccounts", "when": "view == xdevAi.squad", "group": "navigation@2" }
@@ -91,6 +94,7 @@
         { "command": "xdevAi.signInTerminal", "when": "view == xdevAi.claude.accounts && viewItem == aiTerminalAccount", "group": "1_account@1" },
         { "command": "xdevAi.renameTerminalAccount", "when": "view == xdevAi.claude.accounts && viewItem == aiTerminalAccount", "group": "1_account@2" },
         { "command": "xdevAi.removeTerminalAccount", "when": "view == xdevAi.claude.accounts && viewItem == aiTerminalAccount", "group": "1_account@3" },
+        { "command": "xdevAi.openTerminalBypass", "when": "view == xdevAi.claude.accounts && viewItem == aiTerminalAccount && isWorkspaceTrusted", "group": "1_account@4" },
         { "command": "xdevAi.openAccountChat", "when": "view == xdevAi.apiAccounts && viewItem == aiApiAccount", "group": "inline@1" },
         { "command": "xdevAi.removeAccount", "when": "view == xdevAi.apiAccounts && viewItem == aiApiAccount", "group": "inline@2" },
         { "command": "xdevAi.switchAccount", "when": "view == xdevAi.apiAccounts && viewItem == aiApiAccount", "group": "1_account@1" },
@@ -104,9 +108,13 @@
     "terminal": {
       "profiles": [
         { "id": "xdevAi.terminal", "title": "xDev AI: Choose Account", "icon": "terminal" },
+        { "id": "xdevAi.terminal.bypass", "title": "xDev AI: Bypass Permissions", "icon": "warning" },
         { "id": "xdevAi.claude.terminal", "title": "xDev AI: Claude Code", "icon": "terminal" }
       ]
     },
+    "mcpServerDefinitionProviders": [
+      { "id": "xdevAi.mcp", "label": "xDev AI" }
+    ],
     "languageModelTools": [
       {
         "name": "xdev_squad_ask",
@@ -185,16 +193,18 @@
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/bundle-mcp.cjs",
     "test": "npm run build && node --test",
     "vscode:prepublish": "npm run build",
     "prepack": "npm run build",
     "package": "vsce package --no-dependencies"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
     "@types/node": "^20.19.43",
     "@types/vscode": "1.95.0",
     "@vscode/vsce": "4.1.1",
+    "esbuild": "0.28.2",
     "typescript": "5.9.3"
   }
 }

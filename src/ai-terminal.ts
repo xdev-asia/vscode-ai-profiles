@@ -2,11 +2,11 @@ import { extname, join } from 'node:path';
 import * as vscode from 'vscode';
 import { claudeLoginScript } from './claude-login';
 import {
-  findTerminalExecutable, terminalProfileEnv, terminalProfileId, terminalProviderIds, terminalProviders,
+  findTerminalExecutable, terminalArguments, terminalProfileEnv, terminalProfileId, terminalProviderIds, terminalProviders,
   validTerminalProfileName, type TerminalProfile, type TerminalProfiles, type TerminalProvider
 } from './terminal-profiles';
 
-type Action = 'add' | 'open' | 'signIn' | 'usage' | 'rename' | 'remove';
+type Action = 'add' | 'open' | 'bypass' | 'signIn' | 'usage' | 'rename' | 'remove';
 type AccountTarget = TerminalAccountItem | string;
 const accountsViewId = 'xdevAi.claude.accounts';
 
@@ -65,7 +65,7 @@ export function registerAiTerminals(context: vscode.ExtensionContext, profiles: 
     }
     const title = {
       add: 'Add AI Account', open: 'Choose an AI terminal account', signIn: 'Choose an account to sign in',
-      usage: 'Choose an account to check usage', rename: 'Choose an account to rename',
+      bypass: 'Choose an account for a bypass session', usage: 'Choose an account to check usage', rename: 'Choose an account to rename',
       remove: 'Choose a terminal account to delete'
     }[action];
     const choices: (vscode.QuickPickItem & { profile?: TerminalProfile })[] = accounts.map(profile => ({
@@ -99,6 +99,8 @@ export function registerAiTerminals(context: vscode.ExtensionContext, profiles: 
     token?: vscode.CancellationToken,
     provider?: TerminalProvider
   ): Promise<{ options: vscode.TerminalOptions; provider: TerminalProvider; signIn: boolean } | undefined> {
+    const bypass = action === 'bypass';
+    if (bypass && !vscode.workspace.isTrusted) throw new Error('Trust this workspace before opening a bypass session.');
     let profile: TerminalProfile | undefined;
     if (action !== 'add') {
       const choice = await selectProfile(action, provider, target, token);
@@ -133,22 +135,24 @@ export function registerAiTerminals(context: vscode.ExtensionContext, profiles: 
     }
     if (token?.isCancellationRequested) return;
 
-    const args: string[] = [];
-    if (provider === 'codex') {
-      args.push('-c', 'cli_auth_credentials_store=file');
-      if (signIn) {
-        args.push('login');
-        if (vscode.env.remoteName || vscode.env.uiKind === vscode.UIKind.Web) args.push('--device-auth');
-      }
+    if (bypass) {
+      const open = 'Open with Bypass';
+      if (await vscode.window.showWarningMessage(`Open ${name} for “${profile.name}” with bypass permissions?`, {
+        modal: true,
+        detail: provider === 'codex'
+          ? 'This session skips approval prompts and disables the Codex sandbox on the workspace host.'
+          : 'This session enables the CLI’s automatic tool approvals on the workspace host.'
+      }, open) !== open || token?.isCancellationRequested) return;
     }
-    if (provider === 'claude' && signIn) args.push('auth', 'login', '--claudeai');
+    const remote = Boolean(vscode.env.remoteName) || vscode.env.uiKind === vscode.UIKind.Web;
+    const args = terminalArguments(provider, signIn ? 'signIn' : bypass ? 'bypass' : 'open', remote);
     const env = terminalProfileEnv(profile);
     let shellPath = cli;
     let shellArgs = args;
     if (process.platform === 'win32' && extname(cli).toLowerCase() === '.cmd') {
       shellPath = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
       env.XDEV_AI_CLI_PATH = cli;
-      // Only provider arguments defined above reach this PowerShell command.
+      // Only fixed provider arguments reach this PowerShell command.
       const argumentsLiteral = args.map(argument => `'${argument}'`).join(' ');
       shellArgs = ['-NoLogo', '-NoProfile', '-Command', `& $env:XDEV_AI_CLI_PATH ${argumentsLiteral}; exit $LASTEXITCODE`];
     }
@@ -163,7 +167,7 @@ export function registerAiTerminals(context: vscode.ExtensionContext, profiles: 
       provider,
       signIn,
       options: {
-        name: signIn ? `${name} · Sign in · ${profile.name}` : `${name} · ${profile.name}`,
+        name: [name, signIn ? 'Sign in' : bypass ? 'Bypass' : '', profile.name].filter(Boolean).join(' · '),
         shellPath,
         shellArgs,
         cwd: folder?.uri,
@@ -226,10 +230,10 @@ export function registerAiTerminals(context: vscode.ExtensionContext, profiles: 
   const command = (id: string, action: Action, provider?: TerminalProvider) =>
     vscode.commands.registerCommand(id, (target?: AccountTarget) => run(action, provider, target));
   const focus = () => vscode.commands.executeCommand(`${accountsViewId}.focus`);
-  const terminalProvider = (provider?: TerminalProvider): vscode.TerminalProfileProvider => ({
+  const terminalProvider = (provider?: TerminalProvider, action: 'open' | 'bypass' = 'open'): vscode.TerminalProfileProvider => ({
     async provideTerminalProfile(token) {
       try {
-        const terminal = await prepareTerminal('open', undefined, token, provider);
+        const terminal = await prepareTerminal(action, undefined, token, provider);
         return terminal ? new vscode.TerminalProfile(terminal.options) : undefined;
       } catch (error) {
         void vscode.window.showErrorMessage(error instanceof Error ? error.message : 'Unable to open the AI terminal.');
@@ -250,11 +254,13 @@ export function registerAiTerminals(context: vscode.ExtensionContext, profiles: 
     vscode.commands.registerCommand('xdevAi.manageTerminalAccounts', focus),
     command('xdevAi.addAiAccount', 'add'),
     command('xdevAi.openTerminal', 'open'),
+    command('xdevAi.openTerminalBypass', 'bypass'),
     command('xdevAi.signInTerminal', 'signIn'),
     command('xdevAi.checkUsage', 'usage'),
     command('xdevAi.renameTerminalAccount', 'rename'),
     command('xdevAi.removeTerminalAccount', 'remove'),
     vscode.window.registerTerminalProfileProvider('xdevAi.terminal', terminalProvider()),
+    vscode.window.registerTerminalProfileProvider('xdevAi.terminal.bypass', terminalProvider(undefined, 'bypass')),
     // Keep the commands and profile used by older VS Code settings and workflows.
     vscode.commands.registerCommand('xdevAi.claude.manageAccounts', focus),
     command('xdevAi.claude.addAccount', 'add', 'claude'),

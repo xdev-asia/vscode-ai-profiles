@@ -14,7 +14,7 @@ type SquadTab = 'workflow' | 'customizations';
 
 export function registerSquad(
   context: vscode.ExtensionContext, accounts: Accounts, profiles: TerminalProfiles, onProfilesChanged: vscode.Event<void>
-): void {
+): SquadChat {
   const view = new SquadView(context, accounts, profiles);
   context.subscriptions.push(
     view,
@@ -31,6 +31,7 @@ export function registerSquad(
     })
   );
   view.registerChatTools();
+  return view.teamChat;
 }
 
 class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
@@ -251,6 +252,7 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
         return;
       }
       case 'setTool': return squad.customizations.setTool(id, message.enabled);
+      case 'manageMcp': return vscode.commands.executeCommand('xdevAi.manageMcp');
       case 'nativeTools':
       case 'nativeSkills': {
         const page = message.action === 'nativeTools' ? 'tools' : 'skills';
@@ -429,7 +431,7 @@ function squadHtml(webview: vscode.Webview, media: vscode.Uri): string {
       </form>
     </section>
     <section class="detail">
-      <h2>Copilot tools</h2>
+      <h2>Copilot and MCP tools</h2>
       <p id="tool-hint" class="subtle"></p>
       <ul id="squad-tools" class="workspace-list">${Object.entries(squadTools).map(([id, tool]) =>
         `<li><label class="checkbox"><input type="checkbox" id="${id}" disabled> ${tool.name}</label><code>#${tool.reference}</code></li>`
@@ -438,6 +440,10 @@ function squadHtml(webview: vscode.Webview, media: vscode.Uri): string {
         <button type="button" id="native-skills">VS Code Skills</button>
         <button type="button" id="native-tools">VS Code Tools and MCP</button>
       </div>
+    </section>
+    <section class="detail">
+      <h2>xDev AI MCP</h2>
+      <div class="actions"><button type="button" id="manage-mcp">Manage MCP</button></div>
     </section>
     <p id="customizations-notice" class="workspace-notice" role="status"></p>
   </main>

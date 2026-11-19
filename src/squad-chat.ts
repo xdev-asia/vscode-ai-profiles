@@ -206,11 +206,25 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
     });
   }
 
-  approveStage(id: unknown, step: unknown, input: unknown): Promise<void> {
+  submitStageDraft(id: unknown, step: unknown, input: unknown): Promise<void> {
+    this.requireIdle();
+    const output = workflowText(input, workflowOutputLimit, 'a stage draft');
+    return this.write(state => {
+      const { workflow, stage } = this.currentStage(state, id, step);
+      if (workflow.draft) throw new Error('There is already a draft for this stage. Review it in Workflow.');
+      this.workflowIssue = undefined;
+      workflow.draft = output;
+      state.entries.push({ author: 'Squad', text: `SDLC stage draft submitted · ${stage.name}` });
+    });
+  }
+
+  approveStage(id: unknown, step: unknown, input: unknown, approval?: { draft: string; signal: AbortSignal }): Promise<void> {
     this.requireIdle();
     const output = workflowText(input, workflowOutputLimit, 'a stage result');
     return this.write(state => {
       const { workflow, stage } = this.currentStage(state, id, step);
+      approval?.signal.throwIfAborted();
+      if (approval && workflow.draft !== approval.draft) throw new Error('The stage draft has changed.');
       workflow.approved.push(output);
       workflow.draft = undefined;
       state.entries.push({ author: 'Squad', text: `SDLC stage approved · ${stage.name}` });
