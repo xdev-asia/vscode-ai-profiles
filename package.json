@@ -2,7 +2,7 @@
   "name": "xdev-ai",
   "displayName": "xDev AI",
   "description": "Chat with AI providers and open Claude Code terminals for multiple accounts in VS Code.",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "publisher": "xdev-asia",
   "private": true,
   "license": "Apache-2.0",
@@ -30,14 +30,45 @@
   "files": ["dist", "media", "LICENSE"],
   "contributes": {
     "commands": [
-      { "command": "xdevAi.chat", "title": "Open Chat", "category": "xDev AI" },
+      { "command": "xdevAi.chat", "title": "Open Chat", "category": "xDev AI", "icon": "$(comment-discussion)" },
       { "command": "xdevAi.addAccount", "title": "Add Account", "category": "xDev AI" },
       { "command": "xdevAi.switchAccount", "title": "Switch Account", "category": "xDev AI" },
       { "command": "xdevAi.manageAccounts", "title": "Manage Accounts", "category": "xDev AI" },
-      { "command": "xdevAi.claude.addAccount", "title": "Add Claude Account", "category": "xDev AI" },
-      { "command": "xdevAi.claude.openTerminal", "title": "Open Claude Terminal", "category": "xDev AI" },
-      { "command": "xdevAi.claude.signIn", "title": "Sign In to Claude Account", "category": "xDev AI" }
+      { "command": "xdevAi.claude.manageAccounts", "title": "Manage Claude Accounts", "category": "xDev AI", "icon": "$(account)" },
+      { "command": "xdevAi.claude.addAccount", "title": "Add Claude Account", "category": "xDev AI", "icon": "$(add)" },
+      { "command": "xdevAi.claude.openTerminal", "title": "Open Claude Terminal", "category": "xDev AI", "icon": "$(terminal)" },
+      { "command": "xdevAi.claude.usage", "title": "Check Claude Usage", "category": "xDev AI", "icon": "$(graph)" },
+      { "command": "xdevAi.claude.signIn", "title": "Sign In to Claude Account", "category": "xDev AI" },
+      { "command": "xdevAi.claude.renameAccount", "title": "Rename Claude Account", "category": "xDev AI" }
     ],
+    "viewsContainers": {
+      "panel": [
+        { "id": "xdev-ai", "title": "xDev AI", "icon": "$(account)" }
+      ]
+    },
+    "views": {
+      "xdev-ai": [
+        { "id": "xdevAi.claude.accounts", "name": "Claude Accounts" }
+      ]
+    },
+    "viewsWelcome": [
+      { "view": "xdevAi.claude.accounts", "contents": "Add a Claude Code account to open its own terminal.\n[Add Claude Account](command:xdevAi.claude.addAccount)" }
+    ],
+    "menus": {
+      "view/title": [
+        { "command": "xdevAi.claude.manageAccounts", "when": "view == terminal", "group": "navigation@20" },
+        { "command": "xdevAi.claude.openTerminal", "when": "view == terminal", "group": "navigation@21" },
+        { "command": "xdevAi.claude.addAccount", "when": "view == xdevAi.claude.accounts", "group": "navigation@1" },
+        { "command": "xdevAi.claude.usage", "when": "view == xdevAi.claude.accounts", "group": "navigation@2" },
+        { "command": "xdevAi.chat", "when": "view == xdevAi.claude.accounts", "group": "navigation@3" }
+      ],
+      "view/item/context": [
+        { "command": "xdevAi.claude.openTerminal", "when": "view == xdevAi.claude.accounts && viewItem == claudeAccount", "group": "inline@1" },
+        { "command": "xdevAi.claude.usage", "when": "view == xdevAi.claude.accounts && viewItem == claudeAccount", "group": "inline@2" },
+        { "command": "xdevAi.claude.signIn", "when": "view == xdevAi.claude.accounts && viewItem == claudeAccount", "group": "1_account@1" },
+        { "command": "xdevAi.claude.renameAccount", "when": "view == xdevAi.claude.accounts && viewItem == claudeAccount", "group": "1_account@2" }
+      ]
+    },
     "terminal": {
       "profiles": [{ "id": "xdevAi.claude.terminal", "title": "xDev AI: Claude Code", "icon": "terminal" }]
     },

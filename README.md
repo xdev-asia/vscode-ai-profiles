@@ -19,9 +19,12 @@ The extension ID changed to `xdev-asia.xdev-ai` in v0.2.1. If you installed the 
 ## Use multiple Claude Code accounts
 
 1. Install Claude Code on the workspace host. On Windows, use the native installation with `claude.exe`. If xDev AI cannot find the CLI, set `xdevAi.claudeExecutable` to its absolute path in User Settings or Remote Settings. [Claude Code installation](https://code.claude.com/docs/en/setup)
-2. Run **xDev AI: Add Claude Account**, name the profile, and complete the claude.ai sign-in in your browser. Repeat for each account. On a server without a browser, open the URL Claude Code prints in the terminal and follow its instructions.
-3. Run **xDev AI: Open Claude Terminal** and select an account. You can also choose **xDev AI: Claude Code** from the menu next to **+** in the Terminal panel or click **Claude Code** in the xDev AI tab. You can keep multiple terminals open at once. Run `/status` in Claude Code to see which account the terminal is using.
-4. Run **xDev AI: Sign In to Claude Account** to sign in again for an existing profile.
+2. Open the **xDev AI** tab in the bottom panel next to **Terminal**, then click **Add Claude Account**. Name the profile and complete the claude.ai sign-in in your browser. Repeat for each account. On a server without a browser, open the URL Claude Code prints in the terminal and follow its instructions.
+3. Select an account in the **xDev AI** panel to open its terminal. You can also use **Open Claude Terminal** on the Terminal toolbar or **xDev AI: Claude Code** from the menu next to **+**. You can keep multiple terminals open at once. Run `/status` in Claude Code to see which account the terminal is using.
+4. Right-click an account to rename it or sign in again. Renaming a profile keeps its Claude Code configuration and session history.
+5. Click **Check Claude Usage** next to an account, then enter `/usage` in the terminal that opens. Claude Code shows the usage and limits for that account. [Claude Code usage](https://code.claude.com/docs/en/costs#using-the-usage-command)
+
+Use **Manage Claude Accounts** on the Terminal toolbar or run **xDev AI: Manage Claude Accounts** from the Command Palette to return to the account list. The panel toolbar also opens the API chat.
 
 Each profile uses a separate `CLAUDE_CONFIG_DIR` on the workspace host. Claude Code handles claude.ai sign-in and manages its credentials and session history there. Desktop and server profiles have separate sign-in sessions. [Anthropic's guide to multiple accounts](https://code.claude.com/docs/en/authentication#log-in-with-multiple-accounts)
 

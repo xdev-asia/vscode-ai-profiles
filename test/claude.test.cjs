@@ -23,7 +23,10 @@ test('Claude profiles remain independent across VS Code windows', async t => {
   assert.deepEqual(await secondWindow.list(), [personal, work]);
   assert.equal(claudeTerminalEnv(personal.configDir).CLAUDE_CONFIG_DIR, personal.configDir);
   assert.equal(claudeTerminalEnv(work.configDir).CLAUDE_CONFIG_DIR, work.configDir);
+  await secondWindow.rename(work.configDir, '  Work  ');
+  assert.deepEqual(await firstWindow.list(), [personal, { name: 'Work', configDir: work.configDir }]);
   assert.equal(await readFile(join(work.configDir, 'settings.json'), 'utf8'), '{"account":"work"}');
+  await assert.rejects(firstWindow.rename(dir, 'Outside the store'), /Không tìm thấy/);
   await assert.rejects(firstWindow.add('bad\nname'), /một dòng/);
 });
 

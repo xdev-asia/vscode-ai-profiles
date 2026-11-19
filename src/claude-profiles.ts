@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
-import { access, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { delimiter, extname, isAbsolute, join } from 'node:path';
 
@@ -51,6 +51,24 @@ export class ClaudeProfiles {
     await mkdir(configDir, { mode: 0o700 });
     await writeFile(join(configDir, manifestName), JSON.stringify({ name }), { mode: 0o600, flag: 'wx' });
     return { name, configDir };
+  }
+
+  async rename(configDir: string, name: string): Promise<void> {
+    name = name.trim();
+    if (!validClaudeProfileName(name)) {
+      throw new Error('Tên hồ sơ cần có từ 1 đến 80 ký tự và chỉ nằm trên một dòng.');
+    }
+    if (!(await this.list()).some(profile => profile.configDir === configDir)) {
+      throw new Error('Không tìm thấy hồ sơ Claude.');
+    }
+    const temporaryManifest = join(configDir, `${randomUUID()}.tmp`);
+    try {
+      await writeFile(temporaryManifest, JSON.stringify({ name }), { mode: 0o600, flag: 'wx' });
+      await rename(temporaryManifest, join(configDir, manifestName));
+    } catch (error) {
+      await unlink(temporaryManifest).catch(() => undefined);
+      throw error;
+    }
   }
 }
 
