@@ -18,7 +18,7 @@ The extension ID changed to `xdev-asia.xdev-ai` in v0.2.1. If you installed the 
 
 ## Manage AI accounts
 
-Open **xDev AI** in the Activity Bar. The sidebar contains **Terminal Accounts** and **API Profiles**. To move either view to the right, right-click its title and choose **Move View → Secondary Side Bar**.
+Open **xDev AI** in the Activity Bar. The sidebar contains **Terminal Accounts** and **API Profiles**. To move a view to the right, run **View: Move View** from the Command Palette, select the view, and choose **New Secondary Side Bar Entry**.
 
 1. Click **Add AI Account (+)** next to **Terminal Accounts**. Choose **Claude Code**, **Codex**, **Gemini CLI**, or **API Profile**. For a terminal account, give the profile a name and complete sign-in with the provider. Gemini opens its authentication menu in the terminal. Codex uses device code sign-in on remote hosts and code-server, which requires device code sign-in to be enabled for the account.
 2. Select an account to open its terminal. Use the **xDev AI** status bar item, **Open AI Terminal** on the Terminal toolbar, or **xDev AI: Choose Account** in the terminal profile menu to pick an account without opening the sidebar.
