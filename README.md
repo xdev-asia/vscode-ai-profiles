@@ -4,11 +4,13 @@ A VS Code extension that opens Claude Code terminals for individual accounts and
 
 ## Installation
 
-Use VS Code **1.95 or later**, or a code-server release that includes VS Code 1.95 or later. Download the `.vsix` from [GitHub Releases](https://github.com/xdev-asia/vscode-ai-profiles/releases), or build it locally with `npm ci` and `npm run package`.
+Use VS Code **1.95 or later**, or a code-server release that includes VS Code 1.95 or later. Search Extensions for `xdev-asia.xdev-ai`.
 
-- **VS Code Desktop.** Run **Extensions: Install from VSIX…** from the Command Palette and select the downloaded `.vsix` file.
-- **VS Code Remote.** Open a workspace over Remote SSH, WSL, Dev Containers, or Remote Tunnels. Run **Extensions: Install from VSIX…** in the remote window, then confirm xDev AI appears under the remote host in the Extensions view.
-- **code-server.** Copy the VSIX to the server and run `code-server --install-extension xdev-ai-0.2.2.vsix`, substituting your downloaded filename. Reload the browser window.
+- **VS Code Desktop.** Install from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=xdev-asia.xdev-ai).
+- **VS Code Remote.** Open your remote workspace and install xDev AI under the remote host in the Extensions view.
+- **code-server.** Install from [Open VSX](https://open-vsx.org/extension/xdev-asia/xdev-ai) through the Extensions view or run `code-server --install-extension xdev-asia.xdev-ai` on the server.
+
+For manual installation, download the `.vsix` from [GitHub Releases](https://github.com/xdev-asia/vscode-ai-profiles/releases) and run **Extensions: Install from VSIX…** in your workspace. On code-server you can also run `code-server --install-extension <path-to-vsix>`.
 
 The extension runs on the machine that hosts the workspace. For remote workspaces, that machine needs access to the provider's API and resolves any `localhost` addresses in custom endpoints. [VS Code Remote](https://code.visualstudio.com/api/advanced-topics/remote-extensions) · [code-server installation](https://coder.com/docs/code-server/FAQ#how-do-i-install-an-extension-manually)
 
@@ -81,7 +83,7 @@ npm run package
 [GitHub Actions](https://github.com/xdev-asia/vscode-ai-profiles/actions/workflows/publish.yml) tests and packages every pull request and push to `main`. Push a version tag such as `v0.2.2` that matches `package.json` to attach the tested VSIX to a GitHub Release and publish the same file to both registries.
 
 - **VS Code Marketplace.** Create or select the `xdev-asia` publisher and add a Trusted Publishing policy in [Manage Publishers & Extensions](https://marketplace.visualstudio.com/manage). Set the repository owner to `xdev-asia`, repository to `vscode-ai-profiles`, and workflow to `publish.yml`. Leave the environment blank.
-- **Open VSX (code-server).** Declare the extension license in `package.json` and include the license file. Sign the [Open VSX Publisher Agreement](https://open-vsx.org/publisher-agreement-v1.1), create the `xdev-asia` namespace, and save the access token as `OVSX_PAT` in the [repository's Actions secrets](https://github.com/xdev-asia/vscode-ai-profiles/settings/secrets/actions) for the first release. After the first version is active, the namespace owner can register the same owner, repository, and workflow for `xdev-asia.xdev-ai` under [Trusted Publishers](https://open-vsx.org/user-settings/trusted-publishers). Remove `OVSX_PAT` after registration to use short-lived credentials for subsequent releases. [Open VSX trusted publishing](https://github.com/eclipse-openvsx/openvsx/wiki/Trusted-Publishing)
+- **Open VSX (code-server).** Declare the extension license in `package.json` and include the license file. Sign the [Open VSX Publisher Agreement](https://open-vsx.org/publisher-agreement-v1.1) and create the `xdev-asia` namespace. Publish the first VSIX through the [Open VSX upload page](https://open-vsx.org/publish), or save an Open VSX access token as `OVSX_PAT` in the [repository's Actions secrets](https://github.com/xdev-asia/vscode-ai-profiles/settings/secrets/actions) to publish from CI. After the first version is active, the [namespace owner](https://github.com/eclipse-openvsx/openvsx/wiki/Namespace-Access) can register the same owner, repository, and workflow for `xdev-asia.xdev-ai` under [Trusted Publishers](https://open-vsx.org/user-settings/trusted-publishers). Remove `OVSX_PAT` after registration to use short-lived credentials for subsequent releases. [Open VSX trusted publishing](https://github.com/eclipse-openvsx/openvsx/wiki/Trusted-Publishing)
 
 ## License
 
