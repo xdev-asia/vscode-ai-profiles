@@ -18,7 +18,7 @@ test('Codex reads each profile through App Server and preserves zero usage and r
   }
 
   const windows = process.platform === 'win32';
-  const executable = join(root, windows ? 'codex.cmd' : 'codex');
+  const executable = join(root, windows ? 'test-codex.cmd' : 'test-codex');
   const script = windows ? join(root, 'server.cjs') : executable;
   const reset = Math.floor(Date.now() / 1000) + 900;
   await writeFile(script, `${windows ? '' : '#!/usr/bin/env node\n'}
@@ -34,7 +34,7 @@ createInterface({ input: process.stdin }).on('line', line => {
   const { method, id, params } = JSON.parse(line);
   function reply(result) { console.log(JSON.stringify({ id, result })); }
   if (method === 'initialize') {
-    assert.equal(params.clientInfo.version, '0.7.0-test');
+    assert.equal(params.clientInfo.version, '1.2.3-test');
     reply({});
   } else if (method === 'initialized') {
     initialized = true;
@@ -55,7 +55,7 @@ createInterface({ input: process.stdin }).on('line', line => {
   if (windows) await writeFile(executable, '@echo off\r\nnode "%~dp0server.cjs" %*\r\n');
 
   for (const [profile, plan, used] of [[personal, 'plus', 0], [work, 'pro', 42]]) {
-    const usage = await readAccountUsage(profile, executable, '0.7.0-test', new AbortController().signal);
+    const usage = await readAccountUsage(profile, executable, '1.2.3-test', new AbortController().signal);
     assert.equal(usage.plan, plan);
     assert.equal(usage.unavailable, false);
     assert.deepEqual(usage.windows, [
