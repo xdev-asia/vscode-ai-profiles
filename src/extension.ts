@@ -1,13 +1,30 @@
 import * as vscode from 'vscode';
+import { join } from 'node:path';
 import { Accounts, accountStorageKey, summarize, type Account, type AccountSummary } from './accounts';
-import { registerClaudeTerminals } from './claude-terminal';
+import { TerminalProfiles } from './terminal-profiles';
+import { registerAiTerminals } from './ai-terminal';
 import { ChatPanel } from './panel';
+import { registerSquad } from './squad-view';
 import { chat, normalizeBaseUrl, providers, type ChatMessage, type ChatOptions, type Provider } from './core';
 
 export interface XDevAI {
   listAccounts(): Promise<AccountSummary[]>;
   chat(messages: readonly ChatMessage[], options?: ChatOptions & { accountId?: string }): Promise<string>;
 }
+
+class ApiAccountItem extends vscode.TreeItem {
+  constructor(account: Account, active: boolean) {
+    super(account.name);
+    this.id = account.id;
+    this.description = `${providers[account.provider].name} · ${account.model}`;
+    this.tooltip = `${account.name} · ${this.description}${active ? ' (active)' : ''}`;
+    this.iconPath = new vscode.ThemeIcon(active ? 'pass-filled' : 'key');
+    this.contextValue = 'aiApiAccount';
+    this.command = { command: 'xdevAi.openAccountChat', title: 'Open API Chat with this Profile', arguments: [account.id] };
+  }
+}
+
+type ApiAccountTarget = ApiAccountItem | string;
 
 const required = (value: string) => value.trim() ? undefined : 'Trường này cần được điền.';
 const validKey = (value: string) =>
@@ -62,8 +79,14 @@ async function addAccount(accounts: Accounts): Promise<void> {
   await accounts.add({ name: name.trim(), provider, model: model.trim(), baseUrl, apiKey: apiKey.trim() || undefined });
 }
 
-async function pickAccount(accounts: Accounts, title: string): Promise<Account | undefined> {
+async function pickAccount(accounts: Accounts, title: string, target?: ApiAccountTarget): Promise<Account | undefined> {
   const { accounts: available, activeId } = await accounts.read();
+  const id = target instanceof ApiAccountItem ? target.id : target;
+  if (typeof id === 'string') {
+    const account = available.find(candidate => candidate.id === id);
+    if (!account) throw new Error('This API profile is no longer available.');
+    return account;
+  }
   if (!available.length) {
     const add = 'Thêm hồ sơ';
     if (await vscode.window.showInformationMessage('Chưa có hồ sơ AI.', add) === add) {
@@ -80,8 +103,8 @@ async function pickAccount(accounts: Accounts, title: string): Promise<Account |
   return choice?.account;
 }
 
-async function manageAccounts(accounts: Accounts): Promise<void> {
-  const account = await pickAccount(accounts, 'Chọn hồ sơ cần quản lý');
+async function manageAccounts(accounts: Accounts, item?: ApiAccountTarget): Promise<void> {
+  const account = await pickAccount(accounts, 'Chọn hồ sơ cần quản lý', item);
   if (!account) return;
   const edit = 'Sửa tên, model hoặc API key';
   const remove = 'Xóa hồ sơ';
@@ -112,11 +135,23 @@ async function manageAccounts(accounts: Accounts): Promise<void> {
 export function activate(context: vscode.ExtensionContext): XDevAI {
   const accounts = new Accounts(context.secrets);
   const panel = new ChatPanel(context.extensionUri, accounts);
-  registerClaudeTerminals(context);
-  const command = (id: string, run: () => void | Promise<void>) =>
-    vscode.commands.registerCommand(id, async () => {
+  const profiles = new TerminalProfiles(context.globalStorageUri.fsPath);
+  registerSquad(context, accounts, profiles, registerAiTerminals(context, profiles));
+  const apiProfilesChanged = new vscode.EventEmitter<void>();
+  const apiProfiles = vscode.window.createTreeView<ApiAccountItem>('xdevAi.apiAccounts', {
+    treeDataProvider: {
+      onDidChangeTreeData: apiProfilesChanged.event,
+      getTreeItem: item => item,
+      async getChildren() {
+        const { accounts: available, activeId } = await accounts.read();
+        return available.map(account => new ApiAccountItem(account, account.id === activeId));
+      }
+    }
+  });
+  const command = (id: string, run: (item?: ApiAccountTarget) => void | Promise<void>) =>
+    vscode.commands.registerCommand(id, async (item?: ApiAccountTarget) => {
       try {
-        await run();
+        await run(item);
       } catch {
         void vscode.window.showErrorMessage('xDev AI không thể hoàn tất thao tác với hồ sơ. Hãy thử lại.');
       }
@@ -124,16 +159,27 @@ export function activate(context: vscode.ExtensionContext): XDevAI {
 
   context.subscriptions.push(
     panel,
+    apiProfilesChanged,
+    apiProfiles,
     context.secrets.onDidChange(({ key }) => {
-      if (key === accountStorageKey) void panel.refresh();
+      if (key === accountStorageKey) {
+        apiProfilesChanged.fire();
+        void panel.refresh();
+      }
     }),
     command('xdevAi.chat', () => panel.show()),
     command('xdevAi.addAccount', () => addAccount(accounts)),
-    command('xdevAi.switchAccount', async () => {
-      const account = await pickAccount(accounts, 'Chọn hồ sơ đang dùng');
+    command('xdevAi.switchAccount', async item => {
+      const account = await pickAccount(accounts, 'Chọn hồ sơ đang dùng', item);
       if (account) await accounts.select(account.id);
     }),
-    command('xdevAi.manageAccounts', () => manageAccounts(accounts))
+    command('xdevAi.openAccountChat', async item => {
+      const account = await pickAccount(accounts, 'Chọn hồ sơ cho chat', item);
+      if (!account) return;
+      await accounts.select(account.id);
+      panel.show();
+    }),
+    command('xdevAi.manageAccounts', item => manageAccounts(accounts, item))
   );
 
   return {

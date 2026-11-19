@@ -100,8 +100,8 @@ export class ChatPanel implements vscode.Disposable {
       case 'manage':
         await vscode.commands.executeCommand('xdevAi.manageAccounts');
         return;
-      case 'claude':
-        await vscode.commands.executeCommand('xdevAi.claude.openTerminal');
+      case 'terminal':
+        await vscode.commands.executeCommand('xdevAi.openTerminal');
         return;
       case 'select':
         if (typeof id === 'string') await this.accounts.select(id);
@@ -184,7 +184,7 @@ export class ChatPanel implements vscode.Disposable {
     </div>
     <button type="button" id="add">Thêm hồ sơ</button>
     <button type="button" id="manage" class="secondary" disabled>Quản lý</button>
-    <button type="button" id="claude" class="secondary">Claude Code</button>
+    <button type="button" id="terminal" class="secondary">AI Terminals</button>
   </header>
   <main>
     <div class="conversation-heading">

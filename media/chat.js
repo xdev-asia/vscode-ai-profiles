@@ -2,7 +2,7 @@ const vscode = acquireVsCodeApi();
 const select = document.getElementById('account');
 const add = document.getElementById('add');
 const manage = document.getElementById('manage');
-const claude = document.getElementById('claude');
+const terminal = document.getElementById('terminal');
 const clear = document.getElementById('clear');
 const messages = document.getElementById('messages');
 const composer = document.getElementById('composer');
@@ -89,7 +89,7 @@ window.addEventListener('message', ({ data }) => {
 
 add.addEventListener('click', () => vscode.postMessage({ type: 'add' }));
 manage.addEventListener('click', () => vscode.postMessage({ type: 'manage' }));
-claude.addEventListener('click', () => vscode.postMessage({ type: 'claude' }));
+terminal.addEventListener('click', () => vscode.postMessage({ type: 'terminal' }));
 clear.addEventListener('click', () => {
   prompt.value = '';
   vscode.postMessage({ type: 'clear', id: activeId });

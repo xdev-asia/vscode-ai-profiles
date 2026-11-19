@@ -1,0 +1,236 @@
+import { extname, join } from 'node:path';
+import * as vscode from 'vscode';
+import {
+  findTerminalExecutable, terminalProfileEnv, terminalProfileId, terminalProviderIds, terminalProviders,
+  validTerminalProfileName, type TerminalProfile, type TerminalProfiles, type TerminalProvider
+} from './terminal-profiles';
+
+type Action = 'add' | 'open' | 'signIn' | 'usage' | 'rename';
+type AccountTarget = TerminalAccountItem | string;
+const accountsViewId = 'xdevAi.claude.accounts';
+
+class TerminalAccountItem extends vscode.TreeItem {
+  constructor(readonly profile: TerminalProfile) {
+    super(profile.name);
+    this.id = terminalProfileId(profile);
+    this.description = terminalProviders[profile.provider].name;
+    this.contextValue = 'aiTerminalAccount';
+    this.iconPath = new vscode.ThemeIcon('account');
+    this.command = { command: 'xdevAi.openTerminal', title: 'Open AI Terminal', arguments: [this.id] };
+  }
+}
+
+export function registerAiTerminals(context: vscode.ExtensionContext, profiles: TerminalProfiles): vscode.Event<void> {
+  const accountsChanged = new vscode.EventEmitter<void>();
+  const view = vscode.window.createTreeView<TerminalAccountItem>(accountsViewId, {
+    treeDataProvider: {
+      onDidChangeTreeData: accountsChanged.event,
+      getTreeItem: item => item,
+      async getChildren() {
+        return (await profiles.list()).map(profile => new TerminalAccountItem(profile));
+      }
+    }
+  });
+  const shortcut = vscode.window.createStatusBarItem('xdevAi.accounts', vscode.StatusBarAlignment.Right, 35);
+  shortcut.name = 'xDev AI Accounts';
+  shortcut.text = '$(account) xDev AI';
+  shortcut.tooltip = 'Choose an AI terminal account or add a profile';
+  shortcut.command = 'xdevAi.openTerminal';
+  shortcut.show();
+
+  function askProfileName(title: string, token?: vscode.CancellationToken, value?: string) {
+    return vscode.window.showInputBox({
+      title,
+      value,
+      placeHolder: 'Personal or Work',
+      validateInput(input) {
+        return validTerminalProfileName(input.trim()) ? undefined : 'Enter a name of 1 to 80 characters on one line.';
+      }
+    }, token);
+  }
+
+  async function selectProfile(
+    action: Action,
+    provider?: TerminalProvider,
+    target?: AccountTarget,
+    token?: vscode.CancellationToken
+  ): Promise<{ profile?: TerminalProfile } | undefined> {
+    const accounts = await profiles.list(provider);
+    const id = target instanceof TerminalAccountItem ? target.id : target;
+    if (typeof id === 'string') {
+      const profile = accounts.find(account => terminalProfileId(account) === id || account.configDir === id);
+      if (!profile) throw new Error('This AI terminal profile is no longer available.');
+      return { profile };
+    }
+    const title = {
+      add: 'Add AI Account', open: 'Choose an AI terminal account', signIn: 'Choose an account to sign in',
+      usage: 'Choose an account to check usage', rename: 'Choose an account to rename'
+    }[action];
+    const choices: (vscode.QuickPickItem & { profile?: TerminalProfile })[] = accounts.map(profile => ({
+      label: profile.name,
+      description: terminalProviders[profile.provider].name,
+      profile
+    }));
+    if (action === 'open' || action === 'signIn') choices.push({ label: '$(add) Add AI Account' });
+    if (!choices.length) {
+      void vscode.window.showInformationMessage('Add an AI terminal account first.');
+      return;
+    }
+    return vscode.window.showQuickPick(choices, { title, matchOnDescription: true }, token);
+  }
+
+  async function selectProvider(token?: vscode.CancellationToken) {
+    const choices: (vscode.QuickPickItem & { provider?: TerminalProvider })[] = terminalProviderIds.map(provider => ({
+      label: terminalProviders[provider].name, description: 'Sign in for a terminal', provider
+    }));
+    choices.push({ label: 'API Profile', description: 'OpenAI, Anthropic, Gemini, or a compatible API for Squad Chat' });
+    const choice = await vscode.window.showQuickPick(choices, { title: 'Add AI Account', matchOnDescription: true }, token);
+    if (choice && !choice.provider && !token?.isCancellationRequested) {
+      await vscode.commands.executeCommand('xdevAi.addAccount');
+    }
+    return choice?.provider;
+  }
+
+  async function prepareTerminal(
+    action: Exclude<Action, 'rename'>,
+    target?: AccountTarget,
+    token?: vscode.CancellationToken,
+    provider?: TerminalProvider
+  ): Promise<{ options: vscode.TerminalOptions; provider: TerminalProvider; signIn: boolean } | undefined> {
+    let profile: TerminalProfile | undefined;
+    if (action !== 'add') {
+      const choice = await selectProfile(action, provider, target, token);
+      if (!choice) return;
+      profile = choice.profile;
+    }
+    provider = profile?.provider ?? provider ?? await selectProvider(token);
+    if (!provider || token?.isCancellationRequested) return;
+
+    const { name, setup } = terminalProviders[provider];
+    const key = `${provider}Executable`;
+    const preferred = vscode.workspace.getConfiguration('xdevAi').get<string>(key, '').trim();
+    const cli = await findTerminalExecutable(provider, preferred);
+    if (!cli) {
+      const help = 'Installation instructions';
+      const message = preferred
+        ? `Set xdevAi.${key} to an absolute executable path on the workspace host.`
+        : `${name} was not found on the workspace host.`;
+      if (await vscode.window.showErrorMessage(message, help) === help) {
+        await vscode.env.openExternal(vscode.Uri.parse(setup));
+      }
+      return;
+    }
+    if (token?.isCancellationRequested) return;
+
+    const signIn = !profile || action === 'signIn';
+    if (!profile) {
+      const label = await askProfileName(`Name the ${name} account`, token);
+      if (label === undefined || token?.isCancellationRequested) return;
+      profile = await profiles.add(provider, label);
+      accountsChanged.fire();
+    }
+    if (token?.isCancellationRequested) return;
+
+    const args: string[] = [];
+    if (provider === 'codex') {
+      args.push('-c', 'cli_auth_credentials_store=file');
+      if (signIn) {
+        args.push('login');
+        if (vscode.env.remoteName || vscode.env.uiKind === vscode.UIKind.Web) args.push('--device-auth');
+      }
+    }
+    if (provider === 'claude' && signIn) args.push('auth', 'login', '--claudeai');
+    const env = terminalProfileEnv(profile);
+    let shellPath = cli;
+    let shellArgs = args;
+    if (process.platform === 'win32' && extname(cli).toLowerCase() === '.cmd') {
+      shellPath = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+      env.XDEV_AI_CLI_PATH = cli;
+      // Only provider arguments defined above reach this PowerShell command.
+      const argumentsLiteral = args.map(argument => `'${argument}'`).join(' ');
+      shellArgs = ['-NoLogo', '-NoProfile', '-Command', `& $env:XDEV_AI_CLI_PATH ${argumentsLiteral}; exit $LASTEXITCODE`];
+    }
+    const document = vscode.window.activeTextEditor?.document.uri;
+    const folder = (document && vscode.workspace.getWorkspaceFolder(document)) ?? vscode.workspace.workspaceFolders?.[0];
+    return {
+      provider,
+      signIn,
+      options: {
+        name: signIn ? `${name} · Sign in · ${profile.name}` : `${name} · ${profile.name}`,
+        shellPath,
+        shellArgs,
+        cwd: folder?.uri,
+        env,
+        isTransient: true
+      }
+    };
+  }
+
+  async function run(action: Action, provider?: TerminalProvider, target?: AccountTarget): Promise<void> {
+    try {
+      if (action === 'rename') {
+        const profile = (await selectProfile(action, provider, target))?.profile;
+        if (!profile) return;
+        const name = await askProfileName('Rename AI terminal account', undefined, profile.name);
+        if (name === undefined || name.trim() === profile.name) return;
+        await profiles.rename(profile, name);
+        accountsChanged.fire();
+        return;
+      }
+      const terminal = await prepareTerminal(action, target, undefined, provider);
+      if (!terminal) return;
+      vscode.window.createTerminal(terminal.options).show();
+      if (action === 'usage') {
+        const { name, usage } = terminalProviders[terminal.provider];
+        void vscode.window.showInformationMessage(`Enter ${usage} in the ${name} terminal to check usage.`);
+      }
+      if (terminal.provider === 'gemini' && terminal.signIn) {
+        void vscode.window.showInformationMessage('Choose Sign in with Google in Gemini CLI. For an existing session, enter /auth to switch accounts.');
+      }
+    } catch (error) {
+      void vscode.window.showErrorMessage(error instanceof Error ? error.message : 'Unable to open the AI terminal.');
+    }
+  }
+
+  const command = (id: string, action: Action, provider?: TerminalProvider) =>
+    vscode.commands.registerCommand(id, (target?: AccountTarget) => run(action, provider, target));
+  const focus = () => vscode.commands.executeCommand(`${accountsViewId}.focus`);
+  const terminalProvider = (provider?: TerminalProvider): vscode.TerminalProfileProvider => ({
+    async provideTerminalProfile(token) {
+      try {
+        const terminal = await prepareTerminal('open', undefined, token, provider);
+        return terminal ? new vscode.TerminalProfile(terminal.options) : undefined;
+      } catch (error) {
+        void vscode.window.showErrorMessage(error instanceof Error ? error.message : 'Unable to open the AI terminal.');
+        return;
+      }
+    }
+  });
+  context.subscriptions.push(
+    accountsChanged,
+    view,
+    shortcut,
+    view.onDidChangeVisibility(event => {
+      if (event.visible) accountsChanged.fire();
+    }),
+    vscode.window.onDidChangeWindowState(state => {
+      if (state.focused && view.visible) accountsChanged.fire();
+    }),
+    vscode.commands.registerCommand('xdevAi.manageTerminalAccounts', focus),
+    command('xdevAi.addAiAccount', 'add'),
+    command('xdevAi.openTerminal', 'open'),
+    command('xdevAi.signInTerminal', 'signIn'),
+    command('xdevAi.checkUsage', 'usage'),
+    command('xdevAi.renameTerminalAccount', 'rename'),
+    vscode.window.registerTerminalProfileProvider('xdevAi.terminal', terminalProvider()),
+    // Keep the commands and profile used by older VS Code settings and workflows.
+    vscode.commands.registerCommand('xdevAi.claude.manageAccounts', focus),
+    command('xdevAi.claude.addAccount', 'add', 'claude'),
+    command('xdevAi.claude.openTerminal', 'open', 'claude'),
+    command('xdevAi.claude.signIn', 'signIn', 'claude'),
+    command('xdevAi.claude.usage', 'usage', 'claude'),
+    command('xdevAi.claude.renameAccount', 'rename', 'claude'),
+    vscode.window.registerTerminalProfileProvider('xdevAi.claude.terminal', terminalProvider('claude'))
+  );
+  return accountsChanged.event;
+}

@@ -1,6 +1,6 @@
 # xDev AI
 
-A VS Code extension that opens Claude Code terminals for individual accounts and lets you chat with AI providers using separate API profiles.
+A VS Code extension for managing Claude Code, Codex, and Gemini CLI accounts, chatting with AI providers, and coordinating tasks across API profiles.
 
 ## Installation
 
@@ -16,24 +16,67 @@ The extension runs on the machine that hosts the workspace. For remote workspace
 
 The extension ID changed to `xdev-asia.xdev-ai` in v0.2.1. If you installed the v0.2.0 preview (`xdev.xdev-ai`), disable it before using the new version, then add your API profiles and sign in to each Claude Code account again in the new extension.
 
-## Use multiple Claude Code accounts
+## Manage AI accounts
 
-1. Install Claude Code on the workspace host. On Windows, use the native installation with `claude.exe`. If xDev AI cannot find the CLI, set `xdevAi.claudeExecutable` to its absolute path in User Settings or Remote Settings. [Claude Code installation](https://code.claude.com/docs/en/setup)
-2. Open the **xDev AI** tab in the bottom panel next to **Terminal**, then click **Add Claude Account**. Name the profile and complete the claude.ai sign-in in your browser. Repeat for each account. On a server without a browser, open the URL Claude Code prints in the terminal and follow its instructions.
-3. Select an account in the **xDev AI** panel to open its terminal. You can also use **Open Claude Terminal** on the Terminal toolbar or **xDev AI: Claude Code** from the menu next to **+**. You can keep multiple terminals open at once. Run `/status` in Claude Code to see which account the terminal is using.
-4. Right-click an account to rename it or sign in again. Renaming a profile keeps its Claude Code configuration and session history.
-5. Click **Check Claude Usage** next to an account, then enter `/usage` in the terminal that opens. Claude Code shows the usage and limits for that account. [Claude Code usage](https://code.claude.com/docs/en/costs#using-the-usage-command)
+Open **xDev AI** in the Activity Bar. The sidebar contains **Terminal Accounts** and **API Profiles**. To move either view to the right, right-click its title and choose **Move View → Secondary Side Bar**.
 
-Use **Manage Claude Accounts** on the Terminal toolbar or run **xDev AI: Manage Claude Accounts** from the Command Palette to return to the account list. The panel toolbar also opens the API chat.
+1. Click **Add AI Account (+)** next to **Terminal Accounts**. Choose **Claude Code**, **Codex**, **Gemini CLI**, or **API Profile**. For a terminal account, give the profile a name and complete sign-in with the provider. Gemini opens its authentication menu in the terminal. Codex uses device code sign-in on remote hosts and code-server, which requires device code sign-in to be enabled for the account.
+2. Select an account to open its terminal. Use the **xDev AI** status bar item, **Open AI Terminal** on the Terminal toolbar, or **xDev AI: Choose Account** in the terminal profile menu to pick an account without opening the sidebar.
+3. Right-click a terminal account to rename it or sign in again. Click **Check AI Usage** next to a terminal account to open its session and see the provider's usage command.
+4. In **API Profiles**, click **+** to add a profile. Select a profile to open xDev Chat with it, or right-click it to make it active, edit it, or remove it.
 
-Each profile uses a separate `CLAUDE_CONFIG_DIR` on the workspace host. Claude Code handles claude.ai sign-in and manages its credentials and session history there. Desktop and server profiles have separate sign-in sessions. [Anthropic's guide to multiple accounts](https://code.claude.com/docs/en/authentication#log-in-with-multiple-accounts)
+Install each CLI on the workspace host. If xDev AI cannot find one, enter its absolute executable path in User Settings or Remote Settings.
+
+| Terminal | Settings key | Usage command |
+| --- | --- | --- |
+| [Claude Code](https://code.claude.com/docs/en/setup) | `xdevAi.claudeExecutable` | `/usage` |
+| [Codex](https://developers.openai.com/codex/cli) | `xdevAi.codexExecutable` | `/status` |
+| [Gemini CLI](https://geminicli.com/docs/get-started/) | `xdevAi.geminiExecutable` | `/stats model` |
+
+Each account has its own configuration directory on the workspace host. The CLIs manage their sign-in, credentials, and history there. Terminal and API profiles are configured separately. [Claude Code authentication](https://code.claude.com/docs/en/authentication#log-in-with-multiple-accounts) · [Codex authentication](https://developers.openai.com/codex/auth) · [Gemini CLI authentication](https://geminicli.com/docs/get-started/authentication/)
+
+## Coordinate work with Squad
+
+Open **xDev Squad** in the bottom panel, click **Open Squad** on the Terminal toolbar, or run **xDev AI: Open Squad** from the Command Palette.
+
+### Use one chat for the squad
+
+1. Open **Roles**, select **Lead** and any workers you want to use, and assign an API profile to each. Save each assignment.
+2. Open **Chat** and send a request to Lead. If Lead proposes tasks, review the briefs and profiles, then click **Approve and run** or **Discard plan**.
+3. Follow the results in the same chat. Use `@Implement`, `@Review`, or `@Tests` to send a message directly to a role. Press **Stop run** to cancel the current run and skip any remaining tasks.
+4. To use an assigned terminal profile, select its role in **Chat** and click **Open terminal**.
+
+The shared chat uses text APIs for planning, implementation proposals, reviews, and test suggestions. This mode does not read or edit repository files or run tests. Lead receives recent chat entries. Approved workers receive the original request and their assigned brief. Review and Tests also receive the implementation proposal when the plan includes Implement. Use profiles that are approved for the information you share.
+
+The most recent 60 chat entries and the pending plan are stored in local VS Code workspace state. Reloading VS Code preserves pending approval and completed replies. An interrupted run needs a new request to continue.
+
+### Use Squad in GitHub Copilot Chat
+
+1. Assign API profiles in **xDev Squad → Roles**. Open the **Chat** view in VS Code and select a Copilot agent session with extension tools enabled.
+2. In the chat input, type `#` and select **Ask xDev Squad** (`xdevSquadAsk`). Try “Ask xDev Squad to plan an API migration.” To talk directly to a role, try “Ask xDev Squad's Review role to check backward compatibility.”
+3. Review the roles, profiles, and briefs in the Copilot reply. Ask Copilot to run or discard the pending Squad plan, using **Manage xDev Squad Plan** (`xdevSquadPlan`) if needed. Choose **Approve and run** in the VS Code dialog to send the tasks. The dialog is required even when Copilot's tool approvals are bypassed. Results return to the same Copilot conversation.
+4. If the tools are missing, run **Chat: Open Customizations**, open **Tools**, and check that the xDev AI tools are enabled for the selected Copilot session.
+
+Both interfaces use the same workspace profiles, pending plan, and Squad context. Copilot receives the responses to its Squad tool calls. Each assigned API profile receives the request and context described above. On code-server, open **xDev Squad → Chat** for the same workflow. [VS Code extension tools](https://code.visualstudio.com/docs/agents/run/tools?select-tools-by-harness=copilot-harness#_add-extension-tools-for-the-copilot-harness)
+
+VS Code manages the chat session's agent harness and model picker. To change the native harness, start a new chat and choose a session target. xDev terminal profiles open in their own terminals. Use the API profiles assigned under **Roles** for xDev Squad tool calls in a Copilot session. [VS Code agent harnesses](https://code.visualstudio.com/docs/agents/run/agent-harnesses)
+
+### Manage a role manually
+
+1. Open **Roles** in the xDev Squad panel.
+2. Select **Lead**, **Implement**, **Review**, or **Tests**. Assign an API profile or terminal account, enter a task brief, and click **Save task**. Each role has one current task, and you can prepare a brief before assigning a profile.
+3. For a terminal account, use **Copy brief** and **Open terminal**, then paste the brief into that provider's session. **Check usage** opens the assigned terminal and shows its usage command.
+4. For an API profile, click **Send to API** to send the saved brief to the selected model. Read the reply under **Latest API response**. Include any context you want the model to see in the brief.
+5. Update task status as work progresses. For **Blocked**, save a reason to show it under **Needs attention**. Use **Hand off to another role** to leave a note for that role in **Recent activity**.
+
+The board keeps assignments, briefs, the latest API response per role, and the 30 most recent activity entries in local VS Code workspace state. Status changes and handoffs are manual.
 
 ## Chat with AI providers
 
 1. Run **xDev AI: Open Chat** from the Command Palette.
-2. Run **xDev AI: Add Account** and choose a provider. Give the profile a recognizable name, then enter a model ID and API key. For an OpenAI-compatible endpoint, also enter its base URL, such as `http://127.0.0.1:11434/v1` for Ollama. You can leave the key blank if the endpoint accepts unauthenticated requests.
-3. Send a message with `Ctrl+Enter` or `Cmd+Enter`. Use the profile menu or **xDev AI: Switch Account** to change accounts. Each profile keeps its most recent 12 exchanges while the chat tab is open.
-4. Run **xDev AI: Manage Accounts** to rename or remove a profile, change its model, or replace its API key. The **Đoạn chat mới** (New chat) button clears the selected profile's conversation.
+2. Run **xDev AI: Add API Profile** and choose a provider. Give the profile a recognizable name, then enter a model ID and API key. For an OpenAI-compatible endpoint, also enter its base URL, such as `http://127.0.0.1:11434/v1` for Ollama. You can leave the key blank if the endpoint accepts unauthenticated requests.
+3. Send a message with `Ctrl+Enter` or `Cmd+Enter`. Use the profile menu or **xDev AI: Switch API Profile** to change accounts. Each profile keeps its most recent 12 exchanges while the chat tab is open.
+4. Run **xDev AI: Manage API Profiles** to rename or remove a profile, change its model, or replace its API key. The **Đoạn chat mới** (New chat) button clears the selected profile's conversation.
 
 The chat tab authenticates with API keys. Get a key and model ID from your provider. [OpenAI](https://developers.openai.com/api/docs/quickstart) · [Anthropic](https://platform.claude.com/docs/en/api/messages/create) · [Google AI Studio](https://aistudio.google.com/docs/openai)
 

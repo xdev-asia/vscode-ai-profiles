@@ -1,9 +1,10 @@
 {
   "name": "xdev-ai",
   "displayName": "xDev AI",
-  "description": "Chat with AI providers and open Claude Code terminals for multiple accounts in VS Code.",
-  "version": "0.3.0",
+  "description": "Manage AI accounts, open Claude Code, Codex, and Gemini terminals, and coordinate AI tasks in VS Code.",
+  "version": "0.4.0",
   "publisher": "xdev-asia",
+  "icon": "media/icon.png",
   "private": true,
   "license": "Apache-2.0",
   "repository": {
@@ -19,6 +20,7 @@
   },
   "categories": ["AI"],
   "extensionKind": ["workspace"],
+  "activationEvents": ["onStartupFinished"],
   "main": "./dist/extension.js",
   "exports": {
     ".": {
@@ -31,47 +33,105 @@
   "contributes": {
     "commands": [
       { "command": "xdevAi.chat", "title": "Open Chat", "category": "xDev AI", "icon": "$(comment-discussion)" },
-      { "command": "xdevAi.addAccount", "title": "Add Account", "category": "xDev AI" },
-      { "command": "xdevAi.switchAccount", "title": "Switch Account", "category": "xDev AI" },
-      { "command": "xdevAi.manageAccounts", "title": "Manage Accounts", "category": "xDev AI" },
-      { "command": "xdevAi.claude.manageAccounts", "title": "Manage Claude Accounts", "category": "xDev AI", "icon": "$(account)" },
-      { "command": "xdevAi.claude.addAccount", "title": "Add Claude Account", "category": "xDev AI", "icon": "$(add)" },
-      { "command": "xdevAi.claude.openTerminal", "title": "Open Claude Terminal", "category": "xDev AI", "icon": "$(terminal)" },
-      { "command": "xdevAi.claude.usage", "title": "Check Claude Usage", "category": "xDev AI", "icon": "$(graph)" },
-      { "command": "xdevAi.claude.signIn", "title": "Sign In to Claude Account", "category": "xDev AI" },
-      { "command": "xdevAi.claude.renameAccount", "title": "Rename Claude Account", "category": "xDev AI" }
+      { "command": "xdevAi.addAccount", "title": "Add API Profile", "category": "xDev AI", "icon": "$(add)" },
+      { "command": "xdevAi.switchAccount", "title": "Switch API Profile", "category": "xDev AI", "icon": "$(check)" },
+      { "command": "xdevAi.manageAccounts", "title": "Manage API Profiles", "category": "xDev AI" },
+      { "command": "xdevAi.openAccountChat", "title": "Open API Chat with this Profile", "category": "xDev AI", "icon": "$(comment-discussion)" },
+      { "command": "xdevAi.squad.open", "title": "Open Squad", "category": "xDev AI", "icon": "$(organization)" },
+      { "command": "xdevAi.manageTerminalAccounts", "title": "Open AI Accounts Sidebar", "category": "xDev AI", "icon": "$(account)" },
+      { "command": "xdevAi.addAiAccount", "title": "Add AI Account", "category": "xDev AI", "icon": "$(add)" },
+      { "command": "xdevAi.openTerminal", "title": "Open AI Terminal", "category": "xDev AI", "icon": "$(terminal)" },
+      { "command": "xdevAi.checkUsage", "title": "Check AI Usage", "category": "xDev AI", "icon": "$(graph)" },
+      { "command": "xdevAi.signInTerminal", "title": "Sign In to Terminal Account", "category": "xDev AI" },
+      { "command": "xdevAi.renameTerminalAccount", "title": "Rename Terminal Account", "category": "xDev AI" }
     ],
     "viewsContainers": {
-      "panel": [
+      "activitybar": [
         { "id": "xdev-ai", "title": "xDev AI", "icon": "$(account)" }
+      ],
+      "panel": [
+        { "id": "xdev-ai-squad", "title": "xDev Squad", "icon": "$(organization)" }
       ]
     },
     "views": {
       "xdev-ai": [
-        { "id": "xdevAi.claude.accounts", "name": "Claude Accounts" }
+        { "id": "xdevAi.claude.accounts", "name": "Terminal Accounts" },
+        { "id": "xdevAi.apiAccounts", "name": "API Profiles" }
+      ],
+      "xdev-ai-squad": [
+        { "id": "xdevAi.squad", "name": "Squad", "type": "webview" }
       ]
     },
     "viewsWelcome": [
-      { "view": "xdevAi.claude.accounts", "contents": "Add a Claude Code account to open its own terminal.\n[Add Claude Account](command:xdevAi.claude.addAccount)" }
+      { "view": "xdevAi.claude.accounts", "contents": "Sign in to Claude Code, Codex, or Gemini CLI. Each account opens in its own terminal.\n[Add AI Account](command:xdevAi.addAiAccount)" },
+      { "view": "xdevAi.apiAccounts", "contents": "Add a provider API profile for xDev Chat and Squad.\n[Add API Profile](command:xdevAi.addAccount)" }
     ],
     "menus": {
       "view/title": [
-        { "command": "xdevAi.claude.manageAccounts", "when": "view == terminal", "group": "navigation@20" },
-        { "command": "xdevAi.claude.openTerminal", "when": "view == terminal", "group": "navigation@21" },
-        { "command": "xdevAi.claude.addAccount", "when": "view == xdevAi.claude.accounts", "group": "navigation@1" },
-        { "command": "xdevAi.claude.usage", "when": "view == xdevAi.claude.accounts", "group": "navigation@2" },
-        { "command": "xdevAi.chat", "when": "view == xdevAi.claude.accounts", "group": "navigation@3" }
+        { "command": "xdevAi.manageTerminalAccounts", "when": "view == terminal", "group": "navigation@20" },
+        { "command": "xdevAi.openTerminal", "when": "view == terminal", "group": "navigation@21" },
+        { "command": "xdevAi.squad.open", "when": "view == terminal", "group": "navigation@22" },
+        { "command": "xdevAi.addAiAccount", "when": "view == xdevAi.claude.accounts || view == xdevAi.squad", "group": "navigation@1" },
+        { "command": "xdevAi.checkUsage", "when": "view == xdevAi.claude.accounts", "group": "navigation@2" },
+        { "command": "xdevAi.squad.open", "when": "view == xdevAi.claude.accounts", "group": "navigation@3" },
+        { "command": "xdevAi.addAccount", "when": "view == xdevAi.apiAccounts", "group": "navigation@1" },
+        { "command": "xdevAi.chat", "when": "view == xdevAi.apiAccounts", "group": "navigation@2" },
+        { "command": "xdevAi.manageTerminalAccounts", "when": "view == xdevAi.squad", "group": "navigation@2" }
       ],
       "view/item/context": [
-        { "command": "xdevAi.claude.openTerminal", "when": "view == xdevAi.claude.accounts && viewItem == claudeAccount", "group": "inline@1" },
-        { "command": "xdevAi.claude.usage", "when": "view == xdevAi.claude.accounts && viewItem == claudeAccount", "group": "inline@2" },
-        { "command": "xdevAi.claude.signIn", "when": "view == xdevAi.claude.accounts && viewItem == claudeAccount", "group": "1_account@1" },
-        { "command": "xdevAi.claude.renameAccount", "when": "view == xdevAi.claude.accounts && viewItem == claudeAccount", "group": "1_account@2" }
+        { "command": "xdevAi.openTerminal", "when": "view == xdevAi.claude.accounts && viewItem == aiTerminalAccount", "group": "inline@1" },
+        { "command": "xdevAi.checkUsage", "when": "view == xdevAi.claude.accounts && viewItem == aiTerminalAccount", "group": "inline@2" },
+        { "command": "xdevAi.signInTerminal", "when": "view == xdevAi.claude.accounts && viewItem == aiTerminalAccount", "group": "1_account@1" },
+        { "command": "xdevAi.renameTerminalAccount", "when": "view == xdevAi.claude.accounts && viewItem == aiTerminalAccount", "group": "1_account@2" },
+        { "command": "xdevAi.openAccountChat", "when": "view == xdevAi.apiAccounts && viewItem == aiApiAccount", "group": "inline@1" },
+        { "command": "xdevAi.switchAccount", "when": "view == xdevAi.apiAccounts && viewItem == aiApiAccount", "group": "1_account@1" },
+        { "command": "xdevAi.manageAccounts", "when": "view == xdevAi.apiAccounts && viewItem == aiApiAccount", "group": "1_account@2" }
+      ],
+      "commandPalette": [
+        { "command": "xdevAi.openAccountChat", "when": "false" }
       ]
     },
     "terminal": {
-      "profiles": [{ "id": "xdevAi.claude.terminal", "title": "xDev AI: Claude Code", "icon": "terminal" }]
+      "profiles": [
+        { "id": "xdevAi.terminal", "title": "xDev AI: Choose Account", "icon": "terminal" },
+        { "id": "xdevAi.claude.terminal", "title": "xDev AI: Claude Code", "icon": "terminal" }
+      ]
     },
+    "languageModelTools": [
+      {
+        "name": "xdev_squad_ask",
+        "displayName": "Ask xDev Squad",
+        "toolReferenceName": "xdevSquadAsk",
+        "canBeReferencedInPrompt": true,
+        "userDescription": "Send a message to the assigned xDev Squad API profile.",
+        "modelDescription": "Use when the user asks to delegate a request to xDev Squad. By default asks Lead for an answer or draft plan. Prefix the message with @Implement, @Review, or @Tests to address that role directly. Pass the user's requested text and context they explicitly included for Squad. This can contact the assigned API text model and cannot edit files or run tests. Present any pending plan with its roles, profiles, and briefs. Wait for a later user request before calling the plan tool to run it.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "message": { "type": "string", "description": "The request for the role, with an optional @Role prefix.", "minLength": 1, "maxLength": 8000 }
+          },
+          "required": ["message"],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "xdev_squad_plan",
+        "displayName": "Manage xDev Squad Plan",
+        "toolReferenceName": "xdevSquadPlan",
+        "canBeReferencedInPrompt": true,
+        "userDescription": "View, run, or discard the current xDev Squad plan.",
+        "modelDescription": "View the current xDev Squad plan, or run or discard the specified plan when the user expressly requests that action after seeing the plan. Use the exact plan ID returned by xDev Squad. Run requests require a separate confirmation in VS Code. If the user declines or cancels, do not retry. Show the returned results grouped by role.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "action": { "type": "string", "enum": ["view", "run", "discard"] },
+            "planId": { "type": "string", "description": "The exact ID from the pending plan. Required for run and discard." }
+          },
+          "required": ["action"],
+          "additionalProperties": false
+        }
+      }
+    ],
     "configuration": {
       "title": "xDev AI",
       "properties": {
@@ -80,6 +140,18 @@
           "default": "",
           "scope": "machine",
           "description": "Absolute path to Claude Code on the machine hosting the workspace. Leave empty to detect a native installation or search PATH."
+        },
+        "xdevAi.codexExecutable": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Absolute path to Codex on the workspace host. Leave empty to detect the installation automatically."
+        },
+        "xdevAi.geminiExecutable": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Absolute path to Gemini CLI on the workspace host. Leave empty to detect the installation automatically."
         }
       }
     }
