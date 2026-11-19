@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.0 - 2026-11-19
+
+### Added
+
+- Hover over **xDev AI** in the status bar to see terminal accounts, plan names, quota usage and reset times when available.
+- Refresh account quota from the hover or open the selected account's terminal for provider usage details.
+
 ## 0.6.1 - 2026-11-19
 
 ### Added

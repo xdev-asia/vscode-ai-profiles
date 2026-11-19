@@ -1,10 +1,14 @@
+import { unlink } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { extname, join } from 'node:path';
 import * as vscode from 'vscode';
+import { canCaptureClaudeQuota, claudeQuotaFile } from './account-usage';
 import { claudeLoginScript } from './claude-login';
 import {
   findTerminalExecutable, terminalArguments, terminalProfileEnv, terminalProfileId, terminalProviderIds, terminalProviders,
   validTerminalProfileName, type TerminalProfile, type TerminalProfiles, type TerminalProvider
 } from './terminal-profiles';
+import { registerUsageStatus } from './usage-status';
 
 type Action = 'add' | 'open' | 'bypass' | 'signIn' | 'usage' | 'rename' | 'remove';
 type AccountTarget = TerminalAccountItem | string;
@@ -35,7 +39,7 @@ export function registerAiTerminals(context: vscode.ExtensionContext, profiles: 
   const shortcut = vscode.window.createStatusBarItem('xdevAi.accounts', vscode.StatusBarAlignment.Right, 35);
   shortcut.name = 'xDev AI Accounts';
   shortcut.text = '$(account) xDev AI';
-  shortcut.tooltip = 'Choose an AI terminal account or add a profile';
+  shortcut.tooltip = 'Loading account quota…';
   shortcut.command = 'xdevAi.openTerminal';
   shortcut.show();
 
@@ -147,13 +151,21 @@ export function registerAiTerminals(context: vscode.ExtensionContext, profiles: 
     const remote = Boolean(vscode.env.remoteName) || vscode.env.uiKind === vscode.UIKind.Web;
     const args = terminalArguments(provider, signIn ? 'signIn' : bypass ? 'bypass' : 'open', remote);
     const env = terminalProfileEnv(profile);
+    const document = vscode.window.activeTextEditor?.document.uri;
+    const folder = (document && vscode.workspace.getWorkspaceFolder(document)) ?? vscode.workspace.workspaceFolders?.[0];
+    if (provider === 'claude' && signIn) await unlink(join(profile.configDir, claudeQuotaFile)).catch(() => undefined);
+    if (provider === 'claude' && vscode.workspace.isTrusted && await canCaptureClaudeQuota(profile.configDir, folder?.uri.fsPath ?? homedir())) {
+      const settings = context.asAbsolutePath('media/claude-quota-settings.json');
+      env.XDEV_AI_QUOTA_HOOK = context.asAbsolutePath('media/claude-quota.cjs');
+      if (!signIn) args.push('--settings', settings);
+      if (signIn && process.platform !== 'win32') env.XDEV_AI_CLAUDE_QUOTA_SETTINGS = settings;
+    }
     let shellPath = cli;
     let shellArgs = args;
     if (process.platform === 'win32' && extname(cli).toLowerCase() === '.cmd') {
       shellPath = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
       env.XDEV_AI_CLI_PATH = cli;
-      // Only fixed provider arguments reach this PowerShell command.
-      const argumentsLiteral = args.map(argument => `'${argument}'`).join(' ');
+      const argumentsLiteral = args.map(argument => `'${argument.replace(/'/g, "''")}'`).join(' ');
       shellArgs = ['-NoLogo', '-NoProfile', '-Command', `& $env:XDEV_AI_CLI_PATH ${argumentsLiteral}; exit $LASTEXITCODE`];
     }
     if (provider === 'claude' && signIn && process.platform !== 'win32') {
@@ -161,8 +173,6 @@ export function registerAiTerminals(context: vscode.ExtensionContext, profiles: 
       shellPath = '/bin/sh';
       shellArgs = ['-c', claudeLoginScript];
     }
-    const document = vscode.window.activeTextEditor?.document.uri;
-    const folder = (document && vscode.workspace.getWorkspaceFolder(document)) ?? vscode.workspace.workspaceFolders?.[0];
     return {
       provider,
       signIn,
@@ -270,5 +280,6 @@ export function registerAiTerminals(context: vscode.ExtensionContext, profiles: 
     command('xdevAi.claude.renameAccount', 'rename', 'claude'),
     vscode.window.registerTerminalProfileProvider('xdevAi.claude.terminal', terminalProvider('claude'))
   );
+  registerUsageStatus(context, shortcut, profiles, accountsChanged.event);
   return accountsChanged.event;
 }

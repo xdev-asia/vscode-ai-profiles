@@ -38,6 +38,14 @@ Install each CLI on the workspace host. If xDev AI cannot find one, enter its ab
 
 Each account has its own configuration directory on the workspace host. The CLIs manage their sign-in, credentials, and history there. Terminal and API profiles are configured separately. [Claude Code authentication](https://code.claude.com/docs/en/authentication#log-in-with-multiple-accounts) · [Codex authentication](https://developers.openai.com/codex/auth) · [Gemini CLI authentication](https://geminicli.com/docs/get-started/authentication/)
 
+### View account quota
+
+Hover over **xDev AI** in the VS Code or code-server status bar. The hover lists terminal profiles with the plan name, percentage used, and reset time where available. Click **Refresh quota** to update the hover or open a profile's terminal for its full usage view. API key profiles are managed separately and have no subscription quota in the hover.
+
+- **Codex.** ChatGPT profiles show rate-limit windows from Codex App Server. The extension refreshes these readings periodically in trusted workspaces. [Codex rate limits](https://learn.chatgpt.com/docs/app-server#6-rate-limits-chatgpt)
+- **Claude Code.** Open a new Claude session from xDev AI in a trusted workspace. On supported plans, the hover shows the latest quota sample after Claude replies. This uses the session's status line and requires Node.js on the workspace host's `PATH`. If you already use a custom Claude status line, open `/usage` in the terminal. [Claude Code status line](https://code.claude.com/docs/en/statusline#display-usage-limits)
+- **Gemini CLI.** Use the account's hover link to open its terminal and enter `/stats model` for model usage and any quota the CLI displays. [Gemini CLI commands](https://geminicli.com/docs/reference/commands/)
+
 ### Open a terminal with bypass permissions
 
 Right-click a signed-in terminal account and choose **Open AI Terminal with Bypass Permissions**, or choose **xDev AI: Bypass Permissions** from the terminal profile menu. Confirm the mode for the session. Use a trusted workspace, and use a separate VM or container when running Codex without its sandbox.
