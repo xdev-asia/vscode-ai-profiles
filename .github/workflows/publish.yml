@@ -64,8 +64,16 @@ jobs:
           VSIX: ${{ needs.build.outputs.vsix }}
         run: |
           if ! gh release view "$GITHUB_REF_NAME" --json assets >/dev/null 2>&1; then
+            notes=$(mktemp)
+            notes_args=(--generate-notes)
+            if unzip -p "$VSIX" extension/changelog.md 2>/dev/null | awk -v version="${GITHUB_REF_NAME#v}" '
+              /^## / { in_release = ($2 == version); next }
+              in_release { print }
+            ' > "$notes" && grep -q '[^[:space:]]' "$notes"; then
+              notes_args=(--notes-file "$notes")
+            fi
             gh release create "$GITHUB_REF_NAME" "$VSIX" --verify-tag \
-              --title "xDev AI $GITHUB_REF_NAME" --generate-notes
+              --title "xDev AI $GITHUB_REF_NAME" "${notes_args[@]}"
           elif ! gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name' | grep -Fxq "$VSIX"; then
             gh release upload "$GITHUB_REF_NAME" "$VSIX"
           fi

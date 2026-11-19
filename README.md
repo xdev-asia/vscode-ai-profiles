@@ -12,6 +12,8 @@ Use VS Code **1.95 or later**, or a code-server release that includes VS Code 1.
 
 For manual installation, download the `.vsix` from [GitHub Releases](https://github.com/xdev-asia/vscode-ai-profiles/releases) and run **Extensions: Install from VSIX…** in your workspace. On code-server you can also run `code-server --install-extension <path-to-vsix>`.
 
+See what's new under **Extensions → xDev AI → Changelog**, or read the [release history](CHANGELOG.md) on GitHub.
+
 The extension runs on the machine that hosts the workspace. For remote workspaces, that machine needs access to the provider's API and resolves any `localhost` addresses in custom endpoints. [VS Code Remote](https://code.visualstudio.com/api/advanced-topics/remote-extensions) · [code-server installation](https://coder.com/docs/code-server/FAQ#how-do-i-install-an-extension-manually)
 
 The extension ID changed to `xdev-asia.xdev-ai` in v0.2.1. If you installed the v0.2.0 preview (`xdev.xdev-ai`), disable it before using the new version, then add your API profiles and sign in to each Claude Code account again in the new extension.
@@ -81,6 +83,8 @@ VS Code manages the chat session's agent harness and model picker. To change the
 1. Open **xDev Squad → Workflow** or run **xDev AI: Open SDLC Workflow**. Enter the project brief to start **Plan → Implement → Review → Test → Release**.
 2. For an AI draft, assign the stage's role an API profile in **Roles**, then click **Draft with AI** in **Workflow**. The draft also appears in the shared **Chat**. In Copilot Chat, `#xdevSdlc` can show the current stage or request a draft.
 3. Edit the draft or enter your own result, then click **Approve stage**. For terminal accounts, use **Copy stage brief** and open the role's terminal. Check approved results in the same workflow after reloading the workspace.
+
+The **Release** stage drafts a Markdown changelog entry from approved results. Review it in **Workflow**, then copy the entry to your project's changelog when preparing the release.
 
 Each AI draft sends the project brief, excerpts of earlier approved results, and enabled workspace skills to the assigned API provider. Each stage produces a text result. Run code changes, tests, and releases in your editor, CLI, or CI. Open **Workflow** to approve results from either chat interface. Each workspace keeps one current workflow, with a reset action to start another.
 
@@ -167,7 +171,7 @@ npm run package
 
 ## Release an extension version
 
-[GitHub Actions](https://github.com/xdev-asia/vscode-ai-profiles/actions/workflows/publish.yml) tests and packages every pull request and push to `main`. Push a version tag such as `v0.2.2` that matches `package.json` to attach the tested VSIX to a GitHub Release and publish the same file to both registries.
+[GitHub Actions](https://github.com/xdev-asia/vscode-ai-profiles/actions/workflows/publish.yml) tests and packages every pull request and push to `main`. Add the version's notes to [CHANGELOG.md](CHANGELOG.md) under a heading such as `## 0.6.1 - 2026-11-19`. Push a version tag such as `v0.6.1` that matches `package.json`. The workflow uses that changelog entry for the GitHub Release, attaches the tested VSIX, and publishes the same VSIX to both registries.
 
 - **VS Code Marketplace.** Create or select the `xdev-asia` publisher and add a Trusted Publishing policy in [Manage Publishers & Extensions](https://marketplace.visualstudio.com/manage). Set the repository owner to `xdev-asia`, repository to `vscode-ai-profiles`, and workflow to `publish.yml`. Leave the environment blank.
 - **Open VSX (code-server).** Declare the extension license in `package.json` and include the license file. Sign the [Open VSX Publisher Agreement](https://open-vsx.org/publisher-agreement-v1.1) and create the `xdev-asia` namespace. Publish the first VSIX through the [Open VSX upload page](https://open-vsx.org/publish), or save an Open VSX access token as `OVSX_PAT` in the [repository's Actions secrets](https://github.com/xdev-asia/vscode-ai-profiles/settings/secrets/actions) to publish from CI. After the first version is active, the [namespace owner](https://github.com/eclipse-openvsx/openvsx/wiki/Namespace-Access) can register the same owner, repository, and workflow for `xdev-asia.xdev-ai` under [Trusted Publishers](https://open-vsx.org/user-settings/trusted-publishers). Remove `OVSX_PAT` after registration to use short-lived credentials for subsequent releases. [Open VSX trusted publishing](https://github.com/eclipse-openvsx/openvsx/wiki/Trusted-Publishing)

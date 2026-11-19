@@ -5,7 +5,7 @@ export const workflowStages = [
   { name: 'Implement', role: 'Implement', instruction: 'Describe the changes needed to implement the approved plan, with concrete examples where helpful.' },
   { name: 'Review', role: 'Review', instruction: 'Review the implementation for correctness and regressions. List findings and open questions.' },
   { name: 'Test', role: 'Tests', instruction: 'Describe test cases, expected results, and what still needs verification.' },
-  { name: 'Release', role: 'Lead', instruction: 'Draft release notes, a release checklist, and rollback steps. Identify any remaining blockers.' }
+  { name: 'Release', role: 'Lead', instruction: 'Draft a Markdown changelog entry from the approved results. Group user-facing changes under Added, Changed, and Fixed as applicable. Include a release checklist, rollback steps, and any remaining blockers after the entry.' }
 ] as const satisfies ReadonlyArray<{ name: string; role: Role; instruction: string }>;
 
 export const workflowBriefLimit = 4_000;
