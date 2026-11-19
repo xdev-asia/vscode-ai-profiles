@@ -1,70 +1,82 @@
 # xDev AI
 
-Extension VS Code để mở terminal Claude Code theo từng tài khoản và trò chuyện trong editor với nhiều hồ sơ API.
+A VS Code extension that opens Claude Code terminals for individual accounts and lets you chat with AI providers using separate API profiles.
 
-## Cài đặt
+## Installation
 
-Cần VS Code hoặc code-server có phiên bản VS Code **1.95 trở lên**.
+Use VS Code **1.95 or later**, or a code-server release that includes VS Code 1.95 or later. Download the `.vsix` from [GitHub Releases](https://github.com/xdev-asia/vscode-ai-profiles/releases), or build it locally with `npm ci` and `npm run package`.
 
-- **VS Code Desktop** — mở Command Palette, chạy **Extensions: Install from VSIX…** và chọn `xdev-ai-0.2.0.vsix`.
-- **VS Code Remote** — mở workspace qua Remote SSH, WSL, Dev Container hoặc Remote Tunnel rồi chạy **Extensions: Install from VSIX…** trong cửa sổ remote. Kiểm tra xDev AI xuất hiện trong nhóm extension của máy remote.
-- **code-server** — chép gói lên server và chạy `code-server --install-extension xdev-ai-0.2.0.vsix`, sau đó tải lại cửa sổ trình duyệt.
+- **VS Code Desktop.** Run **Extensions: Install from VSIX…** from the Command Palette and select `xdev-ai-0.2.0.vsix`.
+- **VS Code Remote.** Open a workspace over Remote SSH, WSL, Dev Containers, or Remote Tunnels. Run **Extensions: Install from VSIX…** in the remote window, then confirm xDev AI appears under the remote host in the Extensions view.
+- **code-server.** Copy the VSIX to the server, run `code-server --install-extension xdev-ai-0.2.0.vsix`, and reload the browser window.
 
-Extension chạy trên máy chứa workspace. Với workspace remote, máy remote cần kết nối được tới API của nhà cung cấp. Địa chỉ `localhost` của endpoint tùy chỉnh được phân giải trên máy đó. [VS Code Remote](https://code.visualstudio.com/api/advanced-topics/remote-extensions) · [code-server](https://coder.com/docs/code-server/FAQ#how-do-i-install-an-extension-manually)
+The extension runs on the machine that hosts the workspace. For remote workspaces, that machine needs access to the provider's API and resolves any `localhost` addresses in custom endpoints. [VS Code Remote](https://code.visualstudio.com/api/advanced-topics/remote-extensions) · [code-server installation](https://coder.com/docs/code-server/FAQ#how-do-i-install-an-extension-manually)
 
-## Nhiều tài khoản Claude Code
+## Use multiple Claude Code accounts
 
-1. Cài Claude Code trên máy chứa workspace. Trên Windows, dùng bản cài native có `claude.exe`. Nếu extension không tìm thấy CLI, đặt đường dẫn tuyệt đối trong `xdevAi.claudeExecutable` ở User Settings hoặc Remote Settings. [Cài Claude Code](https://code.claude.com/docs/en/setup)
-2. Chạy **xDev AI: Add Claude Account**, đặt tên hồ sơ và hoàn tất đăng nhập claude.ai trong trình duyệt. Lặp lại với tài khoản thứ hai. Nếu đang dùng máy chủ không có trình duyệt, mở URL mà Claude Code in trong terminal và làm theo hướng dẫn của CLI.
-3. Chạy **xDev AI: Open Claude Terminal** rồi chọn tài khoản. Bạn cũng có thể chọn **xDev AI: Claude Code** trong menu cạnh dấu **+** ở Terminal hoặc bấm **Claude Code** trong tab xDev AI. Có thể mở nhiều terminal cùng lúc. Dùng `/status` trong Claude Code để kiểm tra tài khoản hiện tại.
-4. Dùng **xDev AI: Sign In to Claude Account** khi cần đăng nhập lại một hồ sơ.
+1. Install Claude Code on the workspace host. On Windows, use the native installation with `claude.exe`. If xDev AI cannot find the CLI, set `xdevAi.claudeExecutable` to its absolute path in User Settings or Remote Settings. [Claude Code installation](https://code.claude.com/docs/en/setup)
+2. Run **xDev AI: Add Claude Account**, name the profile, and complete the claude.ai sign-in in your browser. Repeat for each account. On a server without a browser, open the URL Claude Code prints in the terminal and follow its instructions.
+3. Run **xDev AI: Open Claude Terminal** and select an account. You can also choose **xDev AI: Claude Code** from the menu next to **+** in the Terminal panel or click **Claude Code** in the xDev AI tab. You can keep multiple terminals open at once. Run `/status` in Claude Code to see which account the terminal is using.
+4. Run **xDev AI: Sign In to Claude Account** to sign in again for an existing profile.
 
-Mỗi hồ sơ đặt `CLAUDE_CONFIG_DIR` riêng trên máy chứa workspace. Claude Code xử lý đăng nhập, lưu phiên và quản lý thông tin xác thực trong môi trường đó. Tài khoản tạo trên Desktop và trên server có phiên đăng nhập riêng. Luồng này dùng tài khoản claude.ai. [Đăng nhập nhiều tài khoản theo hướng dẫn của Anthropic](https://code.claude.com/docs/en/authentication#log-in-with-multiple-accounts)
+Each profile uses a separate `CLAUDE_CONFIG_DIR` on the workspace host. Claude Code handles claude.ai sign-in and manages its credentials and session history there. Desktop and server profiles have separate sign-in sessions. [Anthropic's guide to multiple accounts](https://code.claude.com/docs/en/authentication#log-in-with-multiple-accounts)
 
-## Chat với API
+## Chat with AI providers
 
-1. Mở **xDev AI: Open Chat** từ Command Palette.
-2. Bấm **Thêm hồ sơ** và chọn nhà cung cấp. Đặt tên dễ phân biệt, nhập model ID và API key. Endpoint tương thích OpenAI cần thêm base URL, ví dụ `http://127.0.0.1:11434/v1` cho Ollama. Có thể bỏ trống khóa nếu endpoint cho phép truy cập không cần xác thực.
-3. Bấm **Gửi** hoặc dùng `Ctrl+Enter` / `Cmd+Enter`. Chọn hồ sơ khác trong danh sách khi muốn đổi tài khoản. Mỗi hồ sơ giữ tối đa 12 lượt hỏi đáp gần nhất khi tab chat còn mở.
-4. Dùng **Quản lý** để đổi tên, model, API key hoặc xóa hồ sơ. **Đoạn chat mới** xóa lịch sử của hồ sơ đang chọn.
+1. Run **xDev AI: Open Chat** from the Command Palette.
+2. Run **xDev AI: Add Account** and choose a provider. Give the profile a recognizable name, then enter a model ID and API key. For an OpenAI-compatible endpoint, also enter its base URL, such as `http://127.0.0.1:11434/v1` for Ollama. You can leave the key blank if the endpoint accepts unauthenticated requests.
+3. Send a message with `Ctrl+Enter` or `Cmd+Enter`. Use the profile menu or **xDev AI: Switch Account** to change accounts. Each profile keeps its most recent 12 exchanges while the chat tab is open.
+4. Run **xDev AI: Manage Accounts** to rename or remove a profile, change its model, or replace its API key. The **Đoạn chat mới** (New chat) button clears the selected profile's conversation.
 
-Tab chat xác thực qua API key. Lấy API key và model ID từ [OpenAI](https://developers.openai.com/api/docs/quickstart), [Anthropic](https://platform.claude.com/docs/en/api/messages/create) hoặc [Google AI Studio](https://aistudio.google.com/docs/openai).
+The chat tab authenticates with API keys. Get a key and model ID from your provider. [OpenAI](https://developers.openai.com/api/docs/quickstart) · [Anthropic](https://platform.claude.com/docs/en/api/messages/create) · [Google AI Studio](https://aistudio.google.com/docs/openai)
 
-Hồ sơ được lưu qua SecretStorage của VS Code. Cấu hình hồ sơ có phạm vi lưu trữ theo môi trường VS Code, vì vậy bạn có thể cần thêm hồ sơ riêng trên server. Cửa sổ chat chỉ gửi nội dung bạn nhập cùng lịch sử của hồ sơ đang chọn. Khi dùng endpoint tùy chỉnh, base URL phải là HTTPS hoặc HTTP qua loopback.
+VS Code SecretStorage holds the API profiles. You may need to add your profiles again on a different VS Code installation or server. The chat sends your message and the selected profile's conversation history to its provider. Custom base URLs must use HTTPS or loopback HTTP.
 
-## Dùng như thư viện TypeScript
+## Use the TypeScript library
 
-Phần gọi model có thể dùng độc lập trong Node.js 20.3 trở lên. Từ mã nguồn, chạy `npm ci` rồi `npm pack` để tạo `xdev-ai-0.2.0.tgz`. Cài gói đó vào dự án Node.js của bạn rồi gọi hàm `chat`.
+The chat client also runs independently in Node.js 20.3 or later. Run `npm ci` and `npm pack` from the repository root to produce `xdev-ai-0.2.0.tgz`. Install that archive in your Node.js project, then set `AI_MODEL` and `OPENAI_API_KEY` for this example.
 
 ```ts
 import { chat } from 'xdev-ai'
 
 const answer = await chat(
   { provider: 'openai', model: process.env.AI_MODEL!, apiKey: process.env.OPENAI_API_KEY },
-  [{ role: 'user', content: 'Giải thích cách dùng AbortSignal.' }]
+  [{ role: 'user', content: 'Explain how to use AbortSignal.' }]
 )
 console.log(answer)
 ```
 
-Extension VS Code khác có thể khai báo `"extensionDependencies": ["xdev.xdev-ai"]` và gọi API sau khi xDev AI đã được cài vào cùng extension host. `listAccounts()` trả về ID, tên, provider và model. Truyền `{ accountId }` để chọn hồ sơ cụ thể hoặc bỏ qua để dùng hồ sơ đang hoạt động.
+### Call xDev AI from another VS Code extension
+
+Add `"extensionDependencies": ["xdev.xdev-ai"]` to the calling extension's manifest and install xDev AI in the same extension host. `listAccounts()` returns each profile's ID, name, provider, and model. Pass `{ accountId }` to select a profile. When you omit it, `chat()` uses the active profile.
 
 ```ts
+import * as vscode from 'vscode'
+
 const extension = vscode.extensions.getExtension('xdev.xdev-ai')
-if (!extension) throw new Error('Cần cài xDev AI.')
+if (!extension) throw new Error('Install xDev AI to continue.')
 const ai = await extension.activate()
 const [account] = await ai.listAccounts()
 if (account) {
   const answer = await ai.chat(
-    [{ role: 'user', content: 'Giải thích đoạn mã này.' }],
+    [{ role: 'user', content: 'Describe how a VS Code extension host works.' }],
     { accountId: account.id }
   )
+  console.log(answer)
 }
 ```
 
-## Build
+## Build and test
 
 ```sh
 npm ci
 npm test
 npm run package
 ```
+
+## Release an extension version
+
+[GitHub Actions](https://github.com/xdev-asia/vscode-ai-profiles/actions/workflows/publish.yml) tests and packages every pull request and push to `main`. Push a version tag such as `v0.2.1` that matches `package.json` to attach the tested VSIX to a GitHub Release and publish the same file to both registries.
+
+- **VS Code Marketplace.** Create or select the `xdev` publisher and add a Trusted Publishing policy in [Manage Publishers & Extensions](https://marketplace.visualstudio.com/manage). Set the repository owner to `xdev-asia`, repository to `vscode-ai-profiles`, and workflow to `publish.yml`. Leave the environment blank.
+- **Open VSX (code-server).** Declare the extension license in `package.json` and include the license file. Sign the [Open VSX Publisher Agreement](https://open-vsx.org/publisher-agreement-v1.1), create the `xdev` namespace, and save the access token as the `OVSX_PAT` GitHub Actions secret for the first release. After the first version is active, the namespace owner can register the same owner, repository, and workflow for `xdev.xdev-ai` under [Trusted Publishers](https://open-vsx.org/user-settings/trusted-publishers). Remove `OVSX_PAT` after registration to use short-lived credentials for subsequent releases. [Open VSX trusted publishing](https://github.com/eclipse-openvsx/openvsx/wiki/Trusted-Publishing)

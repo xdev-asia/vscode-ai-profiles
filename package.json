@@ -5,6 +5,13 @@
   "version": "0.2.0",
   "publisher": "xdev",
   "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xdev-asia/vscode-ai-profiles.git"
+  },
+  "bugs": {
+    "url": "https://github.com/xdev-asia/vscode-ai-profiles/issues"
+  },
   "engines": {
     "vscode": "^1.95.0",
     "node": ">=20.3"

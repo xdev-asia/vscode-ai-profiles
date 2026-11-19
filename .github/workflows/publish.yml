@@ -1,0 +1,127 @@
+name: Build and publish xDev AI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Test and build VSIX
+    runs-on: ubuntu-latest
+    outputs:
+      vsix: ${{ steps.package.outputs.vsix }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          cache: npm
+      - name: Check release tag
+        if: github.ref_type == 'tag'
+        run: |
+          version=$(node -p 'require("./package.json").version')
+          if [[ "$GITHUB_REF_NAME" != "v$version" || ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tag must match a stable package.json version (vMAJOR.MINOR.PATCH)." >&2
+            exit 1
+          fi
+      - run: npm ci
+      - run: npm test
+      - name: Package extension
+        id: package
+        run: |
+          version=$(node -p 'require("./package.json").version')
+          vsix="xdev-ai-$version.vsix"
+          npm run package -- --out "$vsix"
+          printf 'vsix=%s\n' "$vsix" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: xdev-ai-vsix
+          path: ${{ steps.package.outputs.vsix }}
+          if-no-files-found: error
+
+  github-release:
+    name: Publish GitHub Release
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: xdev-ai-vsix
+      - name: Attach VSIX to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VSIX: ${{ needs.build.outputs.vsix }}
+        run: |
+          if ! gh release view "$GITHUB_REF_NAME" --json assets >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" "$VSIX" --verify-tag \
+              --title "xDev AI $GITHUB_REF_NAME" --generate-notes
+          elif ! gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name' | grep -Fxq "$VSIX"; then
+            gh release upload "$GITHUB_REF_NAME" "$VSIX"
+          fi
+
+  marketplace:
+    name: Publish to VS Code Marketplace
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - run: npm ci
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: xdev-ai-vsix
+      - name: Publish using Trusted Publishing
+        env:
+          VSIX: ${{ needs.build.outputs.vsix }}
+        run: npx --no-install vsce publish --oidc --skip-duplicate --packagePath "$VSIX"
+
+  open-vsx:
+    name: Publish to Open VSX
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: xdev-ai-vsix
+      - name: Publish to Open VSX
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+          VSIX: ${{ needs.build.outputs.vsix }}
+        run: |
+          if [[ -z "$(unzip -p "$VSIX" extension/package.json | jq -r '.license // empty')" ]]; then
+            echo 'Set the extension license in package.json before publishing to Open VSX.' >&2
+            exit 1
+          fi
+          if [[ -n "$OVSX_PAT" ]]; then
+            npx --yes ovsx@1.4.0 publish --skip-duplicate "$VSIX"
+          else
+            npx --yes ovsx@1.4.0 publish --trusted-publishing --skip-duplicate "$VSIX"
+          fi
