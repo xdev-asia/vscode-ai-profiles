@@ -49,15 +49,25 @@ export interface RunSession {
   sessionId: string;
 }
 
+export type StepStatus = 'pending' | 'running' | 'terminal' | 'done' | 'blocked' | 'failed' | 'skipped';
+
+export interface RunStep extends Job {
+  status: StepStatus;
+  summary?: string;
+  files?: string[];
+}
+
 export interface RunRecord {
   id: string;
+  request: string;
   prompt: string;
   time: number;
-  status: 'running' | 'done' | 'blocked' | 'failed' | 'stopped';
-  repo: string;
-  path: string;
-  branch: string;
-  base: string;
+  status: 'active' | 'done' | 'stopped';
+  steps: RunStep[];
+  repo?: string;
+  path?: string;
+  branch?: string;
+  base?: string;
   commit?: string;
   stat?: string;
   files?: number;
@@ -257,141 +267,250 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
     }, run);
   }
 
+  /**
+   * Approving a plan only prepares a run: its steps and, for Claude Code steps, a git worktree.
+   * No agent starts until the user runs a step. Each step pauses the run when it ends.
+   */
   async approve(id: unknown, signal?: AbortSignal): Promise<StartedRun> {
     this.requireIdle();
     const plan = this.requirePlan(id);
+    if (this.read().runs?.some(run => run.status === 'active')) throw new Error('Finish or stop the current run before approving another plan.');
     const directory = await this.directory();
     for (const job of plan.jobs) this.verify(job, directory);
     const headlessJobs = plan.jobs.some(job => job.kind === 'claude');
     const folder = this.host?.folder();
     if (headlessJobs && (!this.host || !folder)) throw new Error('Open a workspace folder to run Claude Code workers.');
 
-    return this.launch('Starting approved tasks…', signal, state => {
+    return this.launch('Preparing the run…', signal, state => {
       if (state.plan?.id !== plan.id) throw new Error('This plan is no longer available.');
       state.plan = undefined;
       state.entries.push({ author: 'Squad', text: 'Plan approved.' });
     }, async run => {
+      const runId = randomUUID();
       let worktree: RunWorktree | undefined;
-      let record: RunRecord | undefined;
-      let outcome: RunRecord['status'] = 'done';
-      const previous: { role: Role; status: string; summary: string; files?: string[] }[] = [];
-      let implementation: string | undefined;
-      try {
-        if (headlessJobs) {
-          run.status = 'Preparing a git worktree…';
-          this.changed();
-          await this.host!.prepare?.();
-          const runId = randomUUID();
-          worktree = await this.host!.worktrees.create(folder!, runId);
-          record = { id: runId, prompt: shorten(plan.prompt, 500), time: Date.now(), status: 'running', costUsd: 0, sessions: [], ...worktree };
-          const created = record;
-          await this.write(state => {
-            state.runs = [created, ...(state.runs ?? [])].slice(0, runLimit);
-            state.entries.push({ author: 'Squad', run: runId, text: `Workers use branch ${worktree!.branch} in a separate worktree. Your checkout is not changed.` });
-          }, run);
-        }
-
-        for (const job of plan.jobs) {
-          run.signal.throwIfAborted();
-          run.status = `${job.role} is ${job.kind === 'claude' ? 'working' : 'responding'}…`;
-          this.changed();
-          const agent = this.verify(job, await this.directory());
-          const memory = this.memory.context();
-
-          if (agent.kind === 'claude') {
-            const stdout = await this.host!.run({
-              executable: await this.host!.executable(), profile: agent.profile, cwd: worktree!.path, role: job.role, mode: 'work',
-              prompt: JSON.stringify({ request: plan.prompt, task: job.brief, previous: previous.length ? previous : undefined, memory: memory.length ? memory : undefined }),
-              system: `${headless} You are ${job.role}. ${workerInstructions[job.role]} Reply in the user's language.`,
-              settings: this.host!.settings(job.role), signal: run.signal
-            }).catch((error: unknown) => {
-              throw new Error(`${job.role}: ${error instanceof Error ? error.message : 'The worker failed.'}`, { cause: error });
-            });
-            run.signal.throwIfAborted();
-            const result = (() => {
-              try {
-                return parseWorkerOutput(stdout);
-              } catch (error) {
-                throw new Error(`${job.role}: ${error instanceof Error ? error.message : 'Unreadable worker result.'}`, { cause: error });
-              }
-            })();
-            previous.push({ role: job.role, status: result.status, summary: result.summary, files: result.filesChanged.length ? result.filesChanged : undefined });
-            await this.memory.add(result.memory, job.role);
-            const runId = record!.id;
-            await this.write(state => {
-              const saved = state.runs?.find(candidate => candidate.id === runId);
-              if (saved) {
-                saved.costUsd += result.costUsd;
-                if (result.sessionId) saved.sessions.push({ role: job.role, profileId: agent.id, profile: agent.name, sessionId: result.sessionId });
-              }
-              state.entries.push({ ...this.reply(job.role, agent, workerText(result), result.costUsd), run: runId });
-            }, run);
-            if (result.status === 'blocked') {
-              outcome = 'blocked';
-              await this.write(state => state.entries.push({ author: 'Squad', text: `${job.role} is blocked, so the remaining tasks were skipped. Reply to Lead with a decision to continue.` }), run);
-              break;
-            }
-            continue;
-          }
-
-          const answer = await chat(agent.account, [
-            { role: 'system', content: `You are ${job.role}. ${roleInstructions[job.role]} ${textOnly} Reply in the user's language.` },
-            {
-              role: 'user',
-              content: JSON.stringify({
-                request: plan.prompt, task: job.brief,
-                implementation: implementation && shorten(implementation, 8_000),
-                previous: previous.some(item => item.files) ? previous : undefined,
-                memory: memory.length ? memory : undefined
-              })
-            }
-          ], { signal: run.signal }).catch((error: unknown) => {
-            const detail = error instanceof Error ? error.message : 'The API request failed.';
-            throw new Error(`${job.role}: ${detail}`, { cause: error });
-          });
-          run.signal.throwIfAborted();
-          if (job.role === 'Implement') implementation = answer;
-          previous.push({ role: job.role, status: 'done', summary: shorten(answer, 1_000) });
-          await this.write(state => state.entries.push(this.reply(job.role, agent, answer)), run);
-        }
-        await this.write(state => state.entries.push({ author: 'Squad', text: 'Approved tasks finished.' }), run);
-      } catch (error) {
-        outcome = run.signal.aborted ? 'stopped' : 'failed';
-        throw error;
-      } finally {
-        if (worktree && record) await this.finishRun(record.id, worktree, plan.prompt, outcome, run);
+      if (headlessJobs) {
+        run.status = 'Preparing a git worktree…';
+        this.changed();
+        await this.host!.prepare?.();
+        worktree = await this.host!.worktrees.create(folder!, runId);
       }
+      const record: RunRecord = {
+        id: runId, request: plan.prompt, prompt: shorten(plan.prompt, 500), time: Date.now(), status: 'active', costUsd: 0,
+        sessions: [], steps: plan.jobs.map(job => ({ ...job, status: 'pending' })), ...worktree
+      };
+      await this.write(state => {
+        state.runs = [record, ...(state.runs ?? [])].slice(0, runLimit);
+        state.entries.push({
+          author: 'Squad', run: runId,
+          text: `${worktree ? `Branch ${worktree.branch} is ready in a separate worktree; your checkout is not changed. ` : ''}Nothing has run yet. Start each step under Worker runs: run it, open it in a terminal, or skip it.`
+        });
+      }, run);
     });
   }
 
-  private async finishRun(id: string, worktree: RunWorktree, prompt: string, status: RunRecord['status'], run: ActiveRun): Promise<void> {
+  /** The next step the user can act on: the first one not done or skipped. */
+  currentStep(record: RunRecord): number {
+    return record.steps.findIndex(step => step.status !== 'done' && step.status !== 'skipped');
+  }
+
+  private activeRun(id: unknown): { record: RunRecord; index: number; step: RunStep } {
+    const record = this.run(id);
+    if (!record || record.status !== 'active') throw new Error('This run is no longer active.');
+    const index = this.currentStep(record);
+    if (index < 0) throw new Error('This run has no remaining steps. Finish it to commit the changes.');
+    return { record, index, step: record.steps[index] };
+  }
+
+  private requireNotInTerminal(step: RunStep): void {
+    if (step.status === 'terminal') throw new Error(`${step.role} is open in a terminal. Mark the step done or skip it.`);
+  }
+
+  private stepContext(record: RunRecord, index: number) {
+    const done = record.steps.slice(0, index).filter(step => step.status === 'done');
+    const memory = this.memory.context();
+    return {
+      previous: done.map(step => ({ role: step.role, status: 'done', summary: shorten(step.summary ?? '', 1_000), files: step.files?.length ? step.files : undefined })),
+      implementation: done.find(step => step.role === 'Implement' && step.kind !== 'claude')?.summary,
+      memory: memory.length ? memory : undefined
+    };
+  }
+
+  private briefFrom(input: unknown, fallback: string): string {
+    if (input === undefined || input === null || input === '') return fallback;
+    if (typeof input !== 'string' || !input.trim() || input.length > 4_000) throw new Error('Enter a step brief up to 4,000 characters.');
+    return input.trim();
+  }
+
+  private updateRun(id: string, change: (record: RunRecord, state: Thread) => void, run?: ActiveRun): Promise<void> {
+    return this.write(state => {
+      const record = state.runs?.find(candidate => candidate.id === id);
+      if (!record) throw new Error('This run is no longer available.');
+      change(record, state);
+    }, run);
+  }
+
+  /** Runs the current step once, headless or through its text API, then pauses the run. */
+  async runStep(id: unknown, briefInput?: unknown, signal?: AbortSignal): Promise<StartedRun> {
+    this.requireIdle();
+    const { record, index, step } = this.activeRun(id);
+    this.requireNotInTerminal(step);
+    const brief = this.briefFrom(briefInput, step.brief);
+    const agent = this.verify(step, await this.directory());
+    if (agent.kind === 'claude' && !record.path) throw new Error('This run has no worktree for Claude Code steps.');
+
+    return this.launch(`${step.role} is ${agent.kind === 'claude' ? 'working' : 'responding'}…`, signal, state => {
+      const saved = state.runs?.find(candidate => candidate.id === record.id);
+      if (!saved || saved.status !== 'active' || this.currentStep(saved) !== index) throw new Error('This step has changed. Check Worker runs.');
+      Object.assign(saved.steps[index], { brief, status: 'running' });
+      state.entries.push({ author: 'You', to: step.role, run: record.id, text: brief });
+    }, async run => {
+      const context = this.stepContext(record, index);
+      try {
+        if (agent.kind === 'claude') {
+          await this.host!.prepare?.();
+          const stdout = await this.host!.run({
+            executable: await this.host!.executable(), profile: agent.profile, cwd: record.path!, role: step.role, mode: 'work',
+            prompt: JSON.stringify({ request: record.request, task: brief, previous: context.previous.length ? context.previous : undefined, memory: context.memory }),
+            system: `${headless} You are ${step.role}. ${workerInstructions[step.role]} Reply in the user's language.`,
+            settings: this.host!.settings(step.role), signal: run.signal
+          });
+          run.signal.throwIfAborted();
+          const result = parseWorkerOutput(stdout);
+          await this.memory.add(result.memory, step.role);
+          await this.updateRun(record.id, (saved, state) => {
+            saved.costUsd += result.costUsd;
+            if (result.sessionId) saved.sessions.push({ role: step.role, profileId: agent.id, profile: agent.name, sessionId: result.sessionId });
+            Object.assign(saved.steps[index], { status: result.status, summary: result.summary, files: result.filesChanged });
+            state.entries.push({ ...this.reply(step.role, agent, workerText(result), result.costUsd), run: record.id });
+            if (result.status === 'blocked') {
+              state.entries.push({ author: 'Squad', run: record.id, text: `${step.role} is blocked. Edit the brief and run the step again, continue it in a terminal, skip it, or finish the run.` });
+            }
+          }, run);
+        } else {
+          const answer = await chat(agent.account, [
+            { role: 'system', content: `You are ${step.role}. ${roleInstructions[step.role]} ${textOnly} Reply in the user's language.` },
+            {
+              role: 'user',
+              content: JSON.stringify({
+                request: record.request, task: brief,
+                implementation: context.implementation && shorten(context.implementation, 8_000),
+                previous: context.previous.some(item => item.files) ? context.previous : undefined,
+                memory: context.memory
+              })
+            }
+          ], { signal: run.signal });
+          run.signal.throwIfAborted();
+          await this.updateRun(record.id, (saved, state) => {
+            Object.assign(saved.steps[index], { status: 'done', summary: shorten(answer, 8_000) });
+            state.entries.push({ ...this.reply(step.role, agent, answer), run: record.id });
+          }, run);
+        }
+      } catch (error) {
+        const detail = run.signal.aborted ? 'Step stopped.' : error instanceof Error ? error.message : 'The step failed.';
+        await this.updateRun(record.id, saved => { saved.steps[index].status = 'failed'; }).catch(() => undefined);
+        throw new Error(`${step.role}: ${detail}`, { cause: error });
+      }
+      await this.afterStep(record.id, run);
+    });
+  }
+
+  /** Marks the current Claude Code step as handed to an interactive terminal and returns what to open. */
+  async startTerminalStep(id: unknown, briefInput?: unknown) {
+    this.requireIdle();
+    const { record, index, step } = this.activeRun(id);
+    this.requireNotInTerminal(step);
+    const brief = this.briefFrom(briefInput, step.brief);
+    const agent = this.verify(step, await this.directory());
+    if (agent.kind !== 'claude' || !record.path) throw new Error('Only Claude Code steps can continue in a terminal.');
+    await this.host?.prepare?.();
+    const context = this.stepContext(record, index);
+    const prompt = [
+      `Task for ${step.role}: ${brief}`,
+      `Original request: ${record.request}`,
+      context.previous.length ? `Earlier steps:\n${context.previous.map(item => `- ${item.role}: ${item.summary}`).join('\n')}` : '',
+      context.memory ? `Team memory:\n${context.memory.map(note => `- ${note}`).join('\n')}` : '',
+      'Work in this git worktree. Do not commit or push; xDev commits when the run finishes.'
+    ].filter(Boolean).join('\n\n');
+    await this.updateRun(record.id, (saved, state) => {
+      Object.assign(saved.steps[index], { brief, status: 'terminal' });
+      state.entries.push({ author: 'Squad', run: record.id, text: `${step.role} continues in a terminal with ${agent.name}. Click Mark step done when you finish.` });
+    });
+    return { profile: agent.profile, cwd: record.path, prompt, system: workerInstructions[step.role], role: step.role, name: agent.name };
+  }
+
+  /** Completes a step the user worked on in a terminal. */
+  async completeStep(id: unknown, summaryInput?: unknown): Promise<void> {
+    this.requireIdle();
+    const { record, index, step } = this.activeRun(id);
+    if (step.status !== 'terminal') throw new Error('Mark a step done only after continuing it in a terminal.');
+    const summary = typeof summaryInput === 'string' && summaryInput.trim() ? summaryInput.trim().slice(0, 2_000) : 'Done in the terminal.';
+    await this.updateRun(record.id, (saved, state) => {
+      Object.assign(saved.steps[index], { status: 'done', summary });
+      state.entries.push({ author: step.role, run: record.id, profile: `${step.profile} · terminal`, text: summary });
+    });
+    await this.afterStep(record.id);
+  }
+
+  async skipStep(id: unknown): Promise<void> {
+    this.requireIdle();
+    const { record, index, step } = this.activeRun(id);
+    await this.updateRun(record.id, (saved, state) => {
+      saved.steps[index].status = 'skipped';
+      state.entries.push({ author: 'Squad', run: record.id, text: `Skipped ${step.role}.` });
+    });
+    await this.afterStep(record.id);
+  }
+
+  /** Ends the run now: remaining steps are skipped and the worktree is committed locally. */
+  async finish(id: unknown): Promise<void> {
+    this.requireIdle();
+    const record = this.run(id);
+    if (!record || record.status !== 'active') throw new Error('This run is no longer active.');
+    await this.closeRun(record.id, 'stopped');
+  }
+
+  private async afterStep(id: string, run?: ActiveRun): Promise<void> {
+    const record = this.run(id);
+    if (record && this.currentStep(record) < 0) await this.closeRun(id, 'done', run);
+  }
+
+  private async closeRun(id: string, status: 'done' | 'stopped', run?: ActiveRun): Promise<void> {
+    const record = this.run(id);
+    if (!record) return;
     let changes: Awaited<ReturnType<WorkerHost['worktrees']['commit']>> | undefined;
     let issue: string | undefined;
-    try {
-      changes = await this.host!.worktrees.commit(worktree, `xDev Squad: ${prompt.split('\n', 1)[0]}`);
-    } catch (error) {
-      issue = error instanceof Error ? error.message : 'Could not commit the worktree.';
+    if (record.path && record.repo && record.branch && record.base) {
+      try {
+        changes = await this.host!.worktrees.commit(record as RunWorktree, `xDev Squad: ${record.request.split('\n', 1)[0]}`);
+      } catch (error) {
+        issue = error instanceof Error ? error.message : 'Could not commit the worktree.';
+      }
     }
-    await this.write(state => {
-      const saved = state.runs?.find(candidate => candidate.id === id);
-      if (saved) Object.assign(saved, { status, commit: changes?.commit, stat: changes?.stat, files: changes?.files ?? 0 });
-      const cost = formatCost(saved?.costUsd ?? 0);
-      const text = issue ? `Could not commit the worktree: ${issue}` : changes?.commit
-        ? `Committed ${changes.files} changed file${changes.files === 1 ? '' : 's'} to ${worktree.branch}${cost ? ` · ${cost}` : ''}. Review the run below, then merge or discard it.`
-        : `No file changes on ${worktree.branch}${cost ? ` · ${cost}` : ''}.`;
+    await this.updateRun(id, (saved, state) => {
+      const remaining = saved.steps.some(step => step.status !== 'done' && step.status !== 'skipped');
+      for (const step of saved.steps) if (step.status !== 'done') step.status = 'skipped';
+      Object.assign(saved, { status: remaining ? 'stopped' : status, commit: changes?.commit, stat: changes?.stat, files: changes?.files ?? 0 });
+      const cost = formatCost(saved.costUsd);
+      const text = !saved.branch ? `Run finished${cost ? ` · ${cost}` : ''}.`
+        : issue ? `Could not commit the worktree: ${issue}`
+          : changes?.commit
+            ? `Committed ${changes.files} changed file${changes.files === 1 ? '' : 's'} to ${saved.branch}${cost ? ` · ${cost}` : ''}. Review the run below, then merge or remove it.`
+            : `No file changes on ${saved.branch}${cost ? ` · ${cost}` : ''}.`;
       state.entries.push({ author: 'Squad', run: id, text });
-    }, run).catch(() => undefined);
+    }, run);
   }
 
   async removeRun(id: unknown): Promise<void> {
     this.requireIdle();
     const record = this.run(id);
     if (!record) throw new Error('This run is no longer available.');
-    if (!this.host) throw new Error('Claude Code workers are not available here.');
-    await this.host.worktrees.remove(record);
+    if (record.path && record.repo && record.branch) {
+      if (!this.host) throw new Error('Claude Code workers are not available here.');
+      await this.host.worktrees.remove({ repo: record.repo, path: record.path, branch: record.branch });
+    }
     await this.write(state => {
       state.runs = (state.runs ?? []).filter(candidate => candidate.id !== id);
-      state.entries.push({ author: 'Squad', text: `Removed worktree and branch ${record.branch}.` });
+      state.entries.push({ author: 'Squad', text: record.branch ? `Removed worktree and branch ${record.branch}.` : 'Removed the run.' });
     });
   }
 
@@ -611,7 +730,9 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
       try {
         await this.write(state => {
           state.inFlight = undefined;
-          for (const saved of state.runs ?? []) if (saved.status === 'running') saved.status = 'stopped';
+          for (const saved of state.runs ?? []) {
+            for (const step of saved.steps ?? []) if (step.status === 'running') step.status = 'failed';
+          }
           if (notice) state.entries.push({ author: 'Squad', text: notice });
         }, run);
       } catch {

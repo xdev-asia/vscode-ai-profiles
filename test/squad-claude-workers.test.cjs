@@ -92,10 +92,16 @@ test('a Claude Code Lead plans and workers run headless in one worktree with sha
   const { plan } = chat.snapshot();
   assert.deepEqual(plan.jobs.map(job => [job.role, job.kind]), [['Implement', 'claude'], ['Review', 'claude']]);
 
-  const started = await chat.approve(plan.id);
-  await started.finished;
-  const [implement, review] = runs.slice(1);
+  await (await chat.approve(plan.id)).finished;
+  assert.equal(runs.length, 1, 'approving prepares the worktree but starts no worker');
   assert.equal(worktrees.created.length, 1);
+  const runId = chat.snapshot().runs[0].id;
+  await assert.rejects(chat.completeStep(runId), /only after continuing it in a terminal/);
+  await (await chat.runStep(runId)).finished;
+  assert.equal(runs.length, 2, 'one step per click');
+  assert.equal(open().snapshot().runs[0].status, 'active');
+  await (await open().runStep(runId)).finished;
+  const [implement, review] = runs.slice(1);
   assert.equal(implement.cwd, worktrees.created[0].path);
   assert.equal(review.cwd, worktrees.created[0].path, 'Review sees the uncommitted Implement changes');
   assert.equal(implement.mode, 'work');
@@ -118,23 +124,45 @@ test('a Claude Code Lead plans and workers run headless in one worktree with sha
   assert.deepEqual(open().snapshot().runs, []);
 });
 
-test('a blocked worker skips the remaining tasks and the worktree is still committed', async t => {
+test('a blocked step waits for the user, who can rerun it with a new brief or continue in a terminal', async t => {
+  let answer = 'Which database version?';
   const { open, runs, worktrees } = await setup(t, request => request.mode === 'plan'
     ? report({ reply: 'Go', tasks: [{ role: 'Implement', brief: 'Change the schema' }, { role: 'Tests', brief: 'Test it' }] })
-    : report({ status: 'blocked', summary: 'Which database version?', files_changed: [], tests: '', memory: [] }));
+    : report(answer
+      ? { status: 'blocked', summary: answer, files_changed: [], tests: '', memory: [] }
+      : { status: 'done', summary: 'Changed', files_changed: ['db.sql'], tests: '', memory: [] }));
   const chat = open();
   await chat.send('Migrate');
   await settle(chat);
   await (await chat.approve(chat.snapshot().plan.id)).finished;
-  assert.deepEqual(runs.map(request => request.role), ['Lead', 'Implement']);
-  assert.equal(worktrees.committed.length, 1);
-  const snapshot = open().snapshot();
-  assert.equal(snapshot.runs[0].status, 'blocked');
+  const runId = chat.snapshot().runs[0].id;
+  await (await chat.runStep(runId)).finished;
+  let snapshot = open().snapshot();
+  assert.deepEqual(snapshot.runs[0].steps.map(step => step.status), ['blocked', 'pending']);
+  assert.equal(snapshot.runs[0].status, 'active');
+  assert.equal(worktrees.committed.length, 0, 'nothing is committed while the run waits');
   assert.ok(snapshot.entries.some(entry => /Blocked: Which database version\?/.test(entry.text)));
-  assert.ok(snapshot.entries.some(entry => /remaining tasks were skipped/.test(entry.text)));
+
+  answer = '';
+  await (await chat.runStep(runId, 'Change the schema for PostgreSQL 16')).finished;
+  assert.equal(JSON.parse(runs.at(-1).prompt).task, 'Change the schema for PostgreSQL 16');
+
+  const terminal = await chat.startTerminalStep(runId, 'Write migration tests');
+  assert.equal(terminal.cwd, worktrees.created[0].path);
+  assert.equal(terminal.profile.name, 'Tests account');
+  assert.match(terminal.prompt, /Task for Tests: Write migration tests/);
+  assert.match(terminal.prompt, /- Implement: Changed/);
+  assert.equal(runs.length, 3, 'a terminal step does not start a headless worker');
+  await assert.rejects(chat.runStep(runId), /open in a terminal/);
+  await assert.rejects(chat.startTerminalStep(runId), /open in a terminal/);
+  await chat.completeStep(runId, 'Added 3 migration tests, all pass');
+  snapshot = open().snapshot();
+  assert.equal(snapshot.runs[0].status, 'done');
+  assert.equal(snapshot.runs[0].steps[1].summary, 'Added 3 migration tests, all pass');
+  assert.equal(worktrees.committed.length, 1, 'the run is committed when the last step is done');
 });
 
-test('a failing worker marks the run failed and reports the reason', async t => {
+test('a failing worker marks the step failed and the run stays open', async t => {
   const { open } = await setup(t, request => {
     if (request.mode === 'plan') return report({ reply: 'Go', tasks: [{ role: 'Implement', brief: 'Do' }] });
     throw new Error('Claude Code exited with code 1');
@@ -142,9 +170,13 @@ test('a failing worker marks the run failed and reports the reason', async t => 
   const chat = open();
   await chat.send('Do something');
   await settle(chat);
-  const entries = await (await chat.approve(chat.snapshot().plan.id)).finished;
+  await (await chat.approve(chat.snapshot().plan.id)).finished;
+  const runId = chat.snapshot().runs[0].id;
+  const entries = await (await chat.runStep(runId)).finished;
   assert.ok(entries.some(entry => entry.text === 'Implement: Claude Code exited with code 1'));
-  assert.equal(open().snapshot().runs[0].status, 'failed');
+  const [run] = open().snapshot().runs;
+  assert.equal(run.status, 'active');
+  assert.equal(run.steps[0].status, 'failed');
 });
 
 test('worktrees branch from HEAD and commit only inside the worktree', async t => {

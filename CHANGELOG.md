@@ -4,7 +4,7 @@
 
 ### Added
 
-- Assign a Claude Code account to a Squad role to run it as a headless worker. Implement and Tests edit files and run allowed commands, and Review reads the diff, all in a separate git worktree on a new local branch.
+- Assign a Claude Code account to a Squad role and control each step of an approved plan yourself: run it headless, open it as an interactive Claude Code session in a terminal, skip it, or finish the run. Steps work in a separate git worktree on a new local branch, and none starts another.
 - Review, merge, open, resume in a terminal, or remove each worker run from the Squad chat.
 - Squad Memory: shared notes that every agent receives within a fixed budget. Workers add notes after runs.
 - Skills now have a **When to use** description and are copied to every Claude Code account as on-demand skills.

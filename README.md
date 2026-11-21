@@ -104,10 +104,16 @@ Assign a **Claude Code** terminal account (instead of an API profile) to a role 
 
 1. Open a workspace folder that is a git repository with at least one commit.
 2. Send a request to Lead and review the plan. Each task shows whether it runs as **Claude Code** or **Text API**, and the plan shows the spending cap and allowed commands.
-3. Click **Approve and run**. xDev creates a git worktree on a new local branch `xdev/squad/<id>`, so your checkout is not changed. Workers run one after another in that worktree: Implement edits, Review reads the diff, Tests adds and runs tests. Each worker receives the request, its brief, short summaries from earlier workers, and shared memory, not the full transcripts.
-4. When the run ends, xDev commits the worktree to its branch, locally. Under **Worker runs**, use **View diff**, **Merge** (asks first, never pushes), **Open folder**, **Continue … in terminal** to resume a worker's session interactively, or **Remove** to delete the worktree and branch.
+3. Click **Approve plan**. This runs nothing yet. It lists the steps under **Worker runs** and, for Claude Code steps, creates a git worktree on a new local branch `xdev/squad/<id>`, so your checkout is not changed.
+4. You control every step. Edit the brief of the current step, then choose:
+   - **Run headless**: Claude Code runs the step once (`claude -p`) and stops. Implement edits, Review reads the diff, Tests adds and runs tests. Text API steps show **Ask API** instead.
+   - **Open in terminal**: an interactive Claude Code session opens in the worktree under the role's account, with the brief as its first message. You drive it and approve its actions. Click **Mark step done** and add a short summary for later steps.
+   - **Skip step**, or **Finish run** to stop early.
 
-A worker that reports **blocked** stops the remaining tasks; reply to Lead with a decision. Commands outside the allowed list are denied without prompting and listed in the chat.
+   No step starts another. Each step receives the request, its brief, short summaries of earlier steps, and shared memory, not full transcripts.
+5. When the last step is done, or when you click **Finish run**, xDev commits the worktree to its branch, locally. Use **View diff**, **Merge** (asks first, never pushes), **Open folder**, **Resume … session** to continue a headless step interactively, or **Remove** to delete the worktree and branch.
+
+A step that reports **blocked** or fails waits for you. You can run it again with a new brief, open it in a terminal, or skip it. Headless steps deny commands outside the allowed list without prompting and list them in the chat. Each role always uses the account you assigned; xDev never switches accounts by itself.
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
@@ -118,7 +124,7 @@ A worker that reports **blocked** stops the remaining tasks; reply to Lead with 
 
 Workers do not use `--dangerously-skip-permissions` or `--bare` (bare mode ignores claude.ai sign-in). Built-in tools a role does not need are not loaded, and MCP servers are skipped (`--strict-mcp-config`), which keeps each request small. [Claude Code headless mode](https://code.claude.com/docs/en/headless) · [CLI reference](https://code.claude.com/docs/en/cli-reference)
 
-Each account's own plan and usage limits apply. Check your provider's terms before running unattended agents across several subscriptions.
+Each account's own plan and usage limits apply. Squad runs one step at a time, only when you start it.
 
 ### Share memory between agents
 

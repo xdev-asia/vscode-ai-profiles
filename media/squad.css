@@ -211,3 +211,13 @@ summary { cursor: pointer; font-weight: 600; }
 .memory-form { display: flex; gap: 6px; align-items: end; }
 .memory-form label { flex: 1; }
 #memory-list small { color: var(--muted); margin: 0 6px; }
+.steps { list-style: none; padding: 0; margin: 6px 0; display: grid; gap: 4px; }
+.steps > li { padding: 4px 6px; border-left: 2px solid var(--border); }
+.steps > li.done { border-left-color: var(--vscode-testing-iconPassed, var(--accent)); }
+.steps > li.blocked, .steps > li.failed { border-left-color: var(--warning); }
+.steps > li.skipped > span { color: var(--muted); text-decoration: line-through; }
+.steps > li.current { border-left-color: var(--accent); background: var(--vscode-list-hoverBackground, transparent); }
+.steps p { margin: 2px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.step-controls { display: grid; gap: 4px; margin-top: 4px; }
+.step-controls textarea { width: 100%; box-sizing: border-box; }
+.run-list > li.active { border-left-color: var(--accent); }

@@ -294,17 +294,24 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
         case 'stop': return this.teamChat.cancel();
         case 'runDiff': return this.showRunDiff(message.id);
         case 'runOpen': {
-          const run = this.requireRun(message.id);
+          const run = this.requireWorktree(message.id);
           await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(run.path), { forceNewWindow: true });
           return;
         }
         case 'runResume': return this.resumeSession(message.id, message.session);
         case 'runMerge': return this.mergeRun(message.id);
+        case 'stepRun':
+          await this.teamChat.runStep(message.id, message.brief);
+          return;
+        case 'stepTerminal': return this.terminalStep(message.id, message.brief);
+        case 'stepDone': return this.teamChat.completeStep(message.id, message.summary);
+        case 'stepSkip': return this.teamChat.skipStep(message.id);
+        case 'runFinish': return this.teamChat.finish(message.id);
         case 'runRemove': {
           const run = this.requireRun(message.id);
-          const remove = 'Remove worktree';
-          if (await vscode.window.showWarningMessage(`Remove the worktree and branch ${run.branch}?`, {
-            modal: true, detail: 'Unmerged changes on this branch are deleted.'
+          const remove = run.branch ? 'Remove worktree' : 'Remove run';
+          if (await vscode.window.showWarningMessage(run.branch ? `Remove the worktree and branch ${run.branch}?` : 'Remove this run?', {
+            modal: true, detail: run.branch ? 'Unmerged changes on this branch are deleted.' : 'Its replies stay in the chat.'
           }, remove) === remove) await this.teamChat.removeRun(run.id);
           return;
         }
@@ -442,15 +449,41 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
     return run;
   }
 
-  private async showRunDiff(id: unknown): Promise<void> {
+  private requireWorktree(id: unknown) {
     const run = this.requireRun(id);
+    const { repo, path, branch, base } = run;
+    if (!repo || !path || !branch || !base) throw new Error('This run has no git worktree.');
+    return { ...run, repo, path, branch, base };
+  }
+
+  /** Opens an interactive Claude Code terminal under a profile; the user drives it. */
+  private async openClaudeTerminal(name: string, profile: TerminalProfile, cwd: string, args: string[]): Promise<void> {
+    const executable = await findTerminalExecutable('claude', vscode.workspace.getConfiguration('xdevAi').get<string>('claudeExecutable') ?? '');
+    if (!executable) throw new Error('Claude Code was not found on the workspace host. Set xdevAi.claudeExecutable.');
+    const script = process.platform === 'win32' && /\.cmd$/i.test(executable);
+    vscode.window.createTerminal({
+      name,
+      shellPath: script ? process.env.ComSpec ?? 'cmd.exe' : executable,
+      shellArgs: script ? ['/d', '/s', '/c', executable, ...args] : args,
+      cwd,
+      env: terminalProfileEnv(profile)
+    }).show();
+  }
+
+  private async terminalStep(id: unknown, brief: unknown): Promise<void> {
+    const step = await this.teamChat.startTerminalStep(id, brief);
+    await this.openClaudeTerminal(`${step.role} · ${step.name}`, step.profile, step.cwd, ['--append-system-prompt', step.system, step.prompt]);
+  }
+
+  private async showRunDiff(id: unknown): Promise<void> {
+    const run = this.requireWorktree(id);
     const diff = await git(['diff', `${run.base}..${run.branch}`], run.repo);
     const document = await vscode.workspace.openTextDocument({ language: 'diff', content: diff || `No changes on ${run.branch}.` });
     await vscode.window.showTextDocument(document, { preview: true });
   }
 
   private async mergeRun(id: unknown): Promise<void> {
-    const run = this.requireRun(id);
+    const run = this.requireWorktree(id);
     if (!run.commit) throw new Error('This run has no committed changes to merge.');
     const current = (await git(['rev-parse', '--abbrev-ref', 'HEAD'], run.repo)).trim();
     const merge = 'Merge';
@@ -462,21 +495,12 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
   }
 
   private async resumeSession(id: unknown, sessionId: unknown): Promise<void> {
-    const run = this.requireRun(id);
+    const run = this.requireWorktree(id);
     const session = run.sessions.find(candidate => candidate.sessionId === sessionId);
     if (!session) throw new Error('This worker session is no longer available.');
     const profile: TerminalProfile | undefined = (await this.profiles.list('claude')).find(candidate => terminalProfileId(candidate) === session.profileId);
     if (!profile) throw new Error('The Claude Code account for this session was removed.');
-    const executable = await findTerminalExecutable('claude', vscode.workspace.getConfiguration('xdevAi').get<string>('claudeExecutable') ?? '');
-    if (!executable) throw new Error('Claude Code was not found on the workspace host. Set xdevAi.claudeExecutable.');
-    const script = process.platform === 'win32' && /\.cmd$/i.test(executable);
-    vscode.window.createTerminal({
-      name: `${session.role} · ${session.profile}`,
-      shellPath: script ? process.env.ComSpec ?? 'cmd.exe' : executable,
-      shellArgs: script ? ['/d', '/s', '/c', executable, '--resume', session.sessionId] : ['--resume', session.sessionId],
-      cwd: run.path,
-      env: terminalProfileEnv(profile)
-    }).show();
+    await this.openClaudeTerminal(`${session.role} · ${session.profile}`, profile, run.path, ['--resume', session.sessionId]);
   }
 
   private async startRequest(role: Role, profileId: string, brief: string): Promise<void> {
@@ -537,7 +561,7 @@ function squadHtml(webview: vscode.Webview, media: vscode.Uri): string {
       <ol id="chat-jobs"></ol>
       <p id="plan-cost" class="subtle"></p>
       <div class="actions">
-        <button type="button" id="approve-plan">Approve and run</button>
+        <button type="button" id="approve-plan">Approve plan</button>
         <button type="button" id="discard-plan">Discard plan</button>
       </div>
     </section>

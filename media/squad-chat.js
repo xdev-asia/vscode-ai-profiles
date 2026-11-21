@@ -55,9 +55,8 @@ function mountSquadChat(vscode, roles) {
     const headless = (plan?.jobs ?? []).filter(job => job.kind === 'claude').length;
     const workers = state.sync?.workers;
     const commands = workers?.allowedCommands?.length ? workers.allowedCommands.join(', ') : 'read-only git only';
-    byId('plan-cost').textContent = headless
-      ? `${headless} Claude Code worker${headless > 1 ? 's' : ''} will run in a new git worktree${workers?.budgetUsd ? `, each capped at $${workers.budgetUsd}` : ''}. Allowed commands: ${commands}.`
-      : '';
+    byId('plan-cost').textContent = `Approving runs nothing yet: you start, edit, or skip each step yourself.${headless
+      ? ` Claude Code steps use a new git worktree${workers?.budgetUsd ? `, each headless step capped at $${workers.budgetUsd}` : ''}. Allowed commands: ${commands}.` : ''}`;
     renderRuns(snapshot.runs ?? []);
     const profileFor = role => state.accounts.find(profile => profile.id === state.seats[role]?.account);
     const lead = profileFor('Lead');
@@ -77,6 +76,19 @@ function mountSquadChat(vscode, roles) {
   }
 
   let runsKey;
+  const stepDrafts = new Map();
+  const stepLabels = {
+    pending: 'waiting for you', running: 'running', terminal: 'in terminal', done: 'done',
+    blocked: 'blocked', failed: 'failed', skipped: 'skipped'
+  };
+
+  function element(tag, text, className) {
+    const node = document.createElement(tag);
+    if (text !== undefined) node.textContent = text;
+    if (className) node.className = className;
+    return node;
+  }
+
   function renderRuns(runs) {
     byId('chat-runs').hidden = !runs.length;
     const busy = Boolean(pending) || snapshot.busy;
@@ -84,45 +96,94 @@ function mountSquadChat(vscode, roles) {
     if (key === runsKey) return;
     runsKey = key;
     byId('run-list').replaceChildren(...runs.map(run => {
-      const item = document.createElement('li');
-      item.className = `run ${run.status}`;
-      const title = document.createElement('strong');
-      title.textContent = run.prompt.split('\n', 1)[0];
-      const meta = document.createElement('small');
+      const item = element('li', undefined, `run ${run.status}`);
       const cost = run.costUsd ? ` · $${run.costUsd.toFixed(2)}` : '';
-      const files = run.status === 'running' ? 'working' : `${run.files ?? 0} file${run.files === 1 ? '' : 's'}`;
-      meta.textContent = `${run.branch} · ${run.status} · ${files}${cost}`;
-      item.append(title, meta);
+      const files = run.status === 'active' ? '' : ` · ${run.files ?? 0} file${run.files === 1 ? '' : 's'}`;
+      item.append(element('strong', run.prompt.split('\n', 1)[0]),
+        element('small', `${run.branch ?? 'text only'} · ${run.status}${files}${cost}`));
+
+      const steps = element('ol', undefined, 'steps');
+      const current = run.status === 'active'
+        ? run.steps.findIndex(step => step.status !== 'done' && step.status !== 'skipped') : -1;
+      run.steps.forEach((step, index) => {
+        const row = element('li', undefined, `step ${step.status}${index === current ? ' current' : ''}`);
+        row.append(element('span', `${step.role} · ${step.profile} · ${stepLabels[step.status] ?? step.status}`));
+        if (index === current) row.append(stepControls(run, step, index, busy));
+        else if (step.summary) row.append(element('p', step.summary.length > 240 ? step.summary.slice(0, 240) + '…' : step.summary, 'subtle'));
+        steps.append(row);
+      });
+      item.append(steps);
+
       if (run.stat) {
-        const stat = document.createElement('details');
-        const summary = document.createElement('summary');
-        summary.textContent = 'Changed files';
-        const pre = document.createElement('pre');
-        pre.textContent = run.stat;
-        stat.append(summary, pre);
+        const stat = element('details');
+        stat.append(element('summary', 'Changed files'), element('pre', run.stat));
         item.append(stat);
       }
-      const actions = document.createElement('div');
-      actions.className = 'actions';
-      const running = run.status === 'running';
+      const actions = element('div', undefined, 'actions');
       const button = (text, action, args, disabled) => {
-        const element = document.createElement('button');
-        element.type = 'button';
-        element.textContent = text;
-        element.disabled = disabled;
-        element.addEventListener('click', () => send(action, { id: run.id, ...args }));
-        actions.append(element);
+        const control = element('button', text);
+        control.type = 'button';
+        control.disabled = disabled;
+        control.addEventListener('click', () => send(action, { id: run.id, ...args }));
+        actions.append(control);
       };
-      button('View diff', 'runDiff', {}, running || !run.commit);
-      button('Merge', 'runMerge', {}, running || busy || !run.commit);
-      button('Open folder', 'runOpen', {}, running);
-      for (const session of run.sessions) {
-        button(`Continue ${session.role} in terminal`, 'runResume', { session: session.sessionId }, running);
+      const active = run.status === 'active';
+      if (active) button('Finish run', 'runFinish', {}, busy);
+      if (run.branch) {
+        button('View diff', 'runDiff', {}, active || !run.commit);
+        button('Merge', 'runMerge', {}, active || busy || !run.commit);
+        button('Open folder', 'runOpen', {}, false);
+        for (const session of run.sessions) {
+          button(`Resume ${session.role} session`, 'runResume', { session: session.sessionId }, busy);
+        }
       }
-      button('Remove', 'runRemove', {}, running || busy);
+      button('Remove', 'runRemove', {}, busy);
       item.append(actions);
       return item;
     }));
+  }
+
+  function stepControls(run, step, index, busy) {
+    const box = element('div', undefined, 'step-controls');
+    const draftKey = `${run.id}:${index}`;
+    const brief = element('textarea');
+    brief.rows = 3;
+    brief.maxLength = 4000;
+    brief.setAttribute('aria-label', `${step.role} brief`);
+    brief.value = stepDrafts.get(draftKey) ?? step.brief;
+    brief.disabled = busy || step.status === 'terminal' || step.status === 'running';
+    brief.addEventListener('input', () => stepDrafts.set(draftKey, brief.value));
+    const label = element('label', 'Brief for this step');
+    label.append(brief);
+    box.append(label);
+    const actions = element('div', undefined, 'actions');
+    const add = (text, action, args, primary) => {
+      const control = element('button', text, primary ? 'primary' : undefined);
+      control.type = 'button';
+      control.disabled = busy;
+      control.addEventListener('click', () => {
+        stepDrafts.delete(draftKey);
+        send(action, { id: run.id, ...args() });
+      });
+      actions.append(control);
+    };
+    if (step.status === 'terminal') {
+      const summary = element('textarea');
+      summary.rows = 2;
+      summary.maxLength = 2000;
+      summary.placeholder = 'What was done (optional). Later steps receive this summary.';
+      summary.setAttribute('aria-label', `${step.role} summary`);
+      box.append(summary);
+      add('Mark step done', 'stepDone', () => ({ summary: summary.value }), true);
+    } else if (step.status !== 'running') {
+      const again = step.status === 'blocked' || step.status === 'failed';
+      add(step.kind === 'claude' ? (again ? 'Run again' : 'Run headless') : (again ? 'Ask again' : 'Ask API'), 'stepRun',
+        () => ({ brief: brief.value }), true);
+      if (step.kind === 'claude') add('Open in terminal', 'stepTerminal', () => ({ brief: brief.value }));
+    }
+    if (step.status !== 'running') add('Skip step', 'stepSkip', () => ({}));
+    box.append(actions);
+    return box;
   }
 
   function updateControls() {
