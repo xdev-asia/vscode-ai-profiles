@@ -12,6 +12,7 @@ type Tool = keyof typeof squadTools;
 export interface Skill {
   id: string;
   name: string;
+  description?: string;
   instructions: string;
   enabled: boolean;
 }
@@ -19,12 +20,16 @@ export interface Skill {
 interface Customizations {
   skills: Skill[];
   disabledTools: Tool[];
+  /** Content hash of each skill (by name) at the last folder sync, for three-way merges. */
+  syncBase?: Record<string, string>;
+  lastSync?: { time: number; folder: string; summary: string };
 }
 
 const storageKey = 'squadCustomizations.v1';
 export const skillNameLimit = 80;
-export const skillInstructionsLimit = 2_000;
-const skillLimit = 12;
+export const skillInstructionsLimit = 8_000;
+export const skillDescriptionLimit = 200;
+export const skillLimit = 40;
 
 export class SquadCustomizations {
   private writes = Promise.resolve();
@@ -35,8 +40,18 @@ export class SquadCustomizations {
     return this.storage.get<Customizations>(storageKey) ?? { skills: [], disabledTools: [] };
   }
 
-  activeSkills(): Pick<Skill, 'name' | 'instructions'>[] {
-    return this.read().skills.filter(skill => skill.enabled).map(({ name, instructions }) => ({ name, instructions }));
+  /** Enabled skills for text API prompts, cut to a fixed character budget. */
+  activeSkills(budget = 12_000): Pick<Skill, 'name' | 'instructions'>[] {
+    let used = 0;
+    return this.read().skills.filter(skill => skill.enabled).flatMap(({ name, instructions }) => {
+      if (used + instructions.length > budget) return [];
+      used += instructions.length;
+      return [{ name, instructions }];
+    });
+  }
+
+  enabledSkills(): Skill[] {
+    return this.read().skills.filter(skill => skill.enabled);
   }
 
   requireTool(tool: Tool): void {
@@ -60,16 +75,30 @@ export class SquadCustomizations {
     const name = workflowText(input.name, skillNameLimit, 'a skill name');
     const instructions = workflowText(input.instructions, skillInstructionsLimit, 'skill instructions');
     if (/[\r\n]/.test(name) || typeof input.enabled !== 'boolean') throw new Error('Enter a single-line skill name.');
+    const description = typeof input.description === 'string' ? input.description.replace(/\s+/g, ' ').trim() : '';
+    if (description.length > skillDescriptionLimit) throw new Error(`Keep the description under ${skillDescriptionLimit} characters.`);
     const enabled = input.enabled;
     return this.update(state => {
+      if (state.skills.some(candidate => candidate.id !== input.id && candidate.name.toLowerCase() === name.toLowerCase())) {
+        throw new Error('Another skill already uses this name.');
+      }
       if (input.id) {
         const skill = state.skills.find(candidate => candidate.id === input.id);
         if (!skill) throw new Error('This skill is no longer available.');
-        Object.assign(skill, { name, instructions, enabled });
+        Object.assign(skill, { name, description, instructions, enabled });
       } else {
         if (state.skills.length >= skillLimit) throw new Error(`A workspace can store up to ${skillLimit} skills.`);
-        state.skills.push({ id: randomUUID(), name, instructions, enabled });
+        state.skills.push({ id: randomUUID(), name, description, instructions, enabled });
       }
+    });
+  }
+
+  /** Replaces the skill list after a folder sync and records the merge base. */
+  applySync(skills: Skill[], syncBase: Record<string, string>, lastSync: Customizations['lastSync']): Promise<void> {
+    return this.update(state => {
+      state.skills = skills.slice(0, skillLimit);
+      state.syncBase = syncBase;
+      state.lastSync = lastSync;
     });
   }
 

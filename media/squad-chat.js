@@ -42,15 +42,28 @@ function mountSquadChat(vscode, roles) {
       const row = document.createElement('li');
       const label = document.createElement('strong');
       label.textContent = `${job.role} · ${job.profile}`;
+      const badge = document.createElement('span');
+      badge.className = `badge ${job.kind}`;
+      badge.textContent = job.kind === 'claude'
+        ? (job.role === 'Review' ? 'Claude Code · reads the repo' : 'Claude Code · edits the worktree')
+        : 'Text API · no file access';
       const brief = document.createElement('p');
       brief.textContent = job.brief;
-      row.append(label, brief);
+      row.append(label, badge, brief);
       return row;
     }));
+    const headless = (plan?.jobs ?? []).filter(job => job.kind === 'claude').length;
+    const workers = state.sync?.workers;
+    const commands = workers?.allowedCommands?.length ? workers.allowedCommands.join(', ') : 'read-only git only';
+    byId('plan-cost').textContent = headless
+      ? `${headless} Claude Code worker${headless > 1 ? 's' : ''} will run in a new git worktree${workers?.budgetUsd ? `, each capped at $${workers.budgetUsd}` : ''}. Allowed commands: ${commands}.`
+      : '';
+    renderRuns(snapshot.runs ?? []);
     const profileFor = role => state.accounts.find(profile => profile.id === state.seats[role]?.account);
     const lead = profileFor('Lead');
+    const leadUsable = lead?.kind === 'api' || (lead?.detail === 'Claude Code' && snapshot.workers);
     byId('chat-status').textContent = status || (plan ? 'Review the roles and briefs before running.' :
-      lead?.kind === 'api' ? `Lead uses ${lead.name} · ${lead.detail}` : 'Assign an API profile to Lead under Roles to start planning.');
+      leadUsable ? `Lead uses ${lead.name} · ${lead.detail}` : 'Assign an API profile or a Claude Code account to Lead under Roles to start planning.');
     byId('stop-chat').hidden = !busy;
     const terminals = roles.filter(role => profileFor(role)?.kind === 'terminal');
     const selected = terminalRole.value;
@@ -61,6 +74,55 @@ function mountSquadChat(vscode, roles) {
     if (terminals.includes(selected)) terminalRole.value = selected;
     byId('chat-terminal').hidden = !terminals.length;
     updateControls();
+  }
+
+  let runsKey;
+  function renderRuns(runs) {
+    byId('chat-runs').hidden = !runs.length;
+    const busy = Boolean(pending) || snapshot.busy;
+    const key = JSON.stringify(runs) + String(busy);
+    if (key === runsKey) return;
+    runsKey = key;
+    byId('run-list').replaceChildren(...runs.map(run => {
+      const item = document.createElement('li');
+      item.className = `run ${run.status}`;
+      const title = document.createElement('strong');
+      title.textContent = run.prompt.split('\n', 1)[0];
+      const meta = document.createElement('small');
+      const cost = run.costUsd ? ` · $${run.costUsd.toFixed(2)}` : '';
+      const files = run.status === 'running' ? 'working' : `${run.files ?? 0} file${run.files === 1 ? '' : 's'}`;
+      meta.textContent = `${run.branch} · ${run.status} · ${files}${cost}`;
+      item.append(title, meta);
+      if (run.stat) {
+        const stat = document.createElement('details');
+        const summary = document.createElement('summary');
+        summary.textContent = 'Changed files';
+        const pre = document.createElement('pre');
+        pre.textContent = run.stat;
+        stat.append(summary, pre);
+        item.append(stat);
+      }
+      const actions = document.createElement('div');
+      actions.className = 'actions';
+      const running = run.status === 'running';
+      const button = (text, action, args, disabled) => {
+        const element = document.createElement('button');
+        element.type = 'button';
+        element.textContent = text;
+        element.disabled = disabled;
+        element.addEventListener('click', () => send(action, { id: run.id, ...args }));
+        actions.append(element);
+      };
+      button('View diff', 'runDiff', {}, running || !run.commit);
+      button('Merge', 'runMerge', {}, running || busy || !run.commit);
+      button('Open folder', 'runOpen', {}, running);
+      for (const session of run.sessions) {
+        button(`Continue ${session.role} in terminal`, 'runResume', { session: session.sessionId }, running);
+      }
+      button('Remove', 'runRemove', {}, running || busy);
+      item.append(actions);
+      return item;
+    }));
   }
 
   function updateControls() {

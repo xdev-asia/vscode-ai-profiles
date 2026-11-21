@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Assign a Claude Code account to a Squad role to run it as a headless worker. Implement and Tests edit files and run allowed commands, and Review reads the diff, all in a separate git worktree on a new local branch.
+- Review, merge, open, resume in a terminal, or remove each worker run from the Squad chat.
+- Squad Memory: shared notes that every agent receives within a fixed budget. Workers add notes after runs.
+- Skills now have a **When to use** description and are copied to every Claude Code account as on-demand skills.
+- Sync skills and memory with a folder, such as a docs repository clone, using a three-way merge, a local commit, and a confirmed push.
+
+### Changed
+
+- Skills can hold up to 8,000 characters, and a workspace can store up to 40 skills. SDLC drafts include enabled skills within a 12,000-character budget.
+
 ## 0.7.1 - 2026-11-19
 
 ### Added

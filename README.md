@@ -71,7 +71,7 @@ Open **xDev Squad** in the bottom panel, click **Open Squad** on the Terminal to
 3. Follow the results in the same chat. Use `@Implement`, `@Review`, or `@Tests` to send a message directly to a role. Press **Stop run** to cancel the current run and skip any remaining tasks.
 4. To use an assigned terminal profile, select its role in **Chat** and click **Open terminal**.
 
-The shared chat uses text APIs for planning, implementation proposals, reviews, and test suggestions. This mode does not read or edit repository files or run tests. Lead receives recent chat entries. Approved workers receive the original request and their assigned brief. Review and Tests also receive the implementation proposal when the plan includes Implement. Use profiles that are approved for the information you share.
+Roles with an API profile use text APIs for planning, implementation proposals, reviews, and test suggestions, and do not read or edit repository files or run tests. To work on the repository, assign a Claude Code account instead (see [Run Claude Code workers on the repository](#run-claude-code-workers-on-the-repository)). Lead receives recent chat entries. Approved workers receive the original request and their assigned brief. Review and Tests also receive the implementation proposal when the plan includes Implement. Use profiles that are approved for the information you share.
 
 The most recent 60 chat entries and the pending plan are stored in local VS Code workspace state. Reloading VS Code preserves pending approval and completed replies. An interrupted run needs a new request to continue.
 
@@ -98,9 +98,37 @@ Each AI draft sends the project brief, excerpts of earlier approved results, and
 
 If VS Code reports that the workflow command is missing after an update, check **Extensions** for the installed xDev AI version on the workspace host, then run **Developer: Reload Window**. To diagnose a failed activation, open **Output** and select **Log (Extension Host)** or **Log (Remote Extension Host)**.
 
+### Run Claude Code workers on the repository
+
+Assign a **Claude Code** terminal account (instead of an API profile) to a role under **Roles**. That role then runs Claude Code headless (`claude -p`) under the account's own sign-in, and can read the repository and, for Implement and Tests, edit files and run allowed commands. A Claude Code account on Lead plans with the same subscription, without file tools.
+
+1. Open a workspace folder that is a git repository with at least one commit.
+2. Send a request to Lead and review the plan. Each task shows whether it runs as **Claude Code** or **Text API**, and the plan shows the spending cap and allowed commands.
+3. Click **Approve and run**. xDev creates a git worktree on a new local branch `xdev/squad/<id>`, so your checkout is not changed. Workers run one after another in that worktree: Implement edits, Review reads the diff, Tests adds and runs tests. Each worker receives the request, its brief, short summaries from earlier workers, and shared memory, not the full transcripts.
+4. When the run ends, xDev commits the worktree to its branch, locally. Under **Worker runs**, use **View diff**, **Merge** (asks first, never pushes), **Open folder**, **Continue … in terminal** to resume a worker's session interactively, or **Remove** to delete the worktree and branch.
+
+A worker that reports **blocked** stops the remaining tasks; reply to Lead with a decision. Commands outside the allowed list are denied without prompting and listed in the chat.
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `xdevAi.squad.workerAllowedCommands` | `npm test`, `npm run build`, `npm run lint` | Command prefixes Implement and Tests may run. Read-only git is always allowed. |
+| `xdevAi.squad.workerBudgetUsd` | `1` | `--max-budget-usd` for each worker run. `0` turns the cap off. |
+| `xdevAi.squad.workerModels` | `{}` | Model per role, for example `{ "Review": "haiku" }`. |
+| `xdevAi.squad.workerTimeoutMinutes` | `20` | Stops a worker that runs too long. |
+
+Workers do not use `--dangerously-skip-permissions` or `--bare` (bare mode ignores claude.ai sign-in). Built-in tools a role does not need are not loaded, and MCP servers are skipped (`--strict-mcp-config`), which keeps each request small. [Claude Code headless mode](https://code.claude.com/docs/en/headless) · [CLI reference](https://code.claude.com/docs/en/cli-reference)
+
+Each account's own plan and usage limits apply. Check your provider's terms before running unattended agents across several subscriptions.
+
+### Share memory between agents
+
+Open **xDev Squad → Memory** or run **xDev AI: Open Squad Memory**. Memory holds short notes, such as conventions, decisions, and pitfalls, that every Lead, worker, and SDLC draft receives with its task. Workers add up to five notes after a run when they learn something durable. Add, edit, pin, or delete notes yourself. Pinned notes are always included. Other notes are included newest first within a fixed budget of about 3,000 characters, so memory does not grow every prompt.
+
 ### Manage Skills and Tools
 
-- Under **xDev Squad → Skills & Tools**, add, edit, disable, or delete workspace skills. A skill is a named set of instructions that xDev AI includes in SDLC drafting when enabled.
+- Under **xDev Squad → Skills & Tools**, add, edit, disable, or delete workspace skills. A skill is a named set of instructions with an optional one-line **When to use** description. Enabled skills are included in SDLC drafting.
+- Enabled skills are also copied into every Claude Code account as user skills (`$CLAUDE_CONFIG_DIR/skills/xdev-<name>/SKILL.md`) when you save them and before each run. Claude Code keeps only the description in context and loads a skill when it applies. xDev changes only folders it created. Turn this off with `xdevAi.squad.syncSkillsToProfiles`. [Claude Code skills](https://code.claude.com/docs/en/skills)
+- To share skills and memory across machines and teammates, click **Sync with folder** (or run **xDev AI: Sync Squad Skills and Memory**) and choose a folder, usually a clone of your team docs repository (`xdevAi.squad.syncFolder`). Skills are stored as `skills/<name>/SKILL.md` and memory as `memory/squad-memory.json`. In a git folder, xDev pulls with `--ff-only`, merges, commits locally, and asks before pushing. When the same skill changed on both sides, your version stays and the folder version is added as a disabled “(sync copy)” skill.
 - Use the tool switches to control Copilot access to **Ask xDev Squad**, **Manage xDev Squad Plan**, and **xDev SDLC Workflow** in this workspace. The SDLC switch also controls MCP access to the workflow. In supported VS Code versions, use the panel shortcuts to open native **Agent Skills** and **Tools & MCP** management. [VS Code agent customizations](https://code.visualstudio.com/docs/agent-customization/overview)
 
 ### Control the workflow through MCP

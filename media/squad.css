@@ -182,3 +182,32 @@ summary { cursor: pointer; font-weight: 600; }
   body { padding: 10px 8px; }
   .assignment { grid-template-columns: minmax(0, 1fr); }
 }
+
+.badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.85em;
+}
+.badge.claude { border-color: var(--accent); color: var(--vscode-foreground); }
+#plan-cost:empty { display: none; }
+#chat-runs h2 { font-size: 1em; margin: 12px 0 6px; }
+.run-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
+.run-list > li {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--muted);
+  padding: 6px 8px;
+  background: var(--surface);
+}
+.run-list > li.done { border-left-color: var(--vscode-testing-iconPassed, var(--accent)); }
+.run-list > li.blocked, .run-list > li.failed, .run-list > li.stopped { border-left-color: var(--warning); }
+.run-list > li.running { border-left-color: var(--accent); }
+.run-list small { display: block; color: var(--muted); overflow-wrap: anywhere; }
+.run-list pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 160px; overflow: auto; margin: 4px 0 0; }
+.run-list .actions { margin-top: 6px; flex-wrap: wrap; }
+.memory-form { display: flex; gap: 6px; align-items: end; }
+.memory-form label { flex: 1; }
+#memory-list small { color: var(--muted); margin: 0 6px; }

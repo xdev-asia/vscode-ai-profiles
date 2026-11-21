@@ -58,9 +58,9 @@ test('a persisted plan only dispatches when approved and uses each assigned acco
   chat = openChat();
   const plan = chat.snapshot().plan;
   assert.deepEqual(plan.jobs, [
-    { role: 'Implement', brief: 'Propose a schema change', profile: 'Implement profile' },
-    { role: 'Review', brief: 'Review compatibility', profile: 'Review profile' },
-    { role: 'Tests', brief: 'Draft smoke cases', profile: 'Tests profile' }
+    { role: 'Implement', brief: 'Propose a schema change', profile: 'Implement profile', kind: 'api' },
+    { role: 'Review', brief: 'Review compatibility', profile: 'Review profile', kind: 'api' },
+    { role: 'Tests', brief: 'Draft smoke cases', profile: 'Tests profile', kind: 'api' }
   ]);
   await assert.rejects(chat.approve('another-plan'), /no longer available/);
   assert.equal(requests.length, 1);
@@ -171,7 +171,7 @@ test('workspace customizations persist across sessions and disable tool use', as
   await customizations.setTool('xdev_sdlc', false);
 
   const { customizations: restored } = openChat();
-  assert.deepEqual(restored.read().skills, [{ id, name: 'Review changes', instructions: 'Check migrations.', enabled: false }]);
+  assert.deepEqual(restored.read().skills, [{ id, name: 'Review changes', description: '', instructions: 'Check migrations.', enabled: false }]);
   assert.throws(() => restored.requireTool('xdev_sdlc'), /disabled in this workspace/);
   await restored.setTool('xdev_sdlc', true);
   assert.doesNotThrow(() => restored.requireTool('xdev_sdlc'));
