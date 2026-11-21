@@ -5,7 +5,7 @@ import { chat } from './core';
 import { isRole, roles, SquadStore, type Role } from './squad';
 import { SquadCustomizations, type Skill } from './squad-customizations';
 import { SquadMemory } from './squad-memory';
-import { parsePlanOutput, parseWorkerOutput, type WorkerMode, type WorkerRequest, type WorkerResult, type WorkerSettings } from './squad-worker';
+import { parseGateOutput, parsePlanOutput, parseWorkerOutput, type WorkerMode, type WorkerRequest, type WorkerResult, type WorkerSettings } from './squad-worker';
 import type { RunWorktree, Worktrees } from './squad-worktree';
 import { terminalProfileId, type TerminalProfile } from './terminal-profiles';
 import { workflowBriefLimit, workflowOutputLimit, workflowStage, workflowStages, workflowText, type Workflow } from './workflow';
@@ -51,10 +51,21 @@ export interface RunSession {
 
 export type StepStatus = 'pending' | 'running' | 'terminal' | 'done' | 'blocked' | 'failed' | 'skipped';
 
+export const approvers = ['human', 'ai+human', 'ai'] as const;
+export type Approver = typeof approvers[number];
+type GateVerdict = 'pass' | 'changes';
+
+export interface StepGate {
+  verdict: GateVerdict;
+  reason: string;
+  by: string;
+}
+
 export interface RunStep extends Job {
   status: StepStatus;
   summary?: string;
   files?: string[];
+  gate?: StepGate;
 }
 
 export interface RunRecord {
@@ -63,6 +74,7 @@ export interface RunRecord {
   prompt: string;
   time: number;
   status: 'active' | 'done' | 'stopped';
+  approver?: Approver;
   steps: RunStep[];
   repo?: string;
   path?: string;
@@ -271,9 +283,11 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
    * Approving a plan only prepares a run: its steps and, for Claude Code steps, a git worktree.
    * No agent starts until the user runs a step. Each step pauses the run when it ends.
    */
-  async approve(id: unknown, signal?: AbortSignal): Promise<StartedRun> {
+  async approve(id: unknown, signal?: AbortSignal, approverInput: unknown = 'human'): Promise<StartedRun> {
     this.requireIdle();
     const plan = this.requirePlan(id);
+    const approver = approvers.find(candidate => candidate === approverInput);
+    if (!approver) throw new Error('Choose who approves each step: human, ai+human, or ai.');
     if (this.read().runs?.some(run => run.status === 'active')) throw new Error('Finish or stop the current run before approving another plan.');
     const directory = await this.directory();
     for (const job of plan.jobs) this.verify(job, directory);
@@ -295,7 +309,7 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
         worktree = await this.host!.worktrees.create(folder!, runId);
       }
       const record: RunRecord = {
-        id: runId, request: plan.prompt, prompt: shorten(plan.prompt, 500), time: Date.now(), status: 'active', costUsd: 0,
+        id: runId, request: plan.prompt, prompt: shorten(plan.prompt, 500), time: Date.now(), status: 'active', approver, costUsd: 0,
         sessions: [], steps: plan.jobs.map(job => ({ ...job, status: 'pending' })), ...worktree
       };
       await this.write(state => {
@@ -349,7 +363,11 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
     }, run);
   }
 
-  /** Runs the current step once, headless or through its text API, then pauses the run. */
+  /**
+   * Runs the current step once, headless or through its text API. With an AI approver the step is then
+   * reviewed by a different account; in "ai" mode a passing review starts the next step, and anything
+   * else pauses the run for the user. Merging always stays with the user.
+   */
   async runStep(id: unknown, briefInput?: unknown, signal?: AbortSignal): Promise<StartedRun> {
     this.requireIdle();
     const { record, index, step } = this.activeRun(id);
@@ -361,57 +379,134 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
     return this.launch(`${step.role} is ${agent.kind === 'claude' ? 'working' : 'responding'}…`, signal, state => {
       const saved = state.runs?.find(candidate => candidate.id === record.id);
       if (!saved || saved.status !== 'active' || this.currentStep(saved) !== index) throw new Error('This step has changed. Check Worker runs.');
-      Object.assign(saved.steps[index], { brief, status: 'running' });
       state.entries.push({ author: 'You', to: step.role, run: record.id, text: brief });
     }, async run => {
-      const context = this.stepContext(record, index);
-      try {
-        if (agent.kind === 'claude') {
-          await this.host!.prepare?.();
-          const stdout = await this.host!.run({
-            executable: await this.host!.executable(), profile: agent.profile, cwd: record.path!, role: step.role, mode: 'work',
-            prompt: JSON.stringify({ request: record.request, task: brief, previous: context.previous.length ? context.previous : undefined, memory: context.memory }),
-            system: `${headless} You are ${step.role}. ${workerInstructions[step.role]} Reply in the user's language.`,
-            settings: this.host!.settings(step.role), signal: run.signal
-          });
-          run.signal.throwIfAborted();
-          const result = parseWorkerOutput(stdout);
-          await this.memory.add(result.memory, step.role);
-          await this.updateRun(record.id, (saved, state) => {
-            saved.costUsd += result.costUsd;
-            if (result.sessionId) saved.sessions.push({ role: step.role, profileId: agent.id, profile: agent.name, sessionId: result.sessionId });
-            Object.assign(saved.steps[index], { status: result.status, summary: result.summary, files: result.filesChanged });
-            state.entries.push({ ...this.reply(step.role, agent, workerText(result), result.costUsd), run: record.id });
-            if (result.status === 'blocked') {
-              state.entries.push({ author: 'Squad', run: record.id, text: `${step.role} is blocked. Edit the brief and run the step again, continue it in a terminal, skip it, or finish the run.` });
-            }
-          }, run);
-        } else {
-          const answer = await chat(agent.account, [
-            { role: 'system', content: `You are ${step.role}. ${roleInstructions[step.role]} ${textOnly} Reply in the user's language.` },
-            {
-              role: 'user',
-              content: JSON.stringify({
-                request: record.request, task: brief,
-                implementation: context.implementation && shorten(context.implementation, 8_000),
-                previous: context.previous.some(item => item.files) ? context.previous : undefined,
-                memory: context.memory
-              })
-            }
-          ], { signal: run.signal });
-          run.signal.throwIfAborted();
-          await this.updateRun(record.id, (saved, state) => {
-            Object.assign(saved.steps[index], { status: 'done', summary: shorten(answer, 8_000) });
-            state.entries.push({ ...this.reply(step.role, agent, answer), run: record.id });
-          }, run);
-        }
-      } catch (error) {
-        const detail = run.signal.aborted ? 'Step stopped.' : error instanceof Error ? error.message : 'The step failed.';
-        await this.updateRun(record.id, saved => { saved.steps[index].status = 'failed'; }).catch(() => undefined);
-        throw new Error(`${step.role}: ${detail}`, { cause: error });
+      let current = { index, brief, agent };
+      for (;;) {
+        const status = await this.executeStep(record.id, current.index, current.brief, current.agent, run);
+        if (status !== 'done') break;
+        const approver = this.run(record.id)?.approver ?? 'human';
+        if (approver === 'human') break;
+        const verdict = await this.gateStep(record.id, current.index, run);
+        if (approver !== 'ai' || verdict !== 'pass') break;
+        const saved = this.run(record.id);
+        const next = saved ? this.currentStep(saved) : -1;
+        if (!saved || next < 0) break;
+        const nextStep = saved.steps[next];
+        const nextAgent = this.verify(nextStep, await this.directory());
+        if (nextAgent.kind === 'claude' && !saved.path) break;
+        run.status = `${nextStep.role} is ${nextAgent.kind === 'claude' ? 'working' : 'responding'} (approved by AI)…`;
+        this.changed();
+        current = { index: next, brief: nextStep.brief, agent: nextAgent };
       }
       await this.afterStep(record.id, run);
     });
+  }
+
+  private async executeStep(id: string, index: number, brief: string, agent: Agent, run: ActiveRun): Promise<StepStatus> {
+    const record = this.run(id)!;
+    const step = record.steps[index];
+    await this.updateRun(id, saved => Object.assign(saved.steps[index], { brief, status: 'running', gate: undefined }), run);
+    const context = this.stepContext(record, index);
+    try {
+      if (agent.kind === 'claude') {
+        await this.host!.prepare?.();
+        const stdout = await this.host!.run({
+          executable: await this.host!.executable(), profile: agent.profile, cwd: record.path!, role: step.role, mode: 'work',
+          prompt: JSON.stringify({ request: record.request, task: brief, previous: context.previous.length ? context.previous : undefined, memory: context.memory }),
+          system: `${headless} You are ${step.role}. ${workerInstructions[step.role]} Reply in the user's language.`,
+          settings: this.host!.settings(step.role), signal: run.signal
+        });
+        run.signal.throwIfAborted();
+        const result = parseWorkerOutput(stdout);
+        await this.memory.add(result.memory, step.role);
+        await this.updateRun(id, (saved, state) => {
+          saved.costUsd += result.costUsd;
+          if (result.sessionId) saved.sessions.push({ role: step.role, profileId: agent.id, profile: agent.name, sessionId: result.sessionId });
+          Object.assign(saved.steps[index], { status: result.status, summary: result.summary, files: result.filesChanged });
+          state.entries.push({ ...this.reply(step.role, agent, workerText(result), result.costUsd), run: id });
+          if (result.status === 'blocked') {
+            state.entries.push({ author: 'Squad', run: id, text: `${step.role} is blocked. Edit the brief and run the step again, continue it in a terminal, skip it, or finish the run.` });
+          }
+        }, run);
+        return result.status;
+      }
+      const answer = await chat(agent.account, [
+        { role: 'system', content: `You are ${step.role}. ${roleInstructions[step.role]} ${textOnly} Reply in the user's language.` },
+        {
+          role: 'user',
+          content: JSON.stringify({
+            request: record.request, task: brief,
+            implementation: context.implementation && shorten(context.implementation, 8_000),
+            previous: context.previous.some(item => item.files) ? context.previous : undefined,
+            memory: context.memory
+          })
+        }
+      ], { signal: run.signal });
+      run.signal.throwIfAborted();
+      await this.updateRun(id, (saved, state) => {
+        Object.assign(saved.steps[index], { status: 'done', summary: shorten(answer, 8_000) });
+        state.entries.push({ ...this.reply(step.role, agent, answer), run: id });
+      }, run);
+      return 'done';
+    } catch (error) {
+      const detail = run.signal.aborted ? 'Step stopped.' : error instanceof Error ? error.message : 'The step failed.';
+      await this.updateRun(id, saved => { saved.steps[index].status = 'failed'; }).catch(() => undefined);
+      throw new Error(`${step.role}: ${detail}`, { cause: error });
+    }
+  }
+
+  /**
+   * AI review of a finished step by the Lead's account, which must differ from the step's account.
+   * Returns undefined when no independent reviewer is available, so the user decides.
+   */
+  private async gateStep(id: string, index: number, run: ActiveRun): Promise<GateVerdict | undefined> {
+    const record = this.run(id)!;
+    const step = record.steps[index];
+    const reviewer = this.agentFor('Lead', await this.directory());
+    if (!reviewer || reviewer.id === step.accountId) {
+      await this.write(state => state.entries.push({
+        author: 'Squad', run: id,
+        text: `No independent AI reviewer for ${step.role}: assign Lead an account different from ${step.profile}. Review the step yourself.`
+      }), run);
+      return undefined;
+    }
+    run.status = `Lead is reviewing ${step.role}…`;
+    this.changed();
+    const criteria = 'Pass only if the step did what its brief asked, consistently with the request, without obvious regressions or missing pieces. Otherwise answer changes and say what is missing. Reply in the user\'s language.';
+    const evidence = { request: record.request, step: { role: step.role, brief: step.brief, summary: step.summary, files: step.files } };
+    let gate: StepGate;
+    try {
+      if (reviewer.kind === 'claude') {
+        const stdout = await this.host!.run({
+          executable: await this.host!.executable(), profile: reviewer.profile, cwd: record.path ?? this.host!.folder()!, role: 'Lead', mode: 'gate',
+          prompt: JSON.stringify(evidence),
+          system: `You review one step of an xDev Squad run. ${record.path ? 'Inspect the uncommitted changes with git diff. ' : ''}Do not edit files. ${criteria}`,
+          settings: this.host!.settings('Lead'), signal: run.signal
+        });
+        const verdict = parseGateOutput(stdout);
+        gate = { verdict: verdict.verdict, reason: verdict.reason, by: reviewer.name };
+        await this.updateRun(id, saved => { saved.costUsd += verdict.costUsd; }, run);
+      } else {
+        const answer = await chat(reviewer.account, [
+          { role: 'system', content: `You review one step of an xDev Squad run. ${textOnly} ${criteria} Return only a JSON object {"verdict": "pass" | "changes", "reason": string}.` },
+          { role: 'user', content: JSON.stringify(evidence) }
+        ], { signal: run.signal });
+        gate = { ...readGate(answer), by: reviewer.name };
+      }
+    } catch (error) {
+      run.signal.throwIfAborted();
+      gate = { verdict: 'changes', reason: `The AI review failed: ${error instanceof Error ? error.message : 'unknown error'}`, by: reviewer.name };
+    }
+    run.signal.throwIfAborted();
+    await this.updateRun(id, (saved, state) => {
+      saved.steps[index].gate = gate;
+      state.entries.push({
+        author: 'Lead', run: id, profile: `${reviewer.name} · AI review`,
+        text: `${step.role}: ${gate.verdict === 'pass' ? 'pass' : 'changes requested'}. ${gate.reason}`
+      });
+    }, run);
+    return gate.verdict;
   }
 
   /** Marks the current Claude Code step as handed to an interactive terminal and returns what to open. */
@@ -748,6 +843,19 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
 }
 
 export type { WorkerMode };
+
+function readGate(answer: string): { verdict: GateVerdict; reason: string } {
+  const text = answer.trim();
+  try {
+    const value = JSON.parse(/^```(?:json)?\s*([\s\S]*?)\s*```$/i.exec(text)?.[1] ?? text) as { verdict?: unknown; reason?: unknown };
+    if ((value.verdict === 'pass' || value.verdict === 'changes') && typeof value.reason === 'string') {
+      return { verdict: value.verdict, reason: value.reason.trim().slice(0, 1_000) };
+    }
+  } catch {
+    // Treated as a request for changes below.
+  }
+  return { verdict: 'changes', reason: 'The reviewer did not return a clear verdict.' };
+}
 
 function parsePlan(answer: string, workers: ReadonlyMap<WorkerRole, Agent>): { reply: string; jobs: Job[]; invalid?: boolean } | undefined {
   let value: unknown;

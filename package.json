@@ -192,6 +192,17 @@
           "scope": "machine",
           "description": "Absolute path to Gemini CLI on the workspace host. Leave empty to detect the installation automatically."
         },
+        "xdevAi.squad.approver": {
+          "type": "string",
+          "enum": ["human", "ai+human", "ai"],
+          "default": "human",
+          "enumDescriptions": [
+            "You start every step yourself.",
+            "Lead's account reviews each finished step; you still start every step.",
+            "A passing review by Lead's account starts the next step. Changes requested, a blocked step, or an error waits for you. Merging always waits for you."
+          ],
+          "markdownDescription": "Default approver for new Squad runs. You can change it on each plan before approving. The AI reviewer is the account assigned to Lead and must differ from the step's account."
+        },
         "xdevAi.squad.workerAllowedCommands": {
           "type": "array",
           "items": { "type": "string" },

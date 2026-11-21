@@ -115,6 +115,16 @@ Assign a **Claude Code** terminal account (instead of an API profile) to a role 
 
 A step that reports **blocked** or fails waits for you. You can run it again with a new brief, open it in a terminal, or skip it. Headless steps deny commands outside the allowed list without prompting and list them in the chat. Each role always uses the account you assigned; xDev never switches accounts by itself.
 
+**Let AI approve steps.** Before approving a plan, choose **Who approves each step** (default from `xdevAi.squad.approver`):
+
+| Option | After a step finishes |
+| --- | --- |
+| **You** (`human`) | The run waits for you. |
+| **AI reviews, you start the next** (`ai+human`) | Lead's account reviews the step and shows **pass** or **changes requested** with a reason. You start the next step. |
+| **AI** (`ai`) | A passing review starts the next step. A request for changes, a blocked step, or an error stops and waits for you. |
+
+The reviewer is the account assigned to Lead and must differ from the account that did the step; otherwise the step waits for you. A Claude Code reviewer reads the worktree diff with read-only tools; an API reviewer sees the step summary. Each step is reviewed once and never retried automatically. You always start the first step, and merging and pushing always wait for you. The **AI** option runs several steps without anyone watching, so keep the budget cap and allowed commands tight and check your provider's terms for unattended use.
+
 | Setting | Default | Purpose |
 | --- | --- | --- |
 | `xdevAi.squad.workerAllowedCommands` | `npm test`, `npm run build`, `npm run lint` | Command prefixes Implement and Tests may run. Read-only git is always allowed. |

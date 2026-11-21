@@ -9,6 +9,7 @@
 - Squad Memory: shared notes that every agent receives within a fixed budget. Workers add notes after runs.
 - Skills now have a **When to use** description and are copied to every Claude Code account as on-demand skills.
 - Sync skills and memory with a folder, such as a docs repository clone, using a three-way merge, a local commit, and a confirmed push.
+- Choose who approves each Squad step: you, AI review with you starting each step, or AI, where a passing review by Lead's account (never the step's own account) starts the next step. Merging always waits for you.
 
 ### Changed
 

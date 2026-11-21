@@ -252,6 +252,7 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
         sync: {
           folder: this.syncFolderPath() ?? '',
           profiles: squadSetting('syncSkillsToProfiles', true),
+          approver: squadSetting('approver', 'human'),
           workers: { ...workerSettings('Implement'), models: squadSetting('workerModels', {}) }
         },
         nativeChatTools: this.chatTools,
@@ -288,7 +289,7 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
           await this.teamChat.send(message.text);
           return;
         case 'approve':
-          await this.teamChat.approve(message.id);
+          await this.teamChat.approve(message.id, undefined, message.approver ?? squadSetting('approver', 'human'));
           return;
         case 'discard': return this.teamChat.discard(message.id);
         case 'stop': return this.teamChat.cancel();
@@ -559,6 +560,11 @@ function squadHtml(webview: vscode.Webview, media: vscode.Uri): string {
     <section id="chat-plan" aria-labelledby="plan-title" hidden>
       <h2 id="plan-title">Lead's proposed tasks</h2>
       <ol id="chat-jobs"></ol>
+      <label class="approver">Who approves each step <select id="plan-approver">
+        <option value="human">You: start every step yourself</option>
+        <option value="ai+human">AI reviews each step, you start the next</option>
+        <option value="ai">AI: a passing review starts the next step</option>
+      </select></label>
       <p id="plan-cost" class="subtle"></p>
       <div class="actions">
         <button type="button" id="approve-plan">Approve plan</button>

@@ -8,7 +8,9 @@ function mountSquadChat(vscode, roles) {
   let pending;
   let transcript;
 
+  let lastState;
   function render(state) {
+    lastState = state;
     snapshot = state.teamChat;
     const entries = JSON.stringify(snapshot.entries);
     if (entries !== transcript) {
@@ -55,7 +57,15 @@ function mountSquadChat(vscode, roles) {
     const headless = (plan?.jobs ?? []).filter(job => job.kind === 'claude').length;
     const workers = state.sync?.workers;
     const commands = workers?.allowedCommands?.length ? workers.allowedCommands.join(', ') : 'read-only git only';
-    byId('plan-cost').textContent = `Approving runs nothing yet: you start, edit, or skip each step yourself.${headless
+    const approver = byId('plan-approver');
+    if (!plan) approver.dataset.touched = '';
+    if (!approver.dataset.touched && state.sync?.approver) approver.value = state.sync.approver;
+    const approverText = {
+      human: 'Approving runs nothing yet: you start, edit, or skip each step yourself.',
+      'ai+human': 'Approving runs nothing yet. After each step, Lead\'s account reviews it; you still start every step.',
+      ai: 'You start the first step. Each passing AI review then starts the next step; a review asking for changes, a blocked step, or an error stops and waits for you. Merging always waits for you.'
+    }[approver.value] ?? '';
+    byId('plan-cost').textContent = `${approverText}${headless
       ? ` Claude Code steps use a new git worktree${workers?.budgetUsd ? `, each headless step capped at $${workers.budgetUsd}` : ''}. Allowed commands: ${commands}.` : ''}`;
     renderRuns(snapshot.runs ?? []);
     const profileFor = role => state.accounts.find(profile => profile.id === state.seats[role]?.account);
@@ -99,8 +109,9 @@ function mountSquadChat(vscode, roles) {
       const item = element('li', undefined, `run ${run.status}`);
       const cost = run.costUsd ? ` · $${run.costUsd.toFixed(2)}` : '';
       const files = run.status === 'active' ? '' : ` · ${run.files ?? 0} file${run.files === 1 ? '' : 's'}`;
+      const approvedBy = { human: 'you approve', 'ai+human': 'AI reviews, you approve', ai: 'AI approves' }[run.approver ?? 'human'];
       item.append(element('strong', run.prompt.split('\n', 1)[0]),
-        element('small', `${run.branch ?? 'text only'} · ${run.status}${files}${cost}`));
+        element('small', `${run.branch ?? 'text only'} · ${run.status} · ${approvedBy}${files}${cost}`));
 
       const steps = element('ol', undefined, 'steps');
       const current = run.status === 'active'
@@ -108,6 +119,10 @@ function mountSquadChat(vscode, roles) {
       run.steps.forEach((step, index) => {
         const row = element('li', undefined, `step ${step.status}${index === current ? ' current' : ''}`);
         row.append(element('span', `${step.role} · ${step.profile} · ${stepLabels[step.status] ?? step.status}`));
+        if (step.gate) {
+          row.append(element('p', `AI review (${step.gate.by}): ${step.gate.verdict === 'pass' ? 'pass' : 'changes requested'}. ${step.gate.reason}`,
+            `gate ${step.gate.verdict}`));
+        }
         if (index === current) row.append(stepControls(run, step, index, busy));
         else if (step.summary) row.append(element('p', step.summary.length > 240 ? step.summary.slice(0, 240) + '…' : step.summary, 'subtle'));
         steps.append(row);
@@ -224,7 +239,8 @@ function mountSquadChat(vscode, roles) {
       form.requestSubmit();
     }
   });
-  byId('approve-plan').addEventListener('click', () => send('approve', { id: snapshot.plan.id }));
+  byId('approve-plan').addEventListener('click', () => send('approve', { id: snapshot.plan.id, approver: byId('plan-approver').value }));
+  byId('plan-approver').addEventListener('change', () => { byId('plan-approver').dataset.touched = '1'; render(lastState); });
   byId('discard-plan').addEventListener('click', () => send('discard', { id: snapshot.plan.id }));
   byId('stop-chat').addEventListener('click', () => send('stop'));
   byId('chat-add-profile').addEventListener('click', () => send('addProfile'));

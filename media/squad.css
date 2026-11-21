@@ -221,3 +221,8 @@ summary { cursor: pointer; font-weight: 600; }
 .step-controls { display: grid; gap: 4px; margin-top: 4px; }
 .step-controls textarea { width: 100%; box-sizing: border-box; }
 .run-list > li.active { border-left-color: var(--accent); }
+.approver { display: block; margin: 6px 0; }
+.approver select { margin-left: 6px; max-width: 100%; }
+.steps p.gate { margin: 2px 0 0; font-size: 0.92em; }
+.steps p.gate.pass { color: var(--vscode-testing-iconPassed, var(--vscode-foreground)); }
+.steps p.gate.changes { color: var(--warning); }

@@ -141,7 +141,7 @@ export function registerSquadTools(context: vscode.ExtensionContext, squad: Squa
         signal.throwIfAborted();
         if (choice !== approve) return 'The user declined the xDev Squad plan. The plan is still pending.';
         squad.customizations.requireTool('xdev_squad_plan');
-        const run = await squad.approve(plan.id, signal);
+        const run = await squad.approve(plan.id, signal, vscode.workspace.getConfiguration('xdevAi.squad').get('approver') ?? 'human');
         const replies = formatReplies(await run.finished);
         return `${replies}\n\nThe plan is approved but no step has run. The user runs each step from xDev Squad → Chat → Worker runs.`;
       });

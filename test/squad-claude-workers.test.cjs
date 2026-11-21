@@ -57,7 +57,7 @@ async function setup(t, respond) {
     prepare: async () => { prepared++; }
   };
   const open = () => new SquadChat(storage, accounts, squad, () => {}, host);
-  return { open, runs, worktrees, prepared: () => prepared };
+  return { open, runs, worktrees, squad, prepared: () => prepared };
 }
 
 async function settle(chat) {
@@ -177,6 +177,76 @@ test('a failing worker marks the step failed and the run stays open', async t =>
   const [run] = open().snapshot().runs;
   assert.equal(run.status, 'active');
   assert.equal(run.steps[0].status, 'failed');
+});
+
+function gatedSetup(t, verdicts) {
+  return setup(t, request => {
+    if (request.mode === 'plan') {
+      return report({ reply: 'Go', tasks: [{ role: 'Implement', brief: 'Build it' }, { role: 'Review', brief: 'Review it' }, { role: 'Tests', brief: 'Test it' }] });
+    }
+    if (request.mode === 'gate') {
+      const verdict = verdicts.shift() ?? 'pass';
+      return report({ verdict, reason: verdict === 'pass' ? 'Matches the brief' : 'Missing error handling' }, { total_cost_usd: 0.01 });
+    }
+    return report({ status: 'done', summary: `${request.role} finished`, files_changed: [], tests: '', memory: [] });
+  });
+}
+
+async function approvedRun(chat, approver) {
+  await chat.send('Build a feature');
+  await settle(chat);
+  await (await chat.approve(chat.snapshot().plan.id, undefined, approver)).finished;
+  return chat.snapshot().runs[0].id;
+}
+
+test('with the AI approver, passing reviews start the next steps and a requested change waits for the user', async t => {
+  const { open, runs, worktrees } = await gatedSetup(t, ['pass', 'changes']);
+  const chat = open();
+  const runId = await approvedRun(chat, 'ai');
+  assert.equal(runs.length, 1, 'the user still starts the first step');
+  await (await chat.runStep(runId)).finished;
+
+  assert.deepEqual(runs.map(request => `${request.role}:${request.mode}`),
+    ['Lead:plan', 'Implement:work', 'Lead:gate', 'Review:work', 'Lead:gate']);
+  const gate = runs[2];
+  assert.equal(gate.profile.name, 'Lead account', 'the reviewer is the Lead account, not the worker account');
+  assert.equal(gate.cwd, worktrees.created[0].path);
+  assert.deepEqual(JSON.parse(gate.prompt).step.summary, 'Implement finished');
+  const [run] = open().snapshot().runs;
+  assert.equal(run.status, 'active');
+  assert.deepEqual(run.steps.map(step => [step.status, step.gate?.verdict]), [['done', 'pass'], ['done', 'changes'], ['pending', undefined]]);
+  assert.equal(run.steps[1].gate.reason, 'Missing error handling');
+  assert.equal(worktrees.committed.length, 0, 'nothing is committed while the run waits');
+  assert.ok(open().snapshot().entries.some(entry => entry.profile === 'Lead account · AI review' && /changes requested/.test(entry.text)));
+});
+
+test('the AI approver finishes the run when every review passes, and AI + human only reviews', async t => {
+  const auto = await gatedSetup(t, []);
+  let chat = auto.open();
+  const runId = await approvedRun(chat, 'ai');
+  await (await chat.runStep(runId)).finished;
+  assert.equal(auto.runs.filter(request => request.mode === 'work').length, 3);
+  assert.equal(auto.open().snapshot().runs[0].status, 'done');
+  assert.equal(auto.worktrees.committed.length, 1);
+
+  const reviewed = await gatedSetup(t, []);
+  chat = reviewed.open();
+  const reviewedRun = await approvedRun(chat, 'ai+human');
+  await (await chat.runStep(reviewedRun)).finished;
+  assert.deepEqual(reviewed.runs.map(request => request.mode), ['plan', 'work', 'gate'], 'AI + human never starts the next step');
+  assert.equal(reviewed.open().snapshot().runs[0].steps[0].gate.verdict, 'pass');
+  await assert.rejects(chat.approve('x', undefined, 'robot'), /no longer available|Choose who approves/);
+});
+
+test('without an independent reviewer the AI approver falls back to the user', async t => {
+  const { open, runs, squad } = await gatedSetup(t, []);
+  const chat = open();
+  const runId = await approvedRun(chat, 'ai');
+  await squad.save('Lead', { account: 'claude:00000001-0000-0000-0000-000000000000', brief: '', status: 'Ready', blocker: '' });
+  await (await chat.runStep(runId)).finished;
+  assert.deepEqual(runs.map(request => request.mode), ['plan', 'work'], 'Lead on the Implement account cannot review Implement');
+  assert.ok(open().snapshot().entries.some(entry => /No independent AI reviewer for Implement/.test(entry.text)));
+  assert.equal(open().snapshot().runs[0].steps[1].status, 'pending');
 });
 
 test('worktrees branch from HEAD and commit only inside the worktree', async t => {

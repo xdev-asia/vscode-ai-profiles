@@ -4,7 +4,7 @@ import { terminalProfileEnv, type TerminalProfile } from './terminal-profiles';
 
 export const workerStatuses = ['done', 'blocked'] as const;
 export type WorkerStatus = typeof workerStatuses[number];
-export type WorkerMode = 'plan' | 'ask' | 'work';
+export type WorkerMode = 'plan' | 'ask' | 'work' | 'gate';
 
 export interface WorkerReport {
   status: WorkerStatus;
@@ -82,6 +82,15 @@ const planSchema = {
   required: ['reply', 'tasks']
 } as const;
 
+const gateSchema = {
+  type: 'object',
+  properties: {
+    verdict: { type: 'string', enum: ['pass', 'changes'] },
+    reason: { type: 'string', description: 'Short reason. For changes, what is missing or wrong.' }
+  },
+  required: ['verdict', 'reason']
+} as const;
+
 const readTools = ['Read', 'Glob', 'Grep'];
 const gitRead = ['Bash(git status:*)', 'Bash(git diff:*)', 'Bash(git log:*)', 'Bash(git show:*)'];
 
@@ -92,7 +101,7 @@ const gitRead = ['Bash(git status:*)', 'Bash(git diff:*)', 'Bash(git log:*)', 'B
  */
 export function workerTools(role: Role, mode: WorkerMode, allowedCommands: readonly string[]): { tools: string[]; allowed: string[] } {
   if (mode === 'plan') return { tools: [], allowed: [] };
-  if (mode === 'ask' || role === 'Lead' || role === 'Review') {
+  if (mode === 'ask' || mode === 'gate' || role === 'Lead' || role === 'Review') {
     return { tools: [...readTools, 'Bash'], allowed: [...readTools, ...gitRead] };
   }
   const commands = allowedCommands.map(command => `Bash(${command}:*)`);
@@ -112,7 +121,7 @@ export function workerArguments(request: Omit<WorkerRequest, 'executable' | 'pro
   const args = [
     '-p', prompt,
     '--output-format', 'json',
-    '--json-schema', JSON.stringify(mode === 'plan' ? planSchema : reportSchema),
+    '--json-schema', JSON.stringify(mode === 'plan' ? planSchema : mode === 'gate' ? gateSchema : reportSchema),
     '--append-system-prompt', system,
     '--tools', tools.join(','),
     '--permission-mode', 'default',
@@ -223,6 +232,17 @@ export function parsePlanOutput(stdout: string): PlanReport & { costUsd: number 
     })),
     costUsd: typeof message.total_cost_usd === 'number' ? message.total_cost_usd : 0
   };
+}
+
+export function parseGateOutput(stdout: string): { verdict: 'pass' | 'changes'; reason: string; costUsd: number } {
+  const message = readResult(stdout);
+  const error = failure(message);
+  if (error) throw new Error(error);
+  const gate = (message.structured_output ?? {}) as Record<string, unknown>;
+  if ((gate.verdict !== 'pass' && gate.verdict !== 'changes') || typeof gate.reason !== 'string') {
+    throw new Error('The reviewer did not return a verdict.');
+  }
+  return { verdict: gate.verdict, reason: gate.reason.trim().slice(0, 1_000), costUsd: typeof message.total_cost_usd === 'number' ? message.total_cost_usd : 0 };
 }
 
 /** Runs Claude Code once in print mode under the given terminal profile and returns its stdout. */
