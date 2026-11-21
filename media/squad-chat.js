@@ -107,7 +107,7 @@ function mountSquadChat(vscode, roles) {
     runsKey = key;
     byId('run-list').replaceChildren(...runs.map(run => {
       const item = element('li', undefined, `run ${run.status}`);
-      const cost = run.costUsd ? ` · $${run.costUsd.toFixed(2)}` : '';
+      const cost = run.costUsd ? ` · $${run.costUsd.toFixed(run.costUsd < 0.1 ? 3 : 2)}` : '';
       const files = run.status === 'active' ? '' : ` · ${run.files ?? 0} file${run.files === 1 ? '' : 's'}`;
       const approvedBy = { human: 'you approve', 'ai+human': 'AI reviews, you approve', ai: 'AI approves' }[run.approver ?? 'human'];
       item.append(element('strong', run.prompt.split('\n', 1)[0]),

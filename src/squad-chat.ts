@@ -233,7 +233,7 @@ export class SquadChat {
         ? `${worker} (Claude Code worker: reads the repository, ${worker === 'Review' ? 'reviews the diff' : 'edits files and runs allowed commands'} in a git worktree)`
         : `${worker} (text API: proposes text only)`);
       const leadSystem = `${roleInstructions.Lead} ${agent.kind === 'api' ? textOnly : 'Plan only; do not change files.'} Available worker roles: ${capabilities.join(', ') || 'none'}.
-Return only a JSON object with a "reply" string and a "tasks" array. Each task has a "role" from the available worker roles and a "brief" string. Use each role at most once. Use an empty tasks array for questions, summaries, or when no workers are available. Write briefs that a worker can act on without the chat history. Reply in the user's language. Proposed tasks must wait for user approval.`;
+Return only a JSON object with a "reply" string and a "tasks" array. Each task has a "role" from the available worker roles and a "brief" string. Use each role at most once. Use an empty tasks array for questions, summaries, or when no workers are available. Write briefs that a worker can act on without the chat history. Reply in the user's language. The user reviews proposed tasks in the xDev Squad panel and approves them with a button, then starts each step there, so keep the reply to a short summary of the plan and do not ask the user to reply to start it.`;
       const content = JSON.stringify({ history, request: prompt, memory: memory.length ? memory : undefined });
 
       if (agent.kind === 'claude') {
