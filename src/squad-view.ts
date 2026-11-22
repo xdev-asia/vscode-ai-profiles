@@ -6,16 +6,16 @@ import {
   findTerminalExecutable, terminalProfileEnv, terminalProfileId, terminalProviders, type TerminalProfile, type TerminalProfiles
 } from './terminal-profiles';
 import { chat, providers } from './core';
-import { isRole, noteLimit, readTask, roles, SquadStore, taskLimit, taskStatuses, type Role } from './squad';
-import { chatPromptLimit, SquadChat, type WorkerHost } from './squad-chat';
+import { isRole, noteLimit, readTask, roles, SquadStore, type Role } from './squad';
+import { SquadChat, type RunTree, type WorkerHost } from './squad-chat';
+import { FileMemento, workspaceKey } from './squad-state';
 import { registerSquadTools } from './squad-tools';
-import { skillDescriptionLimit, skillInstructionsLimit, skillNameLimit, squadTools } from './squad-customizations';
+import { squadPage } from './squad-html';
 import { memoryTextLimit } from './squad-memory';
 import { exploreCode, findRepositories, hasCodegraph } from './squad-codegraph';
 import { runClaude, validCommand, type WorkerSettings } from './squad-worker';
-import { git, Worktrees } from './squad-worktree';
+import { git, validBranch, Worktrees, type MergeRequestMode } from './squad-worktree';
 import { mergeSkills, readSyncFolder, syncProfileSkills, writeSyncFolder } from './skill-sync';
-import { workflowBriefLimit, workflowOutputLimit, workflowStages } from './workflow';
 
 const viewId = 'xdevAi.squad';
 type SquadTab = 'workflow' | 'customizations' | 'memory';
@@ -29,7 +29,23 @@ function workspaceFolder(): string | undefined {
   return folder?.scheme === 'file' ? folder.fsPath : undefined;
 }
 
-function workerSettings(role: Role): WorkerSettings {
+/** Extra allowed commands per repository, keyed by its path in the workspace or by its folder name. */
+function repositoryCommands(): Record<string, string[]> {
+  const configured = squadSetting<Record<string, unknown>>('repositoryAllowedCommands', {});
+  if (!configured || typeof configured !== 'object' || Array.isArray(configured)) return {};
+  return Object.fromEntries(Object.entries(configured).flatMap(([repo, commands]) =>
+    Array.isArray(commands) && repo.trim() ? [[repo.trim().replace(/\/+$/, ''), commands.filter(validCommand)]] : []));
+}
+
+function commandsFor(repo: string | undefined): string[] {
+  const base = squadSetting<unknown[]>('workerAllowedCommands', []).filter(validCommand);
+  if (!repo) return base;
+  const extra = repositoryCommands();
+  const own = extra[repo] ?? extra[repo.split('/').at(-1)!] ?? [];
+  return [...new Set([...base, ...own])];
+}
+
+function workerSettings(role: Role, repo?: string): WorkerSettings {
   const models = squadSetting<Record<string, unknown>>('workerModels', {});
   const model = typeof models[role] === 'string' && /^[\w.:[\]-]{1,80}$/.test(models[role] as string) ? models[role] as string : undefined;
   const budget = Number(squadSetting<number>('workerBudgetUsd', 1));
@@ -37,9 +53,20 @@ function workerSettings(role: Role): WorkerSettings {
   return {
     model,
     budgetUsd: Number.isFinite(budget) && budget >= 0 ? Math.min(budget, 50) : 1,
-    allowedCommands: squadSetting<unknown[]>('workerAllowedCommands', []).filter(validCommand),
+    allowedCommands: commandsFor(repo),
     timeoutMs: (Number.isFinite(minutes) ? Math.min(Math.max(minutes, 1), 120) : 20) * 60_000
   };
+}
+
+function codegraphTimeoutMs(): number {
+  const seconds = Number(squadSetting<number>('codegraphTimeoutSeconds', 20));
+  return (Number.isFinite(seconds) ? Math.min(Math.max(seconds, 5), 300) : 20) * 1000;
+}
+
+/** The workspace's identity across windows: its .code-workspace file, else its first folder. */
+function workspaceIdentity(): string | undefined {
+  return vscode.workspace.workspaceFile?.scheme === 'file' ? vscode.workspace.workspaceFile.toString()
+    : vscode.workspace.workspaceFolders?.[0]?.uri.toString();
 }
 
 export function registerSquad(
@@ -93,8 +120,16 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
     private readonly accounts: Accounts,
     private readonly profiles: TerminalProfiles
   ) {
-    this.store = new SquadStore(context.workspaceState);
-    const storage = context.storageUri ?? context.globalStorageUri;
+    const identity = workspaceIdentity();
+    const key = identity ? workspaceKey(identity) : undefined;
+    // A file on the extension host shared by every window that opens this workspace; per-window state from older
+    // versions is read until replaced. Extension global state is not used because each window caches its own copy.
+    const shared = key ? new FileMemento(join(context.globalStorageUri.fsPath, 'squad-state', `${key}.json`), context.workspaceState) : undefined;
+    const state = shared ?? context.workspaceState;
+    this.stateWatch = shared?.watch(() => void this.refresh());
+    this.store = new SquadStore(state);
+    const worktreeRoot = key ? join(context.globalStorageUri.fsPath, 'squad-worktrees', key)
+      : join((context.storageUri ?? context.globalStorageUri).fsPath, 'squad-worktrees');
     const host: WorkerHost = {
       profiles: () => profiles.list('claude'),
       executable: async () => {
@@ -105,18 +140,20 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
       folder: workspaceFolder,
       settings: workerSettings,
       run: request => runClaude(request),
-      worktrees: this.worktrees = new Worktrees(join(storage.fsPath, 'squad-worktrees')),
+      worktrees: this.worktrees = new Worktrees(worktreeRoot),
+      repositoryCommands,
       prepare: async () => { await this.syncProfiles(); },
       repositories: () => this.repositories(),
       codeContext: async (request, signal) => {
         const folder = workspaceFolder();
         if (!folder || !squadSetting('codegraph', true) || Date.now() < this.codegraphPausedUntil) return undefined;
         const started = Date.now();
-        const text = await exploreCode(folder, request, { signal });
-        if (!text && !signal.aborted && Date.now() - started > 15_000) {
-          // A busy or locked index would otherwise delay every message by the full timeout.
+        const timeoutMs = codegraphTimeoutMs();
+        const text = await exploreCode(folder, request, { signal, timeoutMs });
+        if (!text && !signal.aborted && Date.now() - started > timeoutMs * 0.75) {
+          // A busy, locked, or very large index would otherwise delay every message by the full timeout.
           this.codegraphPausedUntil = Date.now() + 10 * 60_000;
-          void vscode.window.showWarningMessage('CodeGraph did not answer within 20 seconds. Squad plans without it for the next 10 minutes. Check the index with "codegraph status".');
+          void vscode.window.showWarningMessage(`CodeGraph did not answer within ${Math.round(timeoutMs / 1000)} seconds. Squad plans without it for the next 10 minutes. A large index may need a longer xdevAi.squad.codegraphTimeoutSeconds; a stale lock clears with "codegraph unlock".`);
         }
         return text;
       },
@@ -125,10 +162,12 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
         return folder && squadSetting('codegraph', true) && await hasCodegraph(folder) ? folder : undefined;
       }
     };
-    this.teamChat = new SquadChat(context.workspaceState, accounts, this.store, () => void this.refresh(), host);
+    this.teamChat = new SquadChat(state, accounts, this.store, () => void this.refresh(), host);
   }
 
   private repositoryCache?: { folder: string; time: number; list: Promise<string[]> };
+  private remotePoll?: ReturnType<typeof setTimeout>;
+  private readonly stateWatch?: { dispose(): void };
   private codegraphPausedUntil = 0;
   private readonly worktrees: Worktrees;
 
@@ -139,7 +178,7 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
   async cleanWorktrees(): Promise<void> {
     const folder = workspaceFolder();
     if (!folder) throw new Error('Open a workspace folder first.');
-    const known = new Set(this.teamChat.snapshot().runs.flatMap(run => run.path ? [run.path] : []));
+    const known = new Set(this.teamChat.snapshot().runs.flatMap(run => (run.trees ?? []).map(tree => tree.path)));
     const repos = [...new Set(await Promise.all((await this.repositories()).map(repo => git(['rev-parse', '--show-toplevel'], repo === '.' ? folder : join(folder, repo)).then(top => top.trim(), () => ''))))].filter(Boolean);
     const leftovers = (await Promise.all(repos.map(repo => this.worktrees.leftovers(repo, known)))).flat();
     if (!leftovers.length) {
@@ -304,6 +343,8 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
   }
 
   dispose(): void {
+    clearTimeout(this.remotePoll);
+    this.stateWatch?.dispose();
     this.view = undefined;
     this.teamChat.cancel();
     for (const controller of this.running.values()) controller.abort();
@@ -316,17 +357,21 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
     try {
       const accounts = await this.profilesForBoard();
       if (view !== this.view || id !== this.refreshId) return;
+      const teamChat = this.teamChat.snapshot();
+      // Another window's run does not notify this one; poll while it lasts.
+      clearTimeout(this.remotePoll);
+      if (teamChat.remote) this.remotePoll = setTimeout(() => void this.refresh(), 3_000);
       void view.webview.postMessage({
         type: 'state',
         ...this.store.read(),
-        teamChat: this.teamChat.snapshot(),
+        teamChat,
         customizations: this.teamChat.customizations.read(),
         memory: this.teamChat.memory.read(),
         sync: {
           folder: this.syncFolderPath() ?? '',
           profiles: squadSetting('syncSkillsToProfiles', true),
           approver: squadSetting('approver', 'human'),
-          workers: { ...workerSettings('Implement'), models: squadSetting('workerModels', {}) }
+          workers: { ...workerSettings('Implement'), models: squadSetting('workerModels', {}), repositoryCommands: repositoryCommands() }
         },
         nativeChatTools: this.chatTools,
         accounts,
@@ -362,26 +407,36 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
           await this.teamChat.send(message.text);
           return;
         case 'approve':
-          await this.teamChat.approve(message.id, undefined, message.approver ?? squadSetting('approver', 'human'), message.repo);
+          await this.teamChat.approve(message.id, undefined, message.approver ?? squadSetting('approver', 'human'), message.repos ?? message.repo);
           return;
         case 'discard': return this.teamChat.discard(message.id);
         case 'stop': return this.teamChat.cancel();
         case 'runDiff': return this.showRunDiff(message.id);
         case 'runChanges': return { id: message.id, files: await this.teamChat.changes(message.id) };
-        case 'runOpenFile': return this.openRunFile(message.id, message.file);
+        case 'runOpenFile': return this.openRunFile(message.id, message.file, message.repo);
         case 'runDiscard': {
-          const run = this.requireWorktree(message.id);
+          const { record, tree } = this.teamChat.runTree(message.id, message.repo);
           if (typeof message.file !== 'string') return;
           const discard = 'Discard changes';
           if (await vscode.window.showWarningMessage(`Discard the changes to ${message.file}?`, {
-            modal: true, detail: `The file goes back to how it was before the run on ${run.branch}.${run.status === 'active' ? '' : ' A new local commit records this.'}`
+            modal: true, detail: `The file goes back to how it was before the run on ${tree.branch}.${record.status === 'active' ? '' : ' A new local commit records this.'}`
           }, discard) !== discard) return;
-          await this.teamChat.discardFile(run.id, message.file);
-          return { id: run.id, files: await this.teamChat.changes(run.id) };
+          await this.teamChat.discardFile(record.id, message.file, tree.target);
+          return { id: record.id, files: await this.teamChat.changes(record.id) };
+        }
+        case 'runRequestChanges':
+          await this.teamChat.requestChanges(message.id, message.text, message.repo);
+          return;
+        case 'runPush': return this.pushRun(message.id);
+        case 'runLink': {
+          const tree = this.teamChat.runTree(message.id, message.repo).tree;
+          if (!tree.pushed?.url) throw new Error('This branch has no merge request link yet.');
+          await vscode.env.openExternal(vscode.Uri.parse(tree.pushed.url));
+          return;
         }
         case 'runOpen': {
-          const run = this.requireWorktree(message.id);
-          await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(run.path), { forceNewWindow: true });
+          const tree = await this.pickTree(message.id, 'Open which repository of this run?');
+          if (tree) await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(tree.path), { forceNewWindow: true });
           return;
         }
         case 'runResume': return this.resumeSession(message.id, message.session);
@@ -395,9 +450,13 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
         case 'runFinish': return this.teamChat.finish(message.id);
         case 'runRemove': {
           const run = this.requireRun(message.id);
-          const remove = run.branch ? 'Remove worktree' : 'Remove run';
-          if (await vscode.window.showWarningMessage(run.branch ? `Remove the worktree and branch ${run.branch}?` : 'Remove this run?', {
-            modal: true, detail: run.branch ? 'Unmerged changes on this branch are deleted.' : 'Its replies stay in the chat.'
+          const trees = run.trees ?? [];
+          const branch = trees[0]?.branch;
+          const remove = branch ? (trees.length > 1 ? 'Remove worktrees' : 'Remove worktree') : 'Remove run';
+          const pushed = trees.filter(tree => tree.pushed).map(tree => tree.target);
+          if (await vscode.window.showWarningMessage(branch ? `Remove the ${trees.length > 1 ? `${trees.length} worktrees` : 'worktree'} and local branch ${branch}?` : 'Remove this run?', {
+            modal: true,
+            detail: branch ? `Unmerged local changes on this branch are deleted.${pushed.length ? ' Branches already pushed stay on the remote.' : ''}` : 'Its replies stay in the chat.'
           }, remove) === remove) await this.teamChat.removeRun(run.id);
           return;
         }
@@ -408,7 +467,16 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
         case 'addProfile':
           await vscode.commands.executeCommand('xdevAi.addAiAccount');
           return;
+        case 'assignAll': return this.receive({ type: 'assignAll', account: message.account });
       }
+      return;
+    }
+    if (message.type === 'assignAll') {
+      if (typeof message.account !== 'string' || !(await this.profilesForBoard()).some(profile => profile.id === message.account)) {
+        throw new Error('That profile is no longer available.');
+      }
+      if (this.running.size) throw new Error('Wait for the API responses or cancel them.');
+      await this.store.assignAll(message.account, roles);
       return;
     }
     if (!isRole(message.role)) return;
@@ -535,11 +603,13 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
     return run;
   }
 
-  private requireWorktree(id: unknown) {
+  /** The run's worktree to act on: the only one, or the one the user picks. */
+  private async pickTree(id: unknown, title: string): Promise<RunTree | undefined> {
     const run = this.requireRun(id);
-    const { repo, path, branch, base } = run;
-    if (!repo || !path || !branch || !base) throw new Error('This run has no git worktree.');
-    return { ...run, repo, path, branch, base };
+    const trees = run.trees ?? [];
+    if (!trees.length) throw new Error('This run has no git worktree.');
+    if (trees.length === 1) return trees[0];
+    return (await vscode.window.showQuickPick(trees.map(tree => ({ label: tree.target, description: tree.path, tree })), { title }))?.tree;
   }
 
   /** Opens an interactive Claude Code terminal under a profile; the user drives it. */
@@ -562,45 +632,112 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
   }
 
   /** Opens VS Code's diff editor for one file: the base commit on the left, the worktree on the right. */
-  private async openRunFile(id: unknown, file: unknown): Promise<void> {
-    const run = this.requireWorktree(id);
-    if (typeof file !== 'string' || !(await this.teamChat.changes(run.id)).some(change => change.path === file)) {
+  private async openRunFile(id: unknown, file: unknown, repo: unknown): Promise<void> {
+    const { record, tree } = this.teamChat.runTree(id, repo);
+    if (typeof file !== 'string' || !(await this.teamChat.changes(record.id)).some(change => change.path === file && change.repo === tree.target)) {
       throw new Error('That file has no changes in this run.');
     }
-    const before = await git(['show', `${run.base}:${file}`], run.path).catch(() => '');
+    const before = await git(['show', `${tree.base}:${file}`], tree.path).catch(() => '');
     const left = await vscode.workspace.openTextDocument({ content: before });
-    const right = vscode.Uri.file(join(run.path, file));
+    const right = vscode.Uri.file(join(tree.path, file));
     const exists = await vscode.workspace.fs.stat(right).then(() => true, () => false);
     const target = exists ? right : (await vscode.workspace.openTextDocument({ content: '' })).uri;
-    await vscode.commands.executeCommand('vscode.diff', left.uri, target, `${file} (${run.branch})`, { preview: true });
+    const where = (record.trees.length > 1 ? `${tree.target} · ` : '') + tree.branch;
+    await vscode.commands.executeCommand('vscode.diff', left.uri, target, `${file} (${where})`, { preview: true });
   }
 
   private async showRunDiff(id: unknown): Promise<void> {
-    const run = this.requireWorktree(id);
-    const diff = await git(['diff', `${run.base}..${run.branch}`], run.repo);
-    const document = await vscode.workspace.openTextDocument({ language: 'diff', content: diff || `No changes on ${run.branch}.` });
+    const run = this.requireRun(id);
+    const parts: string[] = [];
+    for (const tree of run.trees ?? []) {
+      const diff = await git(['diff', `${tree.base}..${tree.branch}`], tree.repo);
+      parts.push((run.trees!.length > 1 ? `# ${tree.target}\n` : '') + (diff || `No changes on ${tree.branch}.`));
+    }
+    const document = await vscode.workspace.openTextDocument({ language: 'diff', content: parts.join('\n\n') || 'This run has no git worktree.' });
     await vscode.window.showTextDocument(document, { preview: true });
   }
 
+  /** Merges every committed repository of the run into the branch its checkout is on, locally, after one confirmation. */
   private async mergeRun(id: unknown): Promise<void> {
-    const run = this.requireWorktree(id);
-    if (!run.commit) throw new Error('This run has no committed changes to merge.');
-    const current = (await git(['rev-parse', '--abbrev-ref', 'HEAD'], run.repo)).trim();
+    const run = this.requireRun(id);
+    const trees = (run.trees ?? []).filter(tree => tree.commit && !tree.merged);
+    if (!trees.length) throw new Error('This run has no committed changes to merge.');
+    const targets = await Promise.all(trees.map(async tree => ({ tree, into: (await git(['rev-parse', '--abbrev-ref', 'HEAD'], tree.repo)).trim() })));
     const merge = 'Merge';
-    if (await vscode.window.showWarningMessage(`Merge ${run.branch} into ${current}?`, {
-      modal: true, detail: `${run.files ?? 0} changed files. Nothing is pushed. Commit or stash local changes first.\n\n${run.stat ?? ''}`
+    const multiple = trees.length > 1;
+    if (await vscode.window.showWarningMessage(multiple ? `Merge ${trees[0].branch} in ${trees.length} repositories?` : `Merge ${trees[0].branch} into ${targets[0].into}?`, {
+      modal: true,
+      detail: `${targets.map(({ tree, into }) => `${multiple ? `${tree.target}: into ${into} · ` : ''}${tree.files ?? 0} changed files`).join('\n')}\nNothing is pushed. Commit or stash local changes first.${multiple ? '' : `\n\n${trees[0].stat ?? ''}`}`
     }, merge) !== merge) return;
-    await git(['merge', '--no-ff', '--no-edit', run.branch], run.repo);
-    void vscode.window.showInformationMessage(`Merged ${run.branch} into ${current}. Remove the run when you no longer need its worktree.`);
+    const merged: string[] = [];
+    for (const { tree, into } of targets) {
+      try {
+        await git(['merge', '--no-ff', '--no-edit', tree.branch], tree.repo);
+      } catch (error) {
+        throw new Error(`${multiple ? `${tree.target}: ` : ''}${error instanceof Error ? error.message : 'Merge failed.'}${merged.length ? ` Already merged: ${merged.join(', ')}.` : ''}`);
+      }
+      await this.teamChat.recordMerge(run.id, tree.target, into);
+      merged.push(multiple ? tree.target : into);
+    }
+    void vscode.window.showInformationMessage(`Merged ${trees[0].branch}${multiple ? ` in ${merged.join(', ')}` : ` into ${merged[0]}`}. Remove the run when you no longer need its worktree.`);
+  }
+
+  /**
+   * Pushes each committed repository's branch and, on GitLab, opens a merge request with push options.
+   * The user confirms the target branch and the push first; nothing is pushed otherwise.
+   */
+  private async pushRun(id: unknown): Promise<void> {
+    const run = this.requireRun(id);
+    if (run.status === 'active') throw new Error('Finish the run before pushing it.');
+    const trees = (run.trees ?? []).filter(tree => tree.commit);
+    if (!trees.length) throw new Error('This run has no committed changes to push.');
+    const mode = squadSetting<MergeRequestMode>('mergeRequests', 'auto');
+    const configured = squadSetting<string>('mergeRequestTarget', '').trim();
+    const plans = await Promise.all(trees.map(async tree => {
+      const remote = await this.worktrees.remote(tree);
+      return { tree, remote, target: configured || await this.worktrees.defaultTarget(tree, remote.name) };
+    }));
+    const multiple = plans.length > 1;
+    const mergeRequests = plans.some(plan => mode === 'gitlab' || (mode === 'auto' && plan.remote.host === 'gitlab'));
+    // One target branch for all repositories keeps the dialogs short; the default comes from the first one.
+    const target = await vscode.window.showInputBox({
+      title: mergeRequests ? 'Target branch for the merge request' : 'Branch the pull request should target',
+      value: plans[0].target, prompt: multiple ? `Used for ${plans.map(plan => plan.tree.target).join(', ')}.` : undefined,
+      validateInput: value => validBranch(value.trim()) ? undefined : 'Enter a branch name.'
+    });
+    if (!target) return;
+    const ahead = await Promise.all(plans.map(plan => this.worktrees.ahead(plan.tree, plan.remote.name, target.trim())));
+    const push = mergeRequests ? 'Push and open merge request' : 'Push';
+    const lines = plans.map((plan, index) => `${multiple ? `${plan.tree.target}: ` : ''}${plan.tree.branch} → ${plan.remote.name} (${plan.remote.url})${ahead[index] !== undefined ? ` · ${ahead[index]} commit${ahead[index] === 1 ? '' : 's'} not on ${target.trim()}` : ''}`);
+    if (await vscode.window.showWarningMessage(`Push ${plans[0].tree.branch}${multiple ? ` in ${plans.length} repositories` : ''}?`, {
+      modal: true,
+      detail: `${lines.join('\n')}\n${mergeRequests ? `GitLab opens a merge request into ${target.trim()} (or updates the open one).` : 'The remote may print a link to open a pull request.'} Teammates can see the branch once it is pushed.`
+    }, push) !== push) return;
+    const title = run.request.split('\n', 1)[0];
+    for (const plan of plans) {
+      const result = await this.worktrees.push(plan.tree, { target: target.trim(), title, mode });
+      await this.teamChat.recordPush(run.id, plan.tree.target, result);
+    }
+    const links = this.teamChat.run(run.id)?.trees?.flatMap(tree => tree.pushed?.url ? [tree.pushed.url] : []) ?? [];
+    if (links.length) {
+      const open = links.length > 1 ? 'Open merge requests' : 'Open merge request';
+      if (await vscode.window.showInformationMessage(`Pushed ${plans[0].tree.branch}.`, open) === open) {
+        for (const link of links) await vscode.env.openExternal(vscode.Uri.parse(link));
+      }
+    } else {
+      void vscode.window.showInformationMessage(`Pushed ${plans[0].tree.branch}.`);
+    }
   }
 
   private async resumeSession(id: unknown, sessionId: unknown): Promise<void> {
-    const run = this.requireWorktree(id);
+    const run = this.requireRun(id);
     const session = run.sessions.find(candidate => candidate.sessionId === sessionId);
     if (!session) throw new Error('This worker session is no longer available.');
+    const tree = run.trees?.find(candidate => candidate.target === session.repo) ?? run.trees?.[0];
+    if (!tree) throw new Error('This run has no git worktree.');
     const profile: TerminalProfile | undefined = (await this.profiles.list('claude')).find(candidate => terminalProfileId(candidate) === session.profileId);
     if (!profile) throw new Error('The Claude Code account for this session was removed.');
-    await this.openClaudeTerminal(`${session.role} · ${session.profile}`, profile, run.path, ['--resume', session.sessionId]);
+    await this.openClaudeTerminal(`${session.role} · ${session.profile}`, profile, tree.path, ['--resume', session.sessionId]);
   }
 
   private async startRequest(role: Role, profileId: string, brief: string): Promise<void> {
@@ -629,206 +766,9 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
 }
 
 function squadHtml(webview: vscode.Webview, media: vscode.Uri): string {
-  const nonce = randomBytes(16).toString('base64');
-  const script = webview.asWebviewUri(vscode.Uri.joinPath(media, 'squad.js'));
-  const chatScript = webview.asWebviewUri(vscode.Uri.joinPath(media, 'squad-chat.js'));
-  const workspaceScript = webview.asWebviewUri(vscode.Uri.joinPath(media, 'squad-workspace.js'));
-  const style = webview.asWebviewUri(vscode.Uri.joinPath(media, 'squad.css'));
-  return `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; script-src 'nonce-${nonce}'">
-  <link rel="stylesheet" href="${style}">
-  <title>Squad</title>
-</head>
-<body>
-  <header class="top">
-    <h1>Workspace squad</h1>
-    <nav aria-label="Squad views">
-      <button type="button" id="show-chat" aria-pressed="true">Chat</button>
-      <button type="button" id="show-roles" aria-pressed="false">Roles</button>
-      <button type="button" id="show-workflow" aria-pressed="false">Workflow</button>
-      <button type="button" id="show-customizations" aria-pressed="false">Skills &amp; Tools</button>
-      <button type="button" id="show-memory" aria-pressed="false">Memory</button>
-    </nav>
-  </header>
-  <main id="chat-panel">
-    <section id="squad-board" class="squad-board" aria-label="Squad team"></section>
-    <div id="chat-messages" role="log" aria-label="Squad conversation"></div>
-    <section id="chat-plan" aria-labelledby="plan-title" hidden>
-      <h2 id="plan-title">Lead's proposed tasks</h2>
-      <ol id="chat-jobs"></ol>
-      <label class="approver">Who approves each step <select id="plan-approver">
-        <option value="human">You: start every step yourself</option>
-        <option value="ai+human">AI reviews each step, you start the next</option>
-        <option value="ai">AI: a passing review starts the next step</option>
-      </select></label>
-      <label class="approver" id="plan-repo-field" hidden>Repository <select id="plan-repo"></select>
-        <small id="plan-repo-hint" class="subtle"></small></label>
-      <p id="plan-cost" class="subtle"></p>
-      <div class="actions">
-        <button type="button" id="approve-plan">Approve plan</button>
-        <button type="button" id="discard-plan">Discard plan</button>
-      </div>
-    </section>
-    <section id="chat-runs" aria-labelledby="runs-title" hidden>
-      <h2 id="runs-title">Worker runs</h2>
-      <ol id="run-list" class="run-list"></ol>
-    </section>
-    <section id="chat-live" class="live" aria-label="Worker activity" hidden></section>
-    <p id="chat-status" role="status">Loading squad…</p>
-    <p id="chat-error" role="alert"></p>
-    <div class="actions">
-      <button type="button" id="chat-add-profile" disabled>Add AI account</button>
-      <div id="chat-terminal" class="actions" hidden>
-        <select id="chat-terminal-role" aria-label="AI terminal role"></select>
-        <button type="button" id="open-chat-terminal">Open terminal</button>
-      </div>
-      <button type="button" id="stop-chat" hidden>Stop run</button>
-    </div>
-    <form id="chat-composer">
-      <label>Message <textarea id="chat-message" rows="2" maxlength="${chatPromptLimit}"
-        placeholder="Ask Lead or address a role with @Review" required disabled></textarea></label>
-      <button type="submit" id="send-chat" disabled>Send</button>
-    </form>
-  </main>
-  <main id="roles-panel" hidden>
-    <p id="summary" aria-live="polite">Loading squad…</p>
-    <section aria-label="Squad roles" class="board">
-      <div id="roles" class="roles" data-roles="${roles.join(',')}"></div>
-      <section id="escalations" class="escalations" hidden>
-        <h2>Needs attention</h2>
-        <ul id="blockers"></ul>
-      </section>
-    </section>
-    <section class="detail" aria-labelledby="seat-title">
-      <h2 id="seat-title">Lead</h2>
-      <p id="notice" role="status"></p>
-      <form id="seat">
-        <fieldset id="fields" disabled>
-          <div class="assignment">
-            <label>Profile <select id="account"></select></label>
-            <label>Status <select id="status">${taskStatuses.map(status => `<option>${status}</option>`).join('')}</select></label>
-          </div>
-          <label>Task brief <textarea id="brief" rows="3" maxlength="${taskLimit}" placeholder="Describe the work and expected result"></textarea></label>
-          <label id="blocker-field" hidden>Blocker <textarea id="blocker" rows="2" maxlength="${noteLimit}"></textarea></label>
-          <div class="actions">
-            <button type="submit" id="save" disabled>Save task</button>
-            <button type="button" id="copy" hidden>Copy brief</button>
-            <button type="button" id="terminal" hidden>Open terminal</button>
-            <button type="button" id="usage" hidden>Check usage</button>
-            <button type="button" id="run" hidden>Send to API</button>
-          </div>
-        </fieldset>
-      </form>
-      <button id="stop" type="button" hidden>Cancel API request</button>
-      <p id="request-error" role="alert"></p>
-      <details id="reply" hidden>
-        <summary>Latest API response</summary>
-        <pre id="response"></pre>
-      </details>
-      <details id="handoff" hidden>
-        <summary>Hand off to another role</summary>
-        <form id="handoff-form">
-          <label>Recipient <select id="recipient"></select></label>
-          <label>Note <textarea id="note" rows="2" maxlength="${noteLimit}" required></textarea></label>
-          <button type="submit" id="send-note">Send handoff</button>
-        </form>
-      </details>
-    </section>
-    <details id="activity" class="activity">
-      <summary>Recent activity</summary>
-      <ol id="events"></ol>
-    </details>
-  </main>
-  <main id="workflow-panel" class="workspace-panel" hidden>
-    <ol id="workflow-stages" class="workflow-stages" aria-label="SDLC stages">${workflowStages.map(stage =>
-      `<li data-stage="${stage.name}" data-role="${stage.role}" data-instruction="${stage.instruction}"><strong>${stage.name}</strong><small>${stage.role}</small></li>`
-    ).join('')}</ol>
-    <form id="workflow-start" class="detail" hidden>
-      <label>Project brief <textarea id="workflow-brief" maxlength="${workflowBriefLimit}" rows="4" required
-        placeholder="What should ship? Include scope and acceptance criteria."></textarea></label>
-      <button type="submit" class="primary">Start workflow</button>
-    </form>
-    <section id="workflow-current" class="detail" hidden>
-      <div class="workspace-heading"><h2 id="workflow-title"></h2><button type="button" id="workflow-reset">Reset workflow</button></div>
-      <p id="workflow-instruction" class="subtle"></p>
-      <details><summary>Project brief</summary><p id="workflow-project" class="preserve-lines"></p></details>
-      <div class="actions" id="workflow-actions">
-        <button type="button" id="workflow-draft" class="primary">Draft with AI</button>
-        <button type="button" id="workflow-copy">Copy stage brief</button>
-        <button type="button" id="workflow-stop" hidden>Stop run</button>
-      </div>
-      <form id="workflow-approve">
-        <label>Stage result <textarea id="workflow-output" rows="5" maxlength="${workflowOutputLimit}" required
-          placeholder="Review the AI draft or enter the result from your terminal."></textarea></label>
-        <button type="submit" id="workflow-approve-button" class="primary">Approve stage</button>
-      </form>
-      <p id="workflow-status" class="subtle" role="status"></p>
-    </section>
-    <section id="workflow-results" class="detail" hidden><h2>Approved results</h2><div id="workflow-artifacts"></div></section>
-    <p id="workflow-notice" class="workspace-notice" role="status">Loading workflow…</p>
-  </main>
-  <main id="customizations-panel" class="workspace-panel" hidden>
-    <section class="detail">
-      <div class="workspace-heading"><h2>Workspace skills</h2><button type="button" id="add-skill" class="primary" disabled>Add skill</button></div>
-      <p class="subtle">Enabled skills go into AI SDLC drafts and, as Claude Code skills, into every Claude Code account. Workers load a skill only when its description matches the task.</p>
-      <ul class="workspace-list" id="skills"></ul>
-      <form id="skill-form" hidden>
-        <label>Name <input id="skill-name" maxlength="${skillNameLimit}" required></label>
-        <label>When to use <input id="skill-description" maxlength="${skillDescriptionLimit}"
-          placeholder="One line. Claude reads this to decide when to load the skill."></label>
-        <label>Instructions <textarea id="skill-instructions" rows="6" maxlength="${skillInstructionsLimit}" required></textarea></label>
-        <label class="checkbox"><input id="skill-enabled" type="checkbox"> Enabled</label>
-        <div class="actions"><button type="submit" class="primary">Save skill</button><button type="button" id="cancel-skill">Cancel</button></div>
-      </form>
-    </section>
-    <section class="detail">
-      <h2>Sync</h2>
-      <p id="sync-profiles" class="subtle"></p>
-      <p id="sync-folder" class="subtle"></p>
-      <p id="sync-last" class="subtle"></p>
-      <div class="actions">
-        <button type="button" id="sync-now" class="primary">Sync with folder</button>
-        <button type="button" id="sync-accounts">Copy skills to Claude accounts</button>
-        <button type="button" id="squad-settings">Worker settings</button>
-      </div>
-    </section>
-    <section class="detail">
-      <h2>Copilot and MCP tools</h2>
-      <p id="tool-hint" class="subtle"></p>
-      <ul id="squad-tools" class="workspace-list">${Object.entries(squadTools).map(([id, tool]) =>
-        `<li><label class="checkbox"><input type="checkbox" id="${id}" disabled> ${tool.name}</label><code>#${tool.reference}</code></li>`
-      ).join('')}</ul>
-      <div id="native-customizations" class="actions" hidden>
-        <button type="button" id="native-skills">VS Code Skills</button>
-        <button type="button" id="native-tools">VS Code Tools and MCP</button>
-      </div>
-    </section>
-    <section class="detail">
-      <h2>xDev AI MCP</h2>
-      <div class="actions"><button type="button" id="manage-mcp">Manage MCP</button></div>
-    </section>
-    <p id="customizations-notice" class="workspace-notice" role="status"></p>
-  </main>
-  <main id="memory-panel" class="workspace-panel" hidden>
-    <section class="detail">
-      <h2>Shared memory</h2>
-      <p class="subtle">Short facts every agent receives with its task: conventions, decisions, pitfalls. Workers add notes when they learn something durable. Pinned notes always fit in the prompt; others are newest first within a fixed budget.</p>
-      <form id="memory-form" class="memory-form">
-        <label>New note <input id="memory-text" maxlength="${memoryTextLimit}" required placeholder="e.g. API errors use the Problem Details format"></label>
-        <button type="submit" id="memory-submit" class="primary">Add</button>
-      </form>
-      <ul id="memory-list" class="workspace-list"></ul>
-    </section>
-    <p id="memory-notice" class="workspace-notice" role="status"></p>
-  </main>
-  <div id="squad-toast" class="toast" role="status" hidden></div>
-  <script nonce="${nonce}" src="${chatScript}"></script>
-  <script nonce="${nonce}" src="${workspaceScript}"></script>
-  <script nonce="${nonce}" src="${script}"></script>
-</body>
-</html>`;
+  const uri = (file: string) => webview.asWebviewUri(vscode.Uri.joinPath(media, file)).toString();
+  return squadPage({
+    cspSource: webview.cspSource, nonce: randomBytes(16).toString('base64'),
+    script: uri('squad.js'), chatScript: uri('squad-chat.js'), workspaceScript: uri('squad-workspace.js'), style: uri('squad.css')
+  });
 }

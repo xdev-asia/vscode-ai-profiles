@@ -1,12 +1,31 @@
 import { execFile } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 export interface RunWorktree {
   repo: string;
   path: string;
   branch: string;
   base: string;
+  /** The branch the repository's checkout was on when the run started, if any. */
+  source?: string;
+}
+
+export type MergeRequestMode = 'auto' | 'gitlab' | 'push';
+
+export interface RemoteInfo {
+  name: string;
+  /** The remote URL without any user name or password. */
+  url: string;
+  host: 'gitlab' | 'github' | 'other';
+}
+
+export interface PushResult {
+  remote: string;
+  target: string;
+  /** The merge request or pull request link the remote printed, if any. */
+  url?: string;
+  mergeRequest: boolean;
 }
 
 export interface WorktreeChanges {
@@ -34,6 +53,8 @@ export interface LeftoverWorktree {
 }
 
 export type Git = (args: readonly string[], cwd: string) => Promise<string>;
+/** Runs git and returns stdout and stderr together, for commands such as push that report on stderr. */
+export type GitAll = (args: readonly string[], cwd: string) => Promise<string>;
 
 const patchLimit = 12_000;
 const changeLimit = 60;
@@ -76,12 +97,37 @@ export const git: Git = (args, cwd) => new Promise((resolve, reject) => {
     });
 });
 
+export const gitAll: GitAll = (args, cwd) => new Promise((resolve, reject) => {
+  execFile('git', [...args], { cwd, maxBuffer: 8_000_000, windowsHide: true, timeout: 120_000, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } },
+    (error, stdout, stderr) => {
+      if (error) reject(new Error(stderr.trim().split('\n').filter(line => !/^remote:\s*$/.test(line)).slice(-3).join('\n') || error.message));
+      else resolve(`${stdout}\n${stderr}`);
+    });
+});
+
+/** Removes credentials from a remote URL so it can be shown. */
+export function safeRemoteUrl(url: string): string {
+  return url.trim().replace(/^([a-z][\w+.-]*:\/\/)[^@/]*@/i, '$1');
+}
+
+/** The merge request or pull request link in git push output, preferring an existing request over a "new" link. */
+export function mergeRequestUrl(output: string): string | undefined {
+  const links = [...output.matchAll(/https?:\/\/[^\s'"<>]+/g)].map(match => match[0].replace(/[.,;)]+$/, ''));
+  const requests = links.filter(link => /\/(merge_requests|pull)(\/|$)|\/compare\//.test(link));
+  return requests.find(link => /\/(merge_requests|pull)\/\d+/.test(link)) ?? requests[0];
+}
+
+/** A branch name safe to pass to git as a value. */
+export function validBranch(name: unknown): name is string {
+  return typeof name === 'string' && name.length <= 200 && /^[\w./-]+$/.test(name) && !name.startsWith('-') && !name.includes('..') && !name.endsWith('/') && !name.endsWith('.lock');
+}
+
 /**
  * Each approved Squad run works in its own git worktree on a new local branch, so headless workers
  * never touch the user's checkout. Nothing is pushed; merging stays with the user.
  */
 export class Worktrees {
-  constructor(private readonly root: string, private readonly run: Git = git) {}
+  constructor(private readonly root: string, private readonly run: Git = git, private readonly runAll: GitAll = gitAll) {}
 
   async repository(folder: string): Promise<string> {
     try {
@@ -91,17 +137,58 @@ export class Worktrees {
     }
   }
 
-  async create(folder: string, id: string): Promise<RunWorktree> {
+  /** Creates the run's worktree. A run across several repositories passes a label so each gets its own folder. */
+  async create(folder: string, id: string, label?: string): Promise<RunWorktree> {
     const repo = await this.repository(folder);
     const base = (await this.run(['rev-parse', 'HEAD'], repo).catch(() => {
       throw new Error('The repository has no commits yet. Make a first commit before running workers.');
     })).trim();
+    const source = (await this.run(['rev-parse', '--abbrev-ref', 'HEAD'], repo).catch(() => '')).trim();
     const name = id.slice(0, 8);
     const branch = `xdev/squad/${name}`;
-    await mkdir(this.root, { recursive: true, mode: 0o700 });
-    const path = join(this.root, name);
+    const path = label ? join(this.root, name, label.replace(/[^\w.-]+/g, '-').slice(0, 60)) : join(this.root, name);
+    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
     await this.run(['worktree', 'add', '-b', branch, path, base], repo);
-    return { repo, path, branch, base };
+    return { repo, path, branch, base, ...(source && source !== 'HEAD' ? { source } : {}) };
+  }
+
+  /** The remote a run's branch is pushed to: origin, or the only remote. */
+  async remote(worktree: Pick<RunWorktree, 'repo'>): Promise<RemoteInfo> {
+    const names = (await this.run(['remote'], worktree.repo)).split('\n').map(name => name.trim()).filter(Boolean);
+    const name = names.includes('origin') ? 'origin' : names[0];
+    if (!name) throw new Error('This repository has no git remote to push to.');
+    const url = safeRemoteUrl(await this.run(['remote', 'get-url', name], worktree.repo));
+    return { name, url, host: /gitlab/i.test(url) ? 'gitlab' : /github\.com/i.test(url) ? 'github' : 'other' };
+  }
+
+  /** The branch a merge request should target by default: the remote's default branch, else the run's source branch. */
+  async defaultTarget(worktree: RunWorktree, remote: string): Promise<string> {
+    const head = (await this.run(['symbolic-ref', '--short', `refs/remotes/${remote}/HEAD`], worktree.repo).catch(() => '')).trim();
+    const fromRemote = head.startsWith(`${remote}/`) ? head.slice(remote.length + 1) : '';
+    return fromRemote || worktree.source || 'main';
+  }
+
+  /** Commits on the run's branch that the remote target branch does not have yet, when the remote branch is known locally. */
+  async ahead(worktree: RunWorktree, remote: string, target: string): Promise<number | undefined> {
+    const count = await this.run(['rev-list', '--count', `refs/remotes/${remote}/${target}..${worktree.branch}`], worktree.repo).catch(() => '');
+    return count.trim() ? Number(count.trim()) : undefined;
+  }
+
+  /**
+   * Pushes the run's branch. On GitLab, push options ask the server to open (or update) a merge request into
+   * `target`, so no API token is needed; other hosts print a link to open a pull request.
+   */
+  async push(worktree: RunWorktree, options: { target: string; title: string; mode: MergeRequestMode }): Promise<PushResult> {
+    if (!validBranch(options.target)) throw new Error('Enter a valid target branch.');
+    const remote = await this.remote(worktree);
+    const mergeRequest = options.mode === 'gitlab' || (options.mode === 'auto' && remote.host === 'gitlab');
+    const title = options.title.replace(/\s+/g, ' ').trim().slice(0, 120) || 'xDev Squad changes';
+    const pushOptions = mergeRequest ? [
+      '-o', 'merge_request.create', '-o', `merge_request.target=${options.target}`, '-o', `merge_request.title=${title}`,
+      '-o', 'merge_request.remove_source_branch'
+    ] : [];
+    const output = await this.runAll(['push', '-u', ...pushOptions, remote.name, `${worktree.branch}:refs/heads/${worktree.branch}`], worktree.path);
+    return { remote: remote.name, target: options.target, url: mergeRequestUrl(output), mergeRequest };
   }
 
   /** Commits whatever the workers left in the worktree to its branch, locally. */

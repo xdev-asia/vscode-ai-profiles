@@ -43,8 +43,8 @@ test('worker arguments restrict tools by role and cap spending', () => {
   assert.deepEqual(review.tools, ['Read', 'Glob', 'Grep', 'Bash']);
   assert.ok(!review.allowed.some(tool => tool === 'Edit' || tool.includes('npm test')));
   const plan = workerArguments({ role: 'Lead', mode: 'plan', prompt: 'Plan', system: 'Lead', settings });
-  assert.equal(plan[plan.indexOf('--tools') + 1], '');
-  assert.ok(!plan.includes('--allowedTools'));
+  assert.equal(plan[plan.indexOf('--tools') + 1], 'Read,Glob,Grep,Bash', 'Lead reads the repository to plan or answer');
+  assert.doesNotMatch(plan[plan.indexOf('--allowedTools') + 1], /Edit|Write|npm/);
   assert.ok(plan.includes('--no-session-persistence'));
 });
 

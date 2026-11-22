@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.10.0 - 2026-11-22
+
+### Added
+
+- One run can span several repositories. Lead gives each task a repository (a backend API and the screen that calls it get one Implement task each), and you can change the repository per task before approving. Each repository gets its own worktree on the same branch name; later steps see what earlier steps did in other repositories.
+- **Push & MR** on a finished run: pushes the branch of every committed repository after you confirm the target branch, and on GitLab opens or updates a merge request with git push options, without an API token. The run keeps the link (**Open MR**). Settings: `xdevAi.squad.mergeRequests`, `xdevAi.squad.mergeRequestTarget`.
+- **Request changes** under a run's changes: write feedback (use **Comment** on a file to start a line) and Implement gets it as a new step in the same worktree. A finished run reopens; its next commit lands on the same branch.
+- Run metrics: time and cost per step, retries, time to commit per run, and a 30-day summary above Worker runs (runs, median time to commit, share of steps that passed first time, files, cost).
+- **Use for all roles** on the Roles tab, and a one-click button on a fresh workspace to give every role the same account.
+- Per-repository allowed commands: `xdevAi.squad.repositoryAllowedCommands`.
+- `xdevAi.squad.codegraphTimeoutSeconds` for large CodeGraph indexes.
+
+### Changed
+
+- Squad roles, runs, memory, and skills are shared by every VS Code window that opens the workspace, including code-server windows in different browsers: they live in a file in the extension's global storage. A window sees another window's running step within a second, waits for it, and recovers if that window closes. State saved per window by older versions is read until the first change.
+- A Claude Code Lead may read the repository (read-only) to answer questions and make briefs concrete.
+- Workers receive their allowed commands and are told to run each one on its own. Claude Code denies compound commands such as `node --test 2>&1; echo $?` even when each part is allowed.
+- New worktrees live in the extension's global storage, so any window can open or remove them.
+- Lead keeps its reply to a short summary.
+- Notices appear near the top of the panel and no longer cover buttons.
+- A long line in a patch scrolls inside the patch instead of widening the panel.
+- A step's first-pass count only includes commands the allowed list blocked, not commands that ran and failed.
+- A webview test renders the real panel in jsdom.
+
 ## 0.9.0 - 2026-11-22
 
 ### Added

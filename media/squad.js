@@ -157,6 +157,8 @@ function updateControls() {
   byId('blocker-field').hidden = status.value !== 'Blocked';
   blocker.required = status.value === 'Blocked';
   byId('save').disabled = !dirty;
+  // Offer to reuse the chosen profile for every role when the roles do not all use it yet.
+  byId('assign-all').hidden = !account.value || roles.every(item => (drafts.get(item)?.account ?? savedTask(item).account) === account.value);
   byId('copy').hidden = !task.brief || dirty;
   byId('terminal').hidden = profile?.kind !== 'terminal' || dirty;
   byId('usage').hidden = profile?.kind !== 'terminal' || dirty;
@@ -204,6 +206,13 @@ window.addEventListener('message', ({ data }) => {
       notice.textContent = 'Handoff recorded.';
     } else if (type === 'copy') {
       notice.textContent = 'Brief copied.';
+    } else if (type === 'assignAll') {
+      for (const [item, draft] of drafts) {
+        draft.account = account.value;
+        const task = savedTask(item);
+        if (Object.keys(draft).every(key => draft[key] === task[key])) drafts.delete(item);
+      }
+      notice.textContent = 'Every role now uses this profile.';
     }
     render();
   }
@@ -225,6 +234,7 @@ byId('handoff-form').addEventListener('submit', event => {
   event.preventDefault();
   if (note.value.trim()) send('handoff', { to: recipient.value, note: note.value });
 });
+byId('assign-all').addEventListener('click', () => send('assignAll', { account: account.value }));
 for (const action of ['copy', 'terminal', 'usage', 'run', 'stop']) {
   byId(action).addEventListener('click', () => send(action));
 }

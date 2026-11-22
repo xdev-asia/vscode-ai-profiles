@@ -14,7 +14,7 @@ const roleNames = ['Lead', 'Implement', 'Review', 'Tests'];
 
 function memento() {
   const values = new Map();
-  return { get: key => values.get(key), update: async (key, value) => values.set(key, value) };
+  return { values, get: key => values.get(key), update: async (key, value) => values.set(key, value) };
 }
 
 function report(output, extra = {}) {
@@ -35,8 +35,8 @@ async function setup(t, respond, extraHost = {}) {
   const runs = [];
   const worktrees = {
     created: [], committed: [], removed: [],
-    async create(folder, id) {
-      const tree = { repo: folder, path: `${folder}/.wt/${id.slice(0, 8)}`, branch: `xdev/squad/${id.slice(0, 8)}`, base: 'base0' };
+    async create(folder, id, label) {
+      const tree = { repo: folder, path: `${folder}/.wt/${id.slice(0, 8)}${label ? `/${label}` : ''}`, branch: `xdev/squad/${id.slice(0, 8)}`, base: 'base0' };
       this.created.push(tree);
       return tree;
     },
@@ -52,7 +52,7 @@ async function setup(t, respond, extraHost = {}) {
     profiles: async () => profiles,
     executable: async () => '/bin/claude',
     folder: () => '/repo',
-    settings: () => ({ budgetUsd: 1, allowedCommands: ['npm test'], timeoutMs: 60_000 }),
+    settings: (role, repo) => ({ budgetUsd: 1, allowedCommands: repo === 'web' ? ['npm test', 'npm run lint'] : ['npm test'], timeoutMs: 60_000 }),
     run: async request => {
       runs.push(request);
       return respond(request);
@@ -110,6 +110,7 @@ test('a Claude Code Lead plans and workers run headless in one worktree with sha
   assert.equal(implement.cwd, worktrees.created[0].path);
   assert.equal(review.cwd, worktrees.created[0].path, 'Review sees the uncommitted Implement changes');
   assert.equal(implement.mode, 'work');
+  assert.match(implement.system, /run each allowed command on its own/);
   assert.equal(implement.profile.name, 'Implement account');
   assert.deepEqual(JSON.parse(review.prompt).previous, [{ role: 'Implement', status: 'done', summary: 'Added GET /health', files: ['src/health.ts'] }]);
   assert.deepEqual(JSON.parse(review.prompt).memory, ['Health checks live in src/health.ts', 'Use Fastify, not Express']);
@@ -118,14 +119,19 @@ test('a Claude Code Lead plans and workers run headless in one worktree with sha
   const snapshot = open().snapshot();
   const [run] = snapshot.runs;
   assert.equal(run.status, 'done');
-  assert.equal(run.commit, 'c0ffee');
+  assert.equal(run.trees[0].commit, 'c0ffee');
+  assert.equal(run.trees.length, 1);
+  assert.ok(run.finished >= run.time);
+  assert.deepEqual(run.steps.map(step => step.attempts), [1, 1]);
+  assert.equal(snapshot.metrics.runs, 1);
+  assert.equal(snapshot.metrics.firstPass, 1);
   assert.equal(Math.round(run.costUsd * 10), 2);
   assert.deepEqual(run.sessions.map(session => [session.role, session.sessionId]), [['Implement', 'impl-session'], ['Review', 'review-session']]);
   assert.match(snapshot.entries.find(entry => entry.author === 'Implement').profile, /Claude Code · \$0\.10$/);
   assert.match(snapshot.entries.at(-1).text, /Committed 1 changed file to xdev\/squad\//);
 
   await chat.removeRun(run.id);
-  assert.deepEqual(worktrees.removed, [run.branch]);
+  assert.deepEqual(worktrees.removed, [run.trees[0].branch]);
   assert.deepEqual(open().snapshot().runs, []);
 });
 
@@ -311,18 +317,19 @@ test('Lead gets the code map and repositories, the plan suggests a repository, a
   const lead = JSON.parse(runs[0].prompt);
   assert.match(lead.code, /^bil32Rules\.ts · buildNoiDung/);
   assert.deepEqual(lead.repositories, repos);
-  assert.match(runs[0].system, /file paths relative to that repository/);
+  assert.match(runs[0].system, /file paths relative to the task's repository root/);
+  assert.match(runs[0].system, /one Implement task per repository/);
   assert.deepEqual(lead.allowed_commands, ['npm test']);
   assert.match(runs[0].system, /may only run "allowed_commands"/);
   assert.match(runs[0].system, /CodeGraph excerpt/);
   const { plan } = chat.snapshot();
-  assert.equal(plan.repo, 'his/frontend/his-portal');
+  assert.deepEqual(plan.jobs.map(job => job.repo), ['his/frontend/his-portal', 'his/frontend/his-portal'], 'suggested from the brief, then from the plan');
   assert.deepEqual(plan.repos, repos);
 
   await (await chat.approve(plan.id, undefined, 'human', 'his/backend/his-service')).finished;
   assert.equal(worktrees.created[0].repo, '/repo/his/backend/his-service', 'the user can override the suggestion');
   const runId = chat.snapshot().runs[0].id;
-  assert.equal(chat.snapshot().runs[0].target, 'his/backend/his-service');
+  assert.equal(chat.snapshot().runs[0].trees[0].target, 'his/backend/his-service');
   await (await chat.runStep(runId)).finished;
   assert.equal(live[0].role, 'Implement');
   assert.deepEqual(live[0].items.map(item => [item.kind, item.text]), [['edit', 'src/a.ts'], ['run', 'npx vitest run src/a.test.ts']]);
@@ -356,7 +363,7 @@ test('approving needs a repository when the workspace has several and the plan n
   await chat.send('Do it');
   await settle(chat);
   const { plan } = chat.snapshot();
-  assert.equal(plan.repo, undefined);
+  assert.equal(plan.jobs[0].repo, undefined);
   await assert.rejects(chat.approve(plan.id), /Choose the repository/);
   await assert.rejects(chat.approve(plan.id, undefined, 'human', '../etc'), /Choose the repository/);
   await (await chat.approve(plan.id, undefined, 'human', 'b')).finished;
@@ -419,4 +426,203 @@ test('leftover Squad worktrees are found and cleaned, keeping unmerged branches'
   assert.match(branches, /feature\/other/, 'other worktrees untouched');
   assert.deepEqual((await worktrees.leftovers(repo, new Set([tracked.path]))).length, 0);
   void merged;
+});
+
+test('one run spans repositories: a worktree per repository, steps in their own, feedback reopens the run', async t => {
+  const repos = ['api', 'web'];
+  const { open, runs, worktrees } = await setup(t, request => {
+    if (request.mode === 'plan') {
+      return report({ reply: 'API then screen', tasks: [
+        { role: 'Implement', brief: 'Add GET /bills', repo: 'api' },
+        { role: 'Implement', brief: 'Show bills', repo: 'web/' },
+        { role: 'Review', brief: 'Review the screen', repo: 'nope' }
+      ] });
+    }
+    if (JSON.parse(request.prompt).repository === 'api') {
+      request.onActivity?.({ kind: 'failed', text: 'node --test' });
+      if (request.role === 'Implement') request.onActivity?.({ kind: 'denied', text: 'npm run build' });
+    }
+    return report({ status: 'done', summary: `${request.role} in ${JSON.parse(request.prompt).repository}`, files_changed: ['x.ts'], tests: '', memory: [] });
+  }, { repositories: async () => repos });
+  const chat = open();
+  await chat.send('Bills end to end');
+  await settle(chat);
+  const { plan } = chat.snapshot();
+  assert.deepEqual(plan.jobs.map(job => [job.role, job.repo]), [['Implement', 'api'], ['Implement', 'web'], ['Review', undefined]],
+    'a repository outside the list is dropped, and nothing in the plan suggests another');
+  await assert.rejects(chat.approve(plan.id), /Choose the repository for Review/);
+  await assert.rejects(chat.approve(plan.id, undefined, 'human', ['api', 'web', '../x']), /Choose the repository for Review/);
+  await (await chat.approve(plan.id, undefined, 'human', ['', '', 'api'])).finished;
+
+  const [run] = chat.snapshot().runs;
+  assert.deepEqual(run.trees.map(tree => [tree.target, tree.path]), [['api', `/repo/api/.wt/${run.id.slice(0, 8)}/1-api`], ['web', `/repo/web/.wt/${run.id.slice(0, 8)}/2-web`]]);
+  assert.match(chat.snapshot().entries.at(-1).text, /ready in 2 repositories \(api, web\)/);
+  for (let step = 0; step < 3; step++) await (await chat.runStep(run.id)).finished;
+  const [api, web, review] = runs.slice(1);
+  assert.equal(api.cwd, run.trees[0].path);
+  assert.equal(web.cwd, run.trees[1].path);
+  assert.equal(review.cwd, run.trees[0].path, 'the user moved Review to api');
+  assert.deepEqual(web.settings.allowedCommands, ['npm test', 'npm run lint'], 'per-repository commands');
+  assert.deepEqual(JSON.parse(web.prompt).allowed_commands, ['npm test', 'npm run lint'], 'the worker knows what it may run');
+  assert.deepEqual(JSON.parse(web.prompt).other_repositories, ['api']);
+  assert.deepEqual(JSON.parse(web.prompt).previous[0], { role: 'Implement', status: 'done', summary: 'Implement in api', files: ['x.ts'], repository: 'api' });
+  assert.match(web.system, /change only this one/);
+
+  let done = chat.snapshot().runs[0];
+  assert.equal(done.status, 'done');
+  assert.deepEqual(done.steps.map(step => step.problems), [1, 0, 0], 'only blocked commands count, not failing ones');
+  assert.equal(chat.snapshot().metrics.firstPass, 2 / 3);
+  assert.deepEqual(worktrees.committed.map(item => item.tree.path), done.trees.map(tree => tree.path));
+  assert.deepEqual(done.trees.map(tree => tree.commit), ['c0ffee', 'c0ffee']);
+  assert.match(chat.snapshot().entries.at(-1).text, /Committed 2 changed files to xdev\/squad\/\w+ in api, web/);
+  const changes = await chat.changes(run.id);
+  assert.deepEqual(changes.map(change => change.repo), ['api', 'web']);
+  await assert.rejects(chat.discardFile(run.id, 'src/a.ts'), /Choose a repository/);
+  await chat.discardFile(run.id, 'src/a.ts', 'web');
+  assert.equal(worktrees.committed.at(-1).tree.path, run.trees[1].path);
+
+  await chat.recordPush(run.id, 'web', { remote: 'origin', target: 'dev', url: 'https://gitlab.example/x/-/merge_requests/7', mergeRequest: true });
+  assert.equal(chat.snapshot().runs[0].trees[1].pushed.url, 'https://gitlab.example/x/-/merge_requests/7');
+  assert.match(chat.snapshot().entries.at(-1).text, /Pushed xdev\/squad\/\w+ \(web\) to origin, merge request into dev/);
+
+  await assert.rejects(chat.requestChanges(run.id, '  ', 'web'), /Describe the changes/);
+  await chat.requestChanges(run.id, 'x.ts: rename the column', 'web');
+  done = chat.snapshot().runs[0];
+  assert.equal(done.status, 'active', 'feedback reopens a finished run');
+  const feedback = done.steps.at(-1);
+  assert.deepEqual([feedback.role, feedback.repo, feedback.feedback, feedback.status], ['Implement', 'web', true, 'pending']);
+  assert.match(feedback.brief, /x\.ts: rename the column/);
+  await (await chat.runStep(run.id)).finished;
+  assert.equal(runs.at(-1).cwd, run.trees[1].path);
+  assert.equal(chat.snapshot().runs[0].status, 'done');
+  assert.equal(chat.snapshot().metrics.runs, 1, 'reopening does not count the run twice');
+
+  await chat.recordMerge(run.id, 'web', 'main');
+  await assert.rejects(chat.requestChanges(run.id, 'more', 'web'), /already merged/);
+  await chat.removeRun(run.id);
+  assert.equal(worktrees.removed.length, 2);
+});
+
+test('windows sharing the state see a running step, block new work, and recover from a dead window', async t => {
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const { open } = await setup(t, async request => {
+    await gate;
+    return report({ reply: 'Answer', tasks: [] });
+  });
+  const first = open();
+  const second = open();
+  await first.send('Question');
+  assert.equal(second.snapshot().remote, true);
+  assert.equal(second.snapshot().busy, true);
+  assert.match(second.snapshot().status, /Another window is running/);
+  await assert.rejects(second.send('Other question'), /Another VS Code window/);
+  release();
+  await settle(first);
+  assert.equal(second.snapshot().busy, false);
+
+  // A window that died mid-run leaves a stale heartbeat: others report an interrupted run and may continue.
+  const storage = first.storage;
+  const state = storage.get('squadChat.v1');
+  await storage.update('squadChat.v1', { ...state, inFlight: { owner: 'gone', beat: Date.now() - 5 * 60_000 } });
+  assert.equal(second.snapshot().remote, false);
+  assert.match(second.snapshot().status, /interrupted/);
+});
+
+test('runs saved by older versions are read as one-repository runs', async t => {
+  const { open } = await setup(t, () => report({ reply: 'x', tasks: [] }));
+  const chat = open();
+  await chat.storage.update('squadChat.v1', { entries: [], runs: [{
+    id: 'old', request: 'r', prompt: 'r', time: 1, status: 'done', costUsd: 0, sessions: [], target: 'web',
+    repo: '/repo/web', path: '/wt/old', branch: 'xdev/squad/old', base: 'b', commit: 'c', stat: 's', files: 2,
+    steps: [{ role: 'Implement', brief: 'b', profile: 'p', kind: 'claude', accountId: 'a', revision: 'r', status: 'done' }]
+  }] });
+  const [run] = chat.snapshot().runs;
+  assert.deepEqual(run.trees, [{ target: 'web', repo: '/repo/web', path: '/wt/old', branch: 'xdev/squad/old', base: 'b', commit: 'c', stat: 's', files: 2 }]);
+  assert.equal(run.steps[0].repo, 'web');
+  assert.equal(run.path, undefined);
+  assert.equal(chat.runTree('old').tree.path, '/wt/old');
+});
+
+test('worktrees push to the remote, ask GitLab for a merge request, and hide credentials', async t => {
+  const { safeRemoteUrl, mergeRequestUrl, validBranch } = require('../dist/squad-worktree.js');
+  assert.equal(safeRemoteUrl('https://user:tok@gitlab.fis.vn/a/b.git\n'), 'https://gitlab.fis.vn/a/b.git');
+  assert.equal(safeRemoteUrl('git@gitlab.fis.vn:a/b.git'), 'git@gitlab.fis.vn:a/b.git');
+  assert.equal(mergeRequestUrl('remote:\nremote: View merge request for xdev/squad/1:\nremote:   https://gitlab.fis.vn/a/b/-/merge_requests/12\nremote:'), 'https://gitlab.fis.vn/a/b/-/merge_requests/12');
+  assert.equal(mergeRequestUrl('remote: Create a pull request for \'x\' on GitHub by visiting:\nremote:      https://github.com/o/r/pull/new/x\n'), 'https://github.com/o/r/pull/new/x');
+  assert.equal(mergeRequestUrl('Everything up-to-date'), undefined);
+  assert.equal(validBranch('dev'), true);
+  assert.equal(validBranch('--upload-pack=x'), false);
+  assert.equal(validBranch('a..b'), false);
+
+  const root = await mkdtemp(join(tmpdir(), 'xdev-push-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const repo = join(root, 'repo');
+  const remote = join(root, 'remote.git');
+  const run = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8' });
+  execFileSync('git', ['init', '-q', '--bare', '-b', 'dev', remote]);
+  run(remote, 'config', 'receive.advertisePushOptions', 'true');
+  execFileSync('git', ['init', '-q', '-b', 'dev', repo]);
+  run(repo, 'config', 'user.email', 'dev@example.com');
+  run(repo, 'config', 'user.name', 'Dev');
+  await writeFile(join(repo, 'a.txt'), 'one\n');
+  run(repo, 'add', '.');
+  run(repo, 'commit', '-q', '-m', 'init');
+  run(repo, 'remote', 'add', 'origin', remote);
+  run(repo, 'push', '-q', 'origin', 'dev');
+  run(repo, 'fetch', '-q', 'origin');
+
+  const worktrees = new Worktrees(join(root, 'trees'));
+  const tree = await worktrees.create(repo, '12345678-aaaa', '1-repo');
+  assert.equal(tree.path, join(root, 'trees', '12345678', '1-repo'));
+  assert.equal(tree.source, 'dev');
+  await writeFile(join(tree.path, 'b.txt'), 'new\n');
+  await worktrees.commit(tree, 'add b');
+  const info = await worktrees.remote(tree);
+  assert.deepEqual([info.name, info.host], ['origin', 'other']);
+  assert.equal(await worktrees.defaultTarget(tree, 'origin'), 'dev');
+  assert.equal(await worktrees.ahead(tree, 'origin', 'dev'), 1);
+  await assert.rejects(worktrees.push(tree, { target: '-x', title: 't', mode: 'auto' }), /valid target branch/);
+  const pushed = await worktrees.push(tree, { target: 'dev', title: 'Add b\nsecond line', mode: 'gitlab' });
+  assert.deepEqual([pushed.remote, pushed.target, pushed.mergeRequest], ['origin', 'dev', true]);
+  assert.match(run(remote, 'branch', '--list'), /xdev\/squad\/12345678/);
+});
+
+test('one profile can be given to every role at once, keeping each task', async () => {
+  const storage = memento();
+  const squad = new SquadStore(storage);
+  await squad.save('Review', { account: 'api:x', brief: 'Check it', status: 'Ready', blocker: '' });
+  await squad.assignAll('claude:1', roleNames);
+  for (const role of roleNames) assert.equal(squad.seat(role).account, 'claude:1');
+  assert.equal(squad.seat('Review').brief, 'Check it');
+});
+
+test('shared state lives in one file that every window reads, falling back to values saved per window', async t => {
+  const { FileMemento, workspaceKey } = require('../dist/squad-state.js');
+  const root = await mkdtemp(join(tmpdir(), 'xdev-state-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const key = workspaceKey('file:///home/u/ehospital');
+  assert.match(key, /^[0-9a-f]{16}$/);
+  assert.notEqual(key, workspaceKey('file:///home/u/other'));
+  const file = join(root, 'squad-state', `${key}.json`);
+  const legacy = memento();
+  legacy.keys = () => [...legacy.values.keys()];
+  await legacy.update('squad.v1', { seats: { Lead: 'old' } });
+  const first = new FileMemento(file, legacy);
+  const second = new FileMemento(file);
+  assert.deepEqual(first.get('squad.v1'), { seats: { Lead: 'old' } });
+  assert.equal(first.get('missing', 5), 5);
+  let notified = 0;
+  const watching = second.watch(() => { notified++; });
+  t.after(() => watching.dispose());
+  await first.update('squad.v1', { seats: { Lead: 'new' } });
+  assert.deepEqual(second.get('squad.v1'), { seats: { Lead: 'new' } }, 'another window reads the write at once');
+  const end = Date.now() + 3_000;
+  while (!notified && Date.now() < end) await new Promise(resolve => setTimeout(resolve, 50));
+  assert.ok(notified >= 1, 'the other window is told about the change');
+  await second.update('other', 1);
+  assert.deepEqual(first.get('squad.v1'), { seats: { Lead: 'new' } }, 'writes keep other keys');
+  assert.equal(first.get('other'), 1);
+  await writeFile(file, '{"broken');
+  assert.equal(first.get('other'), 1, 'a damaged file keeps the last good state');
 });

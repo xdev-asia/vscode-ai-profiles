@@ -11,7 +11,7 @@ import {
   parseGateOutput, parsePlanOutput, parseWorkerOutput, type ActivityKind, type WorkerActivity, type WorkerMode, type WorkerRequest,
   type WorkerResult, type WorkerSettings
 } from './squad-worker';
-import type { FileChange, RunWorktree, Worktrees } from './squad-worktree';
+import type { FileChange, PushResult, RunWorktree, Worktrees } from './squad-worktree';
 import { terminalProfileId, type TerminalProfile } from './terminal-profiles';
 import { workflowBriefLimit, workflowOutputLimit, workflowStage, workflowStages, workflowText, type Workflow } from './workflow';
 
@@ -39,14 +39,15 @@ interface Job {
   kind?: AgentKind;
   accountId: string;
   revision: string;
+  /** The repository a Claude Code step works in, relative to the workspace folder ('.' for the folder itself). */
+  repo?: string;
 }
 
 interface Plan {
   id: string;
   prompt: string;
   jobs: Job[];
-  /** Repository the plan most likely targets, relative to the workspace folder. */
-  repo?: string;
+  /** Repositories in the workspace when there is more than one. */
   repos?: string[];
 }
 
@@ -55,6 +56,7 @@ export interface RunSession {
   profileId: string;
   profile: string;
   sessionId: string;
+  repo?: string;
 }
 
 export type StepStatus = 'pending' | 'running' | 'terminal' | 'done' | 'blocked' | 'failed' | 'skipped';
@@ -74,6 +76,25 @@ export interface RunStep extends Job {
   summary?: string;
   files?: string[];
   gate?: StepGate;
+  /** Total time spent running the step, in milliseconds. */
+  ms?: number;
+  attempts?: number;
+  costUsd?: number;
+  /** Commands the allowed list blocked, over all attempts. */
+  problems?: number;
+  /** The step was added from review feedback on the changes. */
+  feedback?: boolean;
+}
+
+/** One repository's worktree in a run. */
+export interface RunTree extends RunWorktree {
+  /** The repository relative to the workspace folder, '.' for the folder itself. */
+  target: string;
+  commit?: string;
+  stat?: string;
+  files?: number;
+  pushed?: PushResult & { time: number };
+  merged?: number;
 }
 
 export interface RunRecord {
@@ -84,25 +105,47 @@ export interface RunRecord {
   status: 'active' | 'done' | 'stopped';
   approver?: Approver;
   steps: RunStep[];
-  repo?: string;
-  /** The repository the run targets, relative to the workspace folder. */
-  target?: string;
-  path?: string;
-  branch?: string;
-  base?: string;
-  commit?: string;
-  stat?: string;
-  files?: number;
+  trees?: RunTree[];
+  /** When the run was committed. */
+  finished?: number;
   costUsd: number;
   sessions: RunSession[];
+}
+
+/** A finished run, kept after the run itself is removed so the panel can show trends. */
+export interface RunMetric {
+  time: number;
+  ms: number;
+  costUsd: number;
+  steps: number;
+  attempts: number;
+  blocked: number;
+  files: number;
+  repos: number;
+}
+
+export interface SquadMetrics {
+  runs: number;
+  medianMs: number;
+  costUsd: number;
+  /** Share of steps that finished on their first attempt. */
+  firstPass: number;
+  files: number;
+}
+
+interface InFlight {
+  owner: string;
+  beat: number;
+  status?: string;
 }
 
 interface Thread {
   entries: SquadChatEntry[];
   plan?: Plan;
   workflow?: Workflow;
-  inFlight?: boolean;
+  inFlight?: boolean | InFlight;
   runs?: RunRecord[];
+  history?: RunMetric[];
 }
 
 export interface LiveActivity {
@@ -114,6 +157,8 @@ export interface LiveActivity {
   edits: number;
   commands: number;
   problems?: number;
+  /** Commands the allowed list blocked; counted against the step's first-pass rate. */
+  denied?: number;
 }
 
 interface ActiveRun {
@@ -137,9 +182,12 @@ export interface WorkerHost {
   profiles(): Promise<TerminalProfile[]>;
   executable(): Promise<string>;
   folder(): string | undefined;
-  settings(role: Role): WorkerSettings;
+  /** Worker settings for a role, with the allowed commands of the repository the step works in. */
+  settings(role: Role, repo?: string): WorkerSettings;
   run(request: WorkerRequest): Promise<string>;
   worktrees: Pick<Worktrees, 'create' | 'commit' | 'remove' | 'changes' | 'changedFiles' | 'discard'>;
+  /** Allowed commands per repository that differ from the workspace default. */
+  repositoryCommands?(): Record<string, readonly string[]>;
   prepare?(): Promise<void>;
   /** Git repositories a run can target, relative to folder(); ['.'] when the folder is one. */
   repositories?(): Promise<string[]>;
@@ -161,7 +209,7 @@ const workerInstructions: Record<WorkerRole, string> = {
   Tests: 'Add or update tests for the change in this worktree. Run only the tests that cover changed_files (the same module, screen, or domain) plus a type check scoped to them when available; run the whole suite only when shared code changed. Report what passed and failed.'
 };
 const textOnly = 'You are using a text API. You cannot access the workspace, edit files, or run commands. Do not claim that you did.';
-const headless = 'You are a headless Claude Code worker in xDev Squad. Nobody can answer questions during the run: decide reasonably, or report status "blocked" with what you need. Do not commit, push, or change git remotes; xDev commits the worktree for the user. Use available skills when they apply. Report through the required JSON fields and keep the summary short, because other agents read it.';
+const headless = 'You are a headless Claude Code worker in xDev Squad. Nobody can answer questions during the run: decide reasonably, or report status "blocked" with what you need. Do not commit, push, or change git remotes; xDev commits the worktree for the user. Shell commands are checked against an allowed list ("allowed_commands" when given, plus read-only git), and a command with pipes, redirects, ";", "&&", or "cd" is denied even when each part is allowed: run each allowed command on its own from the working directory, and create or edit files with the Write and Edit tools, not the shell. Use available skills when they apply. Report through the required JSON fields and keep the summary short, because other agents read it.';
 
 function shorten(text: string, limit: number): string {
   return text.length <= limit ? text : text.slice(0, limit) + '\n[Truncated]';
@@ -182,10 +230,56 @@ function workerText(result: WorkerResult): string {
 }
 
 const liveItems = 8;
+const historyLimit = 200;
+const heartbeatMs = 20_000;
+const staleMs = 70_000;
+const metricsWindowMs = 30 * 86_400_000;
+
+type LegacyRun = RunRecord & Partial<RunWorktree> & { target?: string; commit?: string; stat?: string; files?: number };
+
+/** Runs saved before multi-repository support kept one worktree on the record itself. */
+function normalizeRun(run: RunRecord): RunRecord {
+  const legacy = run as LegacyRun;
+  if (run.trees || !legacy.repo || !legacy.path || !legacy.branch || !legacy.base) return run;
+  const { repo, path, branch, base, target = '.', commit, stat, files, ...rest } = legacy;
+  return {
+    ...rest,
+    trees: [{ target, repo, path, branch, base, commit, stat, files }],
+    steps: run.steps.map(step => step.kind === 'claude' && !step.repo ? { ...step, repo: target } : step)
+  };
+}
+
+function median(values: number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  if (!sorted.length) return 0;
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : Math.round((sorted[middle - 1] + sorted[middle]) / 2);
+}
+
+export function squadMetrics(history: readonly RunMetric[], now = Date.now()): SquadMetrics | undefined {
+  const recent = history.filter(item => now - item.time < metricsWindowMs);
+  if (!recent.length) return undefined;
+  const steps = recent.reduce((sum, item) => sum + item.steps, 0);
+  const retries = recent.reduce((sum, item) => sum + Math.max(0, item.attempts - item.steps) + item.blocked, 0);
+  return {
+    runs: recent.length,
+    medianMs: median(recent.map(item => item.ms)),
+    costUsd: recent.reduce((sum, item) => sum + item.costUsd, 0),
+    firstPass: steps ? Math.max(0, Math.min(1, (steps - retries) / steps)) : 1,
+    files: recent.reduce((sum, item) => sum + item.files, 0)
+  };
+}
+
+function repoName(target: string): string {
+  return target === '.' ? 'workspace' : target;
+}
 
 export class SquadChat {
   private active?: ActiveRun;
   private notifyTimer?: ReturnType<typeof setTimeout>;
+  private heartbeat?: ReturnType<typeof setInterval>;
+  /** Identifies this window, so other windows sharing the state can tell its runs apart. */
+  private readonly owner = randomUUID();
   private workflowIssue?: { id: string; step: number; text: string };
   private writes = Promise.resolve();
   readonly customizations: SquadCustomizations;
@@ -203,19 +297,24 @@ export class SquadChat {
   }
 
   snapshot() {
-    const { entries, inFlight, workflow, runs } = this.read();
+    const { entries, inFlight, workflow, runs, history } = this.read();
     const plan = this.pendingPlan();
+    const remote = this.remoteRun(inFlight);
     return {
       entries,
       runs: runs ?? [],
       workflow,
       workflowIssue: this.workflowIssue?.id === workflow?.id && this.workflowIssue?.step === workflow?.approved.length
         ? this.workflowIssue?.text : undefined,
-      plan: plan && { id: plan.id, jobs: plan.jobs, repo: plan.repo, repos: plan.repos },
+      plan: plan && { id: plan.id, jobs: plan.jobs, repos: plan.repos },
       workers: Boolean(this.host),
-      busy: Boolean(this.active),
+      busy: Boolean(this.active) || Boolean(remote),
+      /** A run in another VS Code window that shares this workspace's Squad. */
+      remote: Boolean(remote),
       live: this.active?.live,
-      status: this.active?.status ?? (inFlight ? 'The previous run was interrupted. Send a new message to continue.' : '')
+      metrics: squadMetrics(history ?? []),
+      status: this.active?.status ?? (remote ? `Another window is running: ${remote.status ?? 'a Squad step'}`
+        : inFlight ? 'The previous run was interrupted. Send a new message to continue.' : '')
     };
   }
 
@@ -223,10 +322,15 @@ export class SquadChat {
     const plan = this.read().plan;
     return plan && {
       id: plan.id,
-      repo: plan.repo,
       repos: plan.repos,
-      jobs: plan.jobs.map(({ role, brief, profile, kind }) => ({ role, brief, profile, kind: kind ?? 'api' as AgentKind }))
+      jobs: plan.jobs.map(({ role, brief, profile, kind, repo }) => ({ role, brief, profile, kind: kind ?? 'api' as AgentKind, ...(repo ? { repo } : {}) }))
     };
+  }
+
+  /** The other window's run when its heartbeat is recent. */
+  private remoteRun(inFlight: Thread['inFlight']): InFlight | undefined {
+    if (!inFlight || typeof inFlight !== 'object' || inFlight.owner === this.owner || this.active) return undefined;
+    return Date.now() - inFlight.beat < staleMs ? inFlight : undefined;
   }
 
   run(id: unknown): RunRecord | undefined {
@@ -276,31 +380,39 @@ export class SquadChat {
         run.status = 'Lead is responding…';
         this.changed();
       }
-      const allowedCommands = this.host && [...workers.values()].some(candidate => candidate.kind === 'claude')
-        ? [...this.host.settings('Implement').allowedCommands] : undefined;
+      const claudeWorkers = Boolean(this.host) && [...workers.values()].some(candidate => candidate.kind === 'claude');
+      const allowedCommands = claudeWorkers ? [...this.host!.settings('Implement').allowedCommands] : undefined;
+      const multiple = repositories.length > 1;
+      const repositoryCommands = claudeWorkers && multiple
+        ? Object.fromEntries(Object.entries(this.host!.repositoryCommands?.() ?? {}).filter(([repo]) => repositories.includes(repo)))
+        : {};
+      const perRepository = Object.keys(repositoryCommands).length > 0;
       const capabilities = [...workers].map(([worker, candidate]) => candidate.kind === 'claude'
         ? `${worker} (Claude Code worker: reads the repository, ${worker === 'Review' ? 'reviews the diff' : 'edits files and runs allowed commands'} in a git worktree)`
         : `${worker} (text API: proposes text only)`);
-      const leadSystem = `${roleInstructions.Lead} ${agent.kind === 'api' ? textOnly : 'Plan only; do not change files.'} Available worker roles: ${capabilities.join(', ') || 'none'}.
-Return only a JSON object with a "reply" string and a "tasks" array. Each task has a "role" from the available worker roles and a "brief" string. Use each role at most once. Use an empty tasks array for questions, summaries, or when no workers are available. Write briefs that a worker can act on without the chat history. Reply in the user's language. The user reviews proposed tasks in the xDev Squad panel and approves them with a button, then starts each step there, so keep the reply to a short summary of the plan and do not ask the user to reply to start it.${repositories.length > 1 ? ' Workers run in one git repository chosen from "repositories": name it in the reply and at the start of each brief, and write file paths relative to that repository\'s root.' : ''}${allowedCommands ? ' Claude Code workers may only run "allowed_commands" and read-only git; do not ask them to run anything else.' : ''}${code ? ' "code" is a CodeGraph excerpt of the relevant symbols and call paths: name concrete files and symbols in each brief so workers do not have to search.' : ''}`;
+      const leadSystem = `${roleInstructions.Lead} ${agent.kind === 'api' ? textOnly : 'You may read the repository (read-only) to answer or to make briefs concrete; do not change files. Start from "code" when given, and keep reading short.'} Available worker roles: ${capabilities.join(', ') || 'none'}.
+Return only a JSON object with a "reply" string and a "tasks" array. Each task has a "role" from the available worker roles and a "brief" string${multiple ? ' and a "repo"' : ''}. Use each role at most once${multiple ? ' per repository' : ''}. Use an empty tasks array for questions, summaries, or when no workers are available. Write briefs that a worker can act on without the chat history. Reply in the user's language. The user reviews proposed tasks in the xDev Squad panel and approves them with a button, then starts each step there, so keep the reply to a short summary of the plan (at most 80 words) and do not ask the user to reply to start it.${multiple ? ' Each Claude Code task runs in one git repository from "repositories": set its "repo" to that entry exactly. A change that spans repositories, such as a backend API and the frontend screen that calls it, gets one Implement task per repository, listed so that dependencies come first. Write file paths relative to the task\'s repository root.' : ''}${allowedCommands ? ` Claude Code workers may only run "allowed_commands"${perRepository ? ' plus, in a repository listed in "repository_commands", the commands listed for it' : ''} and read-only git; do not ask them to run anything else, and do not tell them a command is not allowed.` : ''}${code ? ' "code" is a CodeGraph excerpt of the relevant symbols and call paths: name concrete files and symbols in each brief so workers do not have to search.' : ''}`;
       const content = JSON.stringify({
         history, request: prompt, memory: memory.length ? memory : undefined, code, allowed_commands: allowedCommands,
-        repositories: repositories.length > 1 ? repositories.slice(0, 80) : undefined
+        repository_commands: perRepository ? repositoryCommands : undefined,
+        repositories: multiple ? repositories.slice(0, 80) : undefined
       });
-      const planned = { repos: repositories.length > 1 ? repositories : undefined, code };
+      const planned = { repos: multiple ? repositories : undefined, code };
 
       if (agent.kind === 'claude') {
         await this.host?.prepare?.();
+        const graph = await this.host!.codegraphRoot?.().catch(() => undefined);
+        const settings = this.host!.settings(role);
         const stdout = await this.host!.run({
           executable: await this.host!.executable(), profile: agent.profile, cwd: this.host!.folder()!, role,
           mode: role === 'Lead' ? 'plan' : 'ask', prompt: content,
           system: role === 'Lead' ? leadSystem : `You are ${role} in xDev Squad. Answer the question using the repository. Do not edit files. Reply in the user's language.`,
-          settings: this.host!.settings(role), signal: run.signal, onActivity: this.track(run, role, agent.name)
+          settings: graph ? { ...settings, codegraph: true } : settings, signal: run.signal, onActivity: this.track(run, role, agent.name)
         });
         run.signal.throwIfAborted();
         if (role === 'Lead') {
           const report = parsePlanOutput(stdout);
-          const plan = parsePlan(JSON.stringify(report), workers);
+          const plan = parsePlan(JSON.stringify(report), workers, repositories);
           await this.recordPlan(role, agent, prompt, plan, report.reply, run, report.costUsd, planned);
         } else {
           const result = parseWorkerOutput(stdout);
@@ -315,7 +427,7 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
         { role: 'user', content }
       ], { signal: run.signal });
       run.signal.throwIfAborted();
-      if (role === 'Lead') await this.recordPlan(role, agent, prompt, parsePlan(answer, workers), answer, run, 0, planned);
+      if (role === 'Lead') await this.recordPlan(role, agent, prompt, parsePlan(answer, workers, repositories), answer, run, 0, planned);
       else await this.write(state => state.entries.push(this.reply(role, agent, answer)), run);
     });
   }
@@ -328,8 +440,12 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
     return this.write(state => {
       state.entries.push(this.reply(role, agent, plan?.reply ?? fallback, cost));
       if (plan?.jobs.length) {
-        const repo = planned.repos && suggestRepository(planned.repos, [plan.reply, ...plan.jobs.map(job => job.brief), planned.code ?? '']);
-        state.plan = { id: randomUUID(), prompt, jobs: plan.jobs, repo, repos: planned.repos };
+        const repos = planned.repos;
+        // Lead names a repository per task; otherwise suggest one from the task's own brief, then from the whole plan.
+        const overall = repos && suggestRepository(repos, [plan.reply, ...plan.jobs.map(job => job.brief), planned.code ?? '']);
+        const jobs = plan.jobs.map(job => job.kind !== 'claude' || !repos || job.repo ? job
+          : { ...job, repo: suggestRepository(repos, [job.brief]) ?? overall });
+        state.plan = { id: randomUUID(), prompt, jobs, repos };
       }
       if (!plan || plan.invalid) {
         state.entries.push({ author: 'Squad', text: 'Lead did not return a valid plan. Ask again to generate tasks.' });
@@ -340,6 +456,11 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
   /**
    * Approving a plan only prepares a run: its steps and, for Claude Code steps, a git worktree.
    * No agent starts until the user runs a step. Each step pauses the run when it ends.
+   */
+  /**
+   * Approving a plan only prepares a run: its steps and, for Claude Code steps, one git worktree per
+   * repository the steps work in. No agent starts until the user runs a step.
+   * `repoInput` is one repository for every Claude Code step, or one entry per step (empty keeps the plan's).
    */
   async approve(id: unknown, signal?: AbortSignal, approverInput: unknown = 'human', repoInput?: unknown): Promise<StartedRun> {
     this.requireIdle();
@@ -352,14 +473,22 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
     const headlessJobs = plan.jobs.some(job => job.kind === 'claude');
     const folder = this.host?.folder();
     if (headlessJobs && (!this.host || !folder)) throw new Error('Open a workspace folder to run Claude Code workers.');
-    let target: string | undefined;
+    const jobs = plan.jobs.map(job => ({ ...job }));
     if (headlessJobs && this.host?.repositories) {
       const repositories = await this.host.repositories();
-      const chosen = typeof repoInput === 'string' && repoInput ? repoInput : plan.repo ?? (repositories.length === 1 ? repositories[0] : undefined);
       if (!repositories.length) throw new Error('Claude Code workers need a git repository in this workspace.');
-      if (!chosen || !repositories.includes(chosen)) throw new Error('Choose the repository this run works in.');
-      target = chosen;
+      if (Array.isArray(repoInput) && repoInput.length > jobs.length) throw new Error('Choose a repository for each step.');
+      for (const [index, job] of jobs.entries()) {
+        if (job.kind !== 'claude') { delete job.repo; continue; }
+        const input = Array.isArray(repoInput) ? repoInput[index] : repoInput;
+        const chosen = typeof input === 'string' && input ? input : job.repo ?? (repositories.length === 1 ? repositories[0] : undefined);
+        if (!chosen || !repositories.includes(chosen)) {
+          throw new Error(jobs.filter(item => item.kind === 'claude').length > 1 ? `Choose the repository for ${job.role}.` : 'Choose the repository this run works in.');
+        }
+        job.repo = chosen;
+      }
     }
+    const targets = [...new Set(jobs.flatMap(job => job.kind === 'claude' ? [job.repo ?? '.'] : []))];
 
     return this.launch('Preparing the run…', signal, state => {
       if (state.plan?.id !== plan.id) throw new Error('This plan is no longer available.');
@@ -367,25 +496,43 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
       state.entries.push({ author: 'Squad', text: 'Plan approved.' });
     }, async run => {
       const runId = randomUUID();
-      let worktree: RunWorktree | undefined;
-      if (headlessJobs) {
-        run.status = 'Preparing a git worktree…';
+      const trees: RunTree[] = [];
+      if (targets.length) {
+        run.status = targets.length > 1 ? `Preparing ${targets.length} git worktrees…` : 'Preparing a git worktree…';
         this.changed();
         await this.host!.prepare?.();
-        worktree = await this.host!.worktrees.create(target && target !== '.' ? join(folder!, target) : folder!, runId);
+        try {
+          for (const [index, target] of targets.entries()) {
+            const worktree = await this.host!.worktrees.create(target !== '.' ? join(folder!, target) : folder!, runId,
+              targets.length > 1 ? `${index + 1}-${target.split('/').at(-1)}` : undefined);
+            trees.push({ ...worktree, target });
+          }
+        } catch (error) {
+          for (const tree of trees) await this.host!.worktrees.remove(tree).catch(() => undefined);
+          throw error;
+        }
       }
       const record: RunRecord = {
-        id: runId, request: plan.prompt, prompt: shorten(plan.prompt, 500), time: Date.now(), status: 'active', approver, costUsd: 0, target,
-        sessions: [], steps: plan.jobs.map(job => ({ ...job, status: 'pending' })), ...worktree
+        id: runId, request: plan.prompt, prompt: shorten(plan.prompt, 500), time: Date.now(), status: 'active', approver, costUsd: 0,
+        sessions: [], steps: jobs.map(job => ({ ...job, status: 'pending' })), ...(trees.length ? { trees } : {})
       };
       await this.write(state => {
         state.runs = [record, ...(state.runs ?? [])].slice(0, runLimit);
+        const branch = trees[0]?.branch;
         state.entries.push({
           author: 'Squad', run: runId,
-          text: `${worktree ? `Branch ${worktree.branch} is ready in a separate worktree; your checkout is not changed. ` : ''}Nothing has run yet. Start each step under Worker runs: run it, open it in a terminal, or skip it.`
+          text: `${!branch ? '' : trees.length > 1
+            ? `Branch ${branch} is ready in ${trees.length} repositories (${trees.map(tree => repoName(tree.target)).join(', ')}), each in a separate worktree; your checkouts are not changed. `
+            : `Branch ${branch} is ready in a separate worktree; your checkout is not changed. `}Nothing has run yet. Start each step under Worker runs: run it, open it in a terminal, or skip it.`
         });
       }, run);
     });
+  }
+
+  /** The worktree a step works in: its repository's, or the run's only one. */
+  treeFor(record: RunRecord, step: Pick<Job, 'repo'>): RunTree | undefined {
+    const trees = record.trees ?? [];
+    return trees.find(tree => tree.target === step.repo) ?? (trees.length === 1 ? trees[0] : undefined);
   }
 
   /** The next step the user can act on: the first one not done or skipped. */
@@ -409,7 +556,10 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
     const done = record.steps.slice(0, index).filter(step => step.status === 'done');
     const memory = this.memory.context();
     return {
-      previous: done.map(step => ({ role: step.role, status: 'done', summary: shorten(step.summary ?? '', 1_000), files: step.files?.length ? step.files : undefined })),
+      previous: done.map(step => ({
+        role: step.role, status: 'done', summary: shorten(step.summary ?? '', 1_000), files: step.files?.length ? step.files : undefined,
+        ...((record.trees?.length ?? 0) > 1 && step.repo ? { repository: step.repo } : {})
+      })),
       implementation: done.find(step => step.role === 'Implement' && step.kind !== 'claude')?.summary,
       memory: memory.length ? memory : undefined
     };
@@ -440,7 +590,7 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
     this.requireNotInTerminal(step);
     const brief = this.briefFrom(briefInput, step.brief);
     const agent = this.verify(step, await this.directory());
-    if (agent.kind === 'claude' && !record.path) throw new Error('This run has no worktree for Claude Code steps.');
+    if (agent.kind === 'claude' && !this.treeFor(record, step)) throw new Error('This run has no worktree for Claude Code steps.');
 
     return this.launch(`${step.role} is ${agent.kind === 'claude' ? 'working' : 'responding'}…`, signal, state => {
       const saved = state.runs?.find(candidate => candidate.id === record.id);
@@ -460,7 +610,7 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
         if (!saved || next < 0) break;
         const nextStep = saved.steps[next];
         const nextAgent = this.verify(nextStep, await this.directory());
-        if (nextAgent.kind === 'claude' && !saved.path) break;
+        if (nextAgent.kind === 'claude' && !this.treeFor(saved, nextStep)) break;
         run.status = `${nextStep.role} is ${nextAgent.kind === 'claude' ? 'working' : 'responding'} (approved by AI)…`;
         this.changed();
         current = { index: next, brief: nextStep.brief, agent: nextAgent };
@@ -472,32 +622,43 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
   private async executeStep(id: string, index: number, brief: string, agent: Agent, run: ActiveRun): Promise<StepStatus> {
     const record = this.run(id)!;
     const step = record.steps[index];
-    await this.updateRun(id, saved => Object.assign(saved.steps[index], { brief, status: 'running', gate: undefined }), run);
+    const started = Date.now();
+    await this.updateRun(id, saved => Object.assign(saved.steps[index], { brief, status: 'running', gate: undefined, attempts: (saved.steps[index].attempts ?? 0) + 1 }), run);
     const context = this.stepContext(record, index);
+    const elapsed = (saved: RunStep) => (saved.ms ?? 0) + Date.now() - started;
     try {
       if (agent.kind === 'claude') {
         await this.host!.prepare?.();
-        const changed = step.role !== 'Implement' && record.repo && record.branch && record.base
-          ? await this.host!.worktrees.changedFiles?.(record as RunWorktree).catch(() => []) ?? [] : [];
+        const tree = this.treeFor(record, step)!;
+        const target = tree.target !== '.' ? tree.target : undefined;
+        const others = (record.trees ?? []).filter(other => other !== tree).map(other => repoName(other.target));
+        const changed = step.role !== 'Implement'
+          ? await this.host!.worktrees.changedFiles?.(tree).catch(() => []) ?? [] : [];
         const graph = await this.host!.codegraphRoot?.().catch(() => undefined);
-        const settings = this.host!.settings(step.role);
+        const settings = this.host!.settings(step.role, tree.target);
         const stdout = await this.host!.run({
-          executable: await this.host!.executable(), profile: agent.profile, cwd: record.path!, role: step.role, mode: 'work',
+          executable: await this.host!.executable(), profile: agent.profile, cwd: tree.path, role: step.role, mode: 'work',
           prompt: JSON.stringify({
-            request: record.request, task: brief, repository: record.target && record.target !== '.' ? record.target : undefined,
+            request: record.request, task: brief, repository: target, other_repositories: others.length ? others : undefined,
+            allowed_commands: step.role === 'Review' ? undefined : settings.allowedCommands,
             previous: context.previous.length ? context.previous : undefined, changed_files: changed.length ? changed : undefined, memory: context.memory
           }),
-          system: `${headless} You are ${step.role}. ${workerInstructions[step.role]}${record.target && record.target !== '.' ? ` Your working directory is the root of the repository "${record.target}"; read a leading "${record.target}/" in a path as this directory.` : ''}${graph ? ` A CodeGraph index of the workspace is at ${graph}: run \`codegraph explore -p ${graph} "<symbols or question>"\` to locate code before searching files. Its paths point to the main checkout; edit the matching files in this worktree.` : ''} Reply in the user's language.`,
+          system: `${headless} You are ${step.role}. ${workerInstructions[step.role]}${target ? ` Your working directory is the root of the repository "${target}"; read a leading "${target}/" in a path as this directory.` : ''}${others.length ? ' Other steps of this run work in the other repositories; change only this one, and read "previous" for what they did.' : ''}${graph ? ` A CodeGraph index of the workspace is at ${graph}: run \`codegraph explore -p ${graph} "<symbols or question>"\` to locate code before searching files. Its paths point to the main checkout; edit the matching files in this worktree.` : ''} Reply in the user's language.`,
           settings: graph ? { ...settings, codegraph: true } : settings, signal: run.signal, onActivity: this.track(run, step.role, agent.name)
         });
         run.signal.throwIfAborted();
+        const problems = run.live?.denied ?? 0;
         run.live = undefined;
         const result = parseWorkerOutput(stdout);
         await this.memory.add(result.memory, step.role);
         await this.updateRun(id, (saved, state) => {
           saved.costUsd += result.costUsd;
-          if (result.sessionId) saved.sessions.push({ role: step.role, profileId: agent.id, profile: agent.name, sessionId: result.sessionId });
-          Object.assign(saved.steps[index], { status: result.status, summary: result.summary, files: result.filesChanged });
+          if (result.sessionId) saved.sessions.push({ role: step.role, profileId: agent.id, profile: agent.name, sessionId: result.sessionId, repo: tree.target });
+          const current = saved.steps[index];
+          Object.assign(current, {
+            status: result.status, summary: result.summary, files: result.filesChanged, ms: elapsed(current),
+            costUsd: (current.costUsd ?? 0) + result.costUsd, problems: (current.problems ?? 0) + problems
+          });
           state.entries.push({ ...this.reply(step.role, agent, workerText(result), result.costUsd), run: id });
           if (result.status === 'blocked') {
             state.entries.push({ author: 'Squad', run: id, text: `${step.role} is blocked. Edit the brief and run the step again, continue it in a terminal, skip it, or finish the run.` });
@@ -519,14 +680,14 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
       ], { signal: run.signal });
       run.signal.throwIfAborted();
       await this.updateRun(id, (saved, state) => {
-        Object.assign(saved.steps[index], { status: 'done', summary: shorten(answer, 8_000) });
+        Object.assign(saved.steps[index], { status: 'done', summary: shorten(answer, 8_000), ms: elapsed(saved.steps[index]) });
         state.entries.push({ ...this.reply(step.role, agent, answer), run: id });
       }, run);
       return 'done';
     } catch (error) {
       run.live = undefined;
       const detail = run.signal.aborted ? 'Step stopped.' : error instanceof Error ? error.message : 'The step failed.';
-      await this.updateRun(id, saved => { saved.steps[index].status = 'failed'; }).catch(() => undefined);
+      await this.updateRun(id, saved => { Object.assign(saved.steps[index], { status: 'failed', ms: elapsed(saved.steps[index]) }); }).catch(() => undefined);
       throw new Error(`${step.role}: ${detail}`, { cause: error });
     }
   }
@@ -550,13 +711,14 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
     this.changed();
     const criteria = 'Pass only if the step did what its brief asked, consistently with the request, without obvious regressions or missing pieces. Otherwise answer changes and say what is missing. Reply in the user\'s language.';
     const evidence = { request: record.request, step: { role: step.role, brief: step.brief, summary: step.summary, files: step.files } };
+    const tree = this.treeFor(record, step);
     let gate: StepGate;
     try {
       if (reviewer.kind === 'claude') {
         const stdout = await this.host!.run({
-          executable: await this.host!.executable(), profile: reviewer.profile, cwd: record.path ?? this.host!.folder()!, role: 'Lead', mode: 'gate',
+          executable: await this.host!.executable(), profile: reviewer.profile, cwd: tree?.path ?? this.host!.folder()!, role: 'Lead', mode: 'gate',
           prompt: JSON.stringify(evidence),
-          system: `You review one step of an xDev Squad run. ${record.path ? 'Inspect the uncommitted changes with git diff. ' : ''}Do not edit files. ${criteria}`,
+          system: `You review one step of an xDev Squad run. ${tree ? 'Inspect the uncommitted changes with git diff. ' : ''}Do not edit files. ${criteria}`,
           settings: this.host!.settings('Lead'), signal: run.signal, onActivity: this.track(run, 'Lead', reviewer.name)
         });
         const verdict = parseGateOutput(stdout);
@@ -593,7 +755,8 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
     this.requireNotInTerminal(step);
     const brief = this.briefFrom(briefInput, step.brief);
     const agent = this.verify(step, await this.directory());
-    if (agent.kind !== 'claude' || !record.path) throw new Error('Only Claude Code steps can continue in a terminal.');
+    const tree = this.treeFor(record, step);
+    if (agent.kind !== 'claude' || !tree) throw new Error('Only Claude Code steps can continue in a terminal.');
     await this.host?.prepare?.();
     const context = this.stepContext(record, index);
     const prompt = [
@@ -607,7 +770,7 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
       Object.assign(saved.steps[index], { brief, status: 'terminal' });
       state.entries.push({ author: 'Squad', run: record.id, text: `${step.role} continues in a terminal with ${agent.name}. Click Mark step done when you finish.` });
     });
-    return { profile: agent.profile, cwd: record.path, prompt, system: workerInstructions[step.role], role: step.role, name: agent.name };
+    return { profile: agent.profile, cwd: tree.path, prompt, system: workerInstructions[step.role], role: step.role, name: agent.name };
   }
 
   /** Completes a step the user worked on in a terminal. */
@@ -649,52 +812,131 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
   private async closeRun(id: string, status: 'done' | 'stopped', run?: ActiveRun): Promise<void> {
     const record = this.run(id);
     if (!record) return;
-    let changes: Awaited<ReturnType<WorkerHost['worktrees']['commit']>> | undefined;
-    let issue: string | undefined;
-    if (record.path && record.repo && record.branch && record.base) {
+    const results = new Map<string, Awaited<ReturnType<WorkerHost['worktrees']['commit']>>>();
+    const issues: string[] = [];
+    for (const tree of record.trees ?? []) {
       try {
-        changes = await this.host!.worktrees.commit(record as RunWorktree, `xDev Squad: ${record.request.split('\n', 1)[0]}`);
+        results.set(tree.target, await this.host!.worktrees.commit(tree, `xDev Squad: ${record.request.split('\n', 1)[0]}`));
       } catch (error) {
-        issue = error instanceof Error ? error.message : 'Could not commit the worktree.';
+        issues.push(`${(record.trees?.length ?? 0) > 1 ? `${repoName(tree.target)}: ` : ''}${error instanceof Error ? error.message : 'Could not commit the worktree.'}`);
       }
     }
     await this.updateRun(id, (saved, state) => {
       const remaining = saved.steps.some(step => step.status !== 'done' && step.status !== 'skipped');
       for (const step of saved.steps) if (step.status !== 'done') step.status = 'skipped';
-      Object.assign(saved, { status: remaining ? 'stopped' : status, commit: changes?.commit, stat: changes?.stat, files: changes?.files ?? 0 });
+      for (const tree of saved.trees ?? []) {
+        const changes = results.get(tree.target);
+        if (changes) Object.assign(tree, { commit: changes.commit, stat: changes.stat, files: changes.files });
+      }
+      const wasFinished = saved.finished;
+      Object.assign(saved, { status: remaining ? 'stopped' : status, finished: Date.now() });
+      const files = (saved.trees ?? []).reduce((sum, tree) => sum + (tree.files ?? 0), 0);
+      if (!wasFinished) {
+        const ran = saved.steps.filter(step => step.attempts);
+        state.history = [{
+          time: saved.time, ms: Date.now() - saved.time, costUsd: saved.costUsd, steps: ran.length,
+          attempts: ran.reduce((sum, step) => sum + (step.attempts ?? 0), 0),
+          blocked: ran.filter(step => (step.problems ?? 0) > 0).length, files, repos: saved.trees?.length ?? 0
+        }, ...(state.history ?? [])].slice(0, historyLimit);
+      }
       const cost = formatCost(saved.costUsd);
-      const text = !saved.branch ? `Run finished${cost ? ` · ${cost}` : ''}.`
-        : issue ? `Could not commit the worktree: ${issue}`
-          : changes?.commit
-            ? `Committed ${changes.files} changed file${changes.files === 1 ? '' : 's'} to ${saved.branch}${cost ? ` · ${cost}` : ''}. Review the run below, then merge or remove it.`
-            : `No file changes on ${saved.branch}${cost ? ` · ${cost}` : ''}.`;
+      const trees = saved.trees ?? [];
+      const committed = trees.filter(tree => tree.commit);
+      const branch = trees[0]?.branch;
+      const text = !branch ? `Run finished${cost ? ` · ${cost}` : ''}.`
+        : issues.length && !committed.length ? `Could not commit the worktree: ${issues.join('; ')}`
+          : committed.length
+            ? `Committed ${files} changed file${files === 1 ? '' : 's'} to ${branch}${trees.length > 1 ? ` in ${committed.map(tree => repoName(tree.target)).join(', ')}` : ''}${cost ? ` · ${cost}` : ''}.${issues.length ? ` Not committed: ${issues.join('; ')}.` : ''} Review the run below, then merge, push, or remove it.`
+            : `No file changes on ${branch}${cost ? ` · ${cost}` : ''}.`;
       state.entries.push({ author: 'Squad', run: id, text });
     }, run);
   }
 
-  private worktreeRun(id: unknown): RunRecord & RunWorktree {
+  private worktreeRun(id: unknown): RunRecord & { trees: RunTree[] } {
     const record = this.run(id);
     if (!record) throw new Error('This run is no longer available.');
-    if (!record.repo || !record.path || !record.branch || !record.base || !this.host) throw new Error('This run has no git worktree.');
-    return record as RunRecord & RunWorktree;
+    if (!record.trees?.length || !this.host) throw new Error('This run has no git worktree.');
+    return record as RunRecord & { trees: RunTree[] };
   }
 
-  /** The run's file changes against its base commit, including work not yet committed. */
-  changes(id: unknown): Promise<FileChange[]> {
-    return this.host!.worktrees.changes(this.worktreeRun(id));
+  /** The worktree of a run for a repository, or its only one when `repo` is not given. */
+  runTree(id: unknown, repo?: unknown): { record: RunRecord & { trees: RunTree[] }; tree: RunTree } {
+    const record = this.worktreeRun(id);
+    const tree = typeof repo === 'string' && repo ? record.trees.find(candidate => candidate.target === repo)
+      : record.trees.length === 1 ? record.trees[0] : undefined;
+    if (!tree) throw new Error('Choose a repository of this run.');
+    return { record, tree };
+  }
+
+  /** The run's file changes against each worktree's base commit, including work not yet committed. */
+  async changes(id: unknown): Promise<(FileChange & { repo: string })[]> {
+    const record = this.worktreeRun(id);
+    const lists = await Promise.all(record.trees.map(async tree =>
+      (await this.host!.worktrees.changes(tree)).map(change => ({ ...change, repo: tree.target }))));
+    return lists.flat();
   }
 
   /** Reverts one file of a run. A finished run gets a new local commit so merging matches what you see. */
-  async discardFile(id: unknown, file: unknown): Promise<void> {
+  async discardFile(id: unknown, file: unknown, repo?: unknown): Promise<void> {
     this.requireIdle();
-    const record = this.worktreeRun(id);
+    const { record, tree } = this.runTree(id, repo);
     if (typeof file !== 'string' || !file || file.length > 1_000) throw new Error('Choose a changed file.');
-    await this.host!.worktrees.discard(record, file);
+    await this.host!.worktrees.discard(tree, file);
     let changes: Awaited<ReturnType<WorkerHost['worktrees']['commit']>> | undefined;
-    if (record.status !== 'active' && record.commit) changes = await this.host!.worktrees.commit(record, `xDev Squad: discard ${file}`);
+    if (record.status !== 'active' && record.finished) changes = await this.host!.worktrees.commit(tree, `xDev Squad: discard ${file}`);
     await this.updateRun(record.id, (saved, state) => {
-      if (changes) Object.assign(saved, { commit: changes.files ? changes.commit : undefined, stat: changes.stat, files: changes.files });
-      state.entries.push({ author: 'Squad', run: record.id, text: `Discarded the changes to ${file}${changes ? ` and committed the result to ${saved.branch}` : ''}.` });
+      const target = saved.trees?.find(candidate => candidate.target === tree.target);
+      if (changes && target) Object.assign(target, { commit: changes.files ? changes.commit : undefined, stat: changes.stat, files: changes.files });
+      state.entries.push({ author: 'Squad', run: record.id, text: `Discarded the changes to ${file}${changes ? ` and committed the result to ${tree.branch}` : ''}.` });
+    });
+  }
+
+  /**
+   * Sends review feedback on the changes back to Implement as a new step in the same worktree.
+   * A finished run becomes active again; its next commit lands on the same branch.
+   */
+  async requestChanges(id: unknown, textInput: unknown, repo?: unknown): Promise<void> {
+    this.requireIdle();
+    const { record, tree } = this.runTree(id, repo);
+    if (typeof textInput !== 'string' || !textInput.trim() || textInput.length > 4_000) throw new Error('Describe the changes you want, up to 4,000 characters.');
+    if (tree.merged) throw new Error(`${tree.branch} is already merged. Start a new request in chat instead.`);
+    if (record.status !== 'active' && this.read().runs?.some(run => run.status === 'active' && run.id !== record.id)) {
+      throw new Error('Finish or stop the current run before reopening this one.');
+    }
+    const agent = this.agentFor('Implement', await this.directory());
+    if (agent?.kind !== 'claude') throw new Error('Assign a Claude Code account to Implement under Roles to apply review feedback.');
+    const brief = `Apply this review feedback to the changes already made in this worktree (see git diff ${tree.base.slice(0, 12)}):\n${textInput.trim()}`;
+    await this.updateRun(record.id, (saved, state) => {
+      const step: RunStep = {
+        role: 'Implement', brief, profile: agent.name, kind: 'claude', accountId: agent.id, revision: agent.revision,
+        repo: tree.target, status: 'pending', feedback: true
+      };
+      const next = saved.status === 'active' ? this.currentStep(saved) : -1;
+      saved.steps.splice(next < 0 ? saved.steps.length : next, 0, step);
+      saved.status = 'active';
+      state.entries.push({ author: 'You', to: 'Implement', run: record.id, text: `Requested changes${(saved.trees?.length ?? 0) > 1 ? ` in ${repoName(tree.target)}` : ''}: ${textInput.trim()}` });
+    });
+  }
+
+  /** Records a push of one repository's branch, with the merge request link the remote returned. */
+  recordPush(id: string, repo: string, result: PushResult): Promise<void> {
+    return this.updateRun(id, (saved, state) => {
+      const tree = saved.trees?.find(candidate => candidate.target === repo);
+      if (!tree) throw new Error('This run has no such repository.');
+      tree.pushed = { ...result, time: Date.now() };
+      state.entries.push({
+        author: 'Squad', run: id,
+        text: `Pushed ${tree.branch}${(saved.trees?.length ?? 0) > 1 ? ` (${repoName(repo)})` : ''} to ${result.remote}${result.mergeRequest ? `, merge request into ${result.target}` : ''}${result.url ? `: ${result.url}` : '.'}`
+      });
+    });
+  }
+
+  recordMerge(id: string, repo: string, into: string): Promise<void> {
+    return this.updateRun(id, (saved, state) => {
+      const tree = saved.trees?.find(candidate => candidate.target === repo);
+      if (!tree) return;
+      tree.merged = Date.now();
+      state.entries.push({ author: 'Squad', run: id, text: `Merged ${tree.branch}${(saved.trees?.length ?? 0) > 1 ? ` (${repoName(repo)})` : ''} into ${into} locally.` });
     });
   }
 
@@ -702,13 +944,14 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
     this.requireIdle();
     const record = this.run(id);
     if (!record) throw new Error('This run is no longer available.');
-    if (record.path && record.repo && record.branch) {
+    if (record.trees?.length) {
       if (!this.host) throw new Error('Claude Code workers are not available here.');
-      await this.host.worktrees.remove({ repo: record.repo, path: record.path, branch: record.branch });
+      for (const tree of record.trees) await this.host.worktrees.remove(tree);
     }
+    const branch = record.trees?.[0]?.branch;
     await this.write(state => {
       state.runs = (state.runs ?? []).filter(candidate => candidate.id !== id);
-      state.entries.push({ author: 'Squad', text: record.branch ? `Removed worktree and branch ${record.branch}.` : 'Removed the run.' });
+      state.entries.push({ author: 'Squad', text: branch ? `Removed the worktree${(record.trees?.length ?? 0) > 1 ? 's' : ''} and branch ${branch}.` : 'Removed the run.' });
     });
   }
 
@@ -837,6 +1080,7 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
 
   private requireIdle(): void {
     if (this.active) throw new Error('Wait for the current run or stop it first.');
+    if (this.remoteRun(this.read().inFlight)) throw new Error('Another VS Code window is running a Squad step for this workspace. Wait for it to finish.');
   }
 
   private requirePlan(id: unknown): Plan {
@@ -886,6 +1130,7 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
       else if (activity.kind === 'edit') live.edits++;
       else if (activity.kind === 'run') live.commands++;
       else if (activity.kind === 'denied' || activity.kind === 'failed') live.problems = (live.problems ?? 0) + 1;
+      if (activity.kind === 'denied') live.denied = (live.denied ?? 0) + 1;
       this.notifySoon();
     };
   }
@@ -899,7 +1144,8 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
   }
 
   private read(): Thread {
-    return this.storage.get<Thread>(storageKey) ?? { entries: [] };
+    const state = this.storage.get<Thread>(storageKey) ?? { entries: [] };
+    return state.runs?.some(run => !run.trees && (run as LegacyRun).path) ? { ...state, runs: state.runs.map(normalizeRun) } : state;
   }
 
   private write(update: (state: Thread) => void, run?: ActiveRun): Promise<void> {
@@ -930,13 +1176,23 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
     try {
       await this.write(state => {
         run.signal.throwIfAborted();
+        if (this.remoteRun(state.inFlight)) throw new Error('Another VS Code window is running a Squad step for this workspace. Wait for it to finish.');
         setup(state);
-        state.inFlight = true;
+        state.inFlight = { owner: this.owner, beat: Date.now(), status };
       });
     } catch (error) {
       this.active = undefined;
       throw error;
     }
+    // Other windows share this state; the heartbeat tells them the run is still alive.
+    clearInterval(this.heartbeat);
+    this.heartbeat = setInterval(() => {
+      if (this.active !== run) return;
+      void this.write(state => {
+        if (typeof state.inFlight === 'object' && state.inFlight.owner === this.owner) state.inFlight = { owner: this.owner, beat: Date.now(), status: run.status };
+      }).catch(() => undefined);
+    }, heartbeatMs);
+    this.heartbeat.unref?.();
     return { finished: this.complete(run, task) };
   }
 
@@ -960,6 +1216,8 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
         // The persisted in-flight marker allows the chat to report an interrupted run.
         run.entries.push({ author: 'Squad', text: notice ?? 'Could not save the final run status.' });
       } finally {
+        clearInterval(this.heartbeat);
+        this.heartbeat = undefined;
         this.active = undefined;
         this.changed();
       }
@@ -983,7 +1241,9 @@ function readGate(answer: string): { verdict: GateVerdict; reason: string } {
   return { verdict: 'changes', reason: 'The reviewer did not return a clear verdict.' };
 }
 
-function parsePlan(answer: string, workers: ReadonlyMap<WorkerRole, Agent>): { reply: string; jobs: Job[]; invalid?: boolean } | undefined {
+function parsePlan(
+  answer: string, workers: ReadonlyMap<WorkerRole, Agent>, repositories: readonly string[] = []
+): { reply: string; jobs: Job[]; invalid?: boolean } | undefined {
   let value: unknown;
   const text = answer.trim();
   try {
@@ -1000,9 +1260,15 @@ function parsePlan(answer: string, workers: ReadonlyMap<WorkerRole, Agent>): { r
     const role = task.role;
     const agent = workers.get(role);
     const brief = typeof task.brief === 'string' ? task.brief.trim() : '';
-    if (!agent || !brief || brief.length > 4_000 || jobs.some(job => job.role === role)) return { reply, jobs: [], invalid: true };
-    jobs.push({ role, brief, profile: agent.name, kind: agent.kind, accountId: agent.id, revision: agent.revision });
+    // A repository Lead names that is not in the list is dropped; the user picks one before approving.
+    const repo = agent?.kind !== 'claude' ? undefined
+      : repositories.length === 1 ? repositories[0]
+        : typeof task.repo === 'string' && repositories.includes(task.repo.trim().replace(/\/+$/, '')) ? task.repo.trim().replace(/\/+$/, '') : undefined;
+    const duplicate = jobs.some(job => job.role === role && (repositories.length < 2 || (repo !== undefined && job.repo === repo)));
+    if (!agent || !brief || brief.length > 4_000 || duplicate || jobs.length >= 8) return { reply, jobs: [], invalid: true };
+    jobs.push({ role, brief, profile: agent.name, kind: agent.kind, accountId: agent.id, revision: agent.revision, ...(repo ? { repo } : {}) });
   }
+  // Implement steps come first, then Review, then Tests; Lead's order is kept within a role.
   jobs.sort((a, b) => workerRoles.indexOf(a.role) - workerRoles.indexOf(b.role));
   return { reply, jobs };
 }

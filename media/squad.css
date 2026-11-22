@@ -336,7 +336,8 @@ button.accent:hover:not(:disabled) { background: var(--vscode-button-hoverBackgr
 
 /* Toast after a step ends. */
 .toast {
-  position: fixed; inset-inline: 12px; bottom: 96px; z-index: 5; margin: 0 auto; max-width: 420px; padding: 8px 12px; border-radius: 6px;
+  position: fixed; inset-inline: 12px; top: calc(var(--board-top, 0px) + 76px); z-index: 5; margin: 0 auto; max-width: 420px; padding: 8px 12px; border-radius: 6px;
+  pointer-events: none;
   background: var(--vscode-notifications-background, var(--surface)); color: var(--vscode-notifications-foreground, var(--vscode-foreground));
   border: 1px solid var(--vscode-notifications-border, var(--border)); border-inline-start: 3px solid var(--accent);
   box-shadow: 0 4px 16px rgba(0, 0, 0, .3);
@@ -344,13 +345,12 @@ button.accent:hover:not(:disabled) { background: var(--vscode-button-hoverBackgr
 .toast[data-tone="good"] { border-inline-start-color: var(--vscode-testing-iconPassed, var(--accent)); }
 .toast[data-tone="warn"] { border-inline-start-color: var(--warning); }
 .toast.show { animation: squad-toast 4s ease forwards; }
-@keyframes squad-toast { 0% { opacity: 0; transform: translateY(8px); } 8%, 85% { opacity: 1; transform: none; } 100% { opacity: 0; } }
-#plan-repo-field select { max-width: 100%; }
+@keyframes squad-toast { 0% { opacity: 0; transform: translateY(-8px); } 8%, 85% { opacity: 1; transform: none; } 100% { opacity: 0; } }
 @media (max-width: 340px) {
   .squad-board { gap: 4px; }
   .member { padding: 6px 2px 4px; }
   .member .avatar { width: 24px; height: 24px; font-size: 12px; }
-  .member .name { font-size: .8em; }
+  .member .name { font-size: .74em; letter-spacing: -.02em; text-overflow: clip; }
   .member .state { font-size: .7em; }
 }
 @media (max-width: 230px) {
@@ -364,3 +364,22 @@ button.accent:hover:not(:disabled) { background: var(--vscode-button-hoverBackgr
 #chat-jobs p.brief { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; cursor: pointer; }
 #chat-jobs p.brief.open { display: block; }
 .kind.denied, .kind.failed { color: var(--warning); border-color: currentColor; }
+
+/* Repository per task, runs across repositories, pushes, and review feedback. */
+.job-repo { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin: 4px 0 2px; font-size: .9em; }
+.job-repo select { flex: 1 1 160px; min-width: 0; max-width: 100%; margin: 0; }
+.job-repo small { flex-basis: 100%; }
+.metrics { margin: -4px 0 8px; color: var(--muted); font-size: .86em; }
+.repo-head { margin: 10px 0 4px; font-weight: 600; font-family: var(--vscode-editor-font-family, monospace); font-size: .88em; }
+.feedback { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border); }
+.feedback textarea { width: 100%; box-sizing: border-box; }
+.feedback select { min-width: 0; max-width: 60%; }
+.pushed { margin: 6px 0; padding: 0; list-style: none; font-size: .88em; }
+.pushed li { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+button.link { padding: 0 2px; border: 0; background: none; color: var(--vscode-textLink-foreground, var(--accent)); text-decoration: underline; cursor: pointer; }
+button.link:hover { color: var(--vscode-textLink-activeForeground, var(--accent)); }
+.profile-field { display: grid; gap: 2px; min-width: 0; }
+.profile-field #assign-all { justify-self: start; font-size: .88em; }
+/* Long patch lines scroll inside the patch instead of widening the run card and the panel. */
+.run-list > li, .changes, .changes details.file { min-width: 0; max-width: 100%; }
+.changes .patch { max-width: 100%; box-sizing: border-box; }
