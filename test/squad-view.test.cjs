@@ -20,6 +20,9 @@ test('a rejected Copilot tool registration leaves Squad commands available', asy
       registerWebviewViewProvider(_id, view) { provider = view; return disposable; },
       onDidChangeWindowState() { return disposable; }
     },
+    workspace: {
+      onDidChangeConfiguration() { return disposable; }
+    },
     lm: {
       registerTool(name) {
         attempted.push(name);
@@ -35,7 +38,7 @@ test('a rejected Copilot tool registration leaves Squad commands available', asy
   const warn = t.mock.method(console, 'warn', () => {});
   const { registerSquad } = require('../dist/squad-view.js');
   registerSquad({
-    subscriptions: [], workspaceState: { get() {} },
+    subscriptions: [], workspaceState: { get() {} }, globalStorageUri: { fsPath: '/tmp/xdev-test' },
     secrets: { onDidChange() { return disposable; } }
   }, {}, {}, () => disposable);
 

@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Assign a Claude Code account to a Squad role and control each step of an approved plan yourself: run it headless, open it as an interactive Claude Code session in a terminal, skip it, or finish the run. Steps work in a separate git worktree on a new local branch, and none starts another.
+- Review, merge, open, resume in a terminal, or remove each worker run from the Squad chat.
+- Squad Memory: shared notes that every agent receives within a fixed budget. Workers add notes after runs.
+- Skills now have a **When to use** description and are copied to every Claude Code account as on-demand skills.
+- Sync skills and memory with a folder, such as a docs repository clone, using a three-way merge, a local commit, and a confirmed push.
+- Choose who approves each Squad step: you, AI review with you starting each step, or AI, where a passing review by Lead's account (never the step's own account) starts the next step. Merging always waits for you.
+
+### Changed
+
+- xDev Squad now opens in the Secondary Side Bar on the right, like Chat, with the message box kept at the bottom. Drag its icon to move it elsewhere. VS Code versions without Secondary Side Bar contributions show it in the Explorer.
+- Skills can hold up to 8,000 characters, and a workspace can store up to 40 skills. SDLC drafts include enabled skills within a 12,000-character budget.
+
 ## 0.7.1 - 2026-11-19
 
 ### Added

@@ -3,7 +3,7 @@ const byId = id => document.getElementById(id);
 const roles = byId('roles').dataset.roles.split(',');
 const chatUi = mountSquadChat(vscode, roles);
 const workspaceUi = mountSquadWorkspace(vscode);
-const tabs = ['chat', 'roles', 'workflow', 'customizations'];
+const tabs = ['chat', 'roles', 'workflow', 'customizations', 'memory'];
 const summary = byId('summary');
 const fields = byId('fields');
 const account = byId('account');

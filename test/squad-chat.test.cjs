@@ -58,14 +58,28 @@ test('a persisted plan only dispatches when approved and uses each assigned acco
   chat = openChat();
   const plan = chat.snapshot().plan;
   assert.deepEqual(plan.jobs, [
-    { role: 'Implement', brief: 'Propose a schema change', profile: 'Implement profile' },
-    { role: 'Review', brief: 'Review compatibility', profile: 'Review profile' },
-    { role: 'Tests', brief: 'Draft smoke cases', profile: 'Tests profile' }
+    { role: 'Implement', brief: 'Propose a schema change', profile: 'Implement profile', kind: 'api' },
+    { role: 'Review', brief: 'Review compatibility', profile: 'Review profile', kind: 'api' },
+    { role: 'Tests', brief: 'Draft smoke cases', profile: 'Tests profile', kind: 'api' }
   ]);
   await assert.rejects(chat.approve('another-plan'), /no longer available/);
   assert.equal(requests.length, 1);
   const approved = await chat.approve(plan.id);
-  assert.deepEqual((await approved.finished).map(entry => entry.author), ['Implement', 'Review', 'Tests', 'Squad']);
+  await approved.finished;
+  assert.equal(requests.length, 1, 'approving a plan runs nothing');
+  const [run] = chat.snapshot().runs;
+  assert.equal(run.status, 'active');
+  assert.equal(run.branch, undefined, 'text-only runs need no worktree');
+  assert.deepEqual(run.steps.map(step => step.status), ['pending', 'pending', 'pending']);
+  await assert.rejects(openChat().approve('x'), /no longer available/);
+  for (let step = 0; step < 3; step++) {
+    chat = openChat();
+    const started = await chat.runStep(run.id);
+    await started.finished;
+    assert.equal(requests.length, 2 + step, 'each step runs only when the user starts it');
+  }
+  assert.equal(openChat().snapshot().runs[0].status, 'done');
+  await assert.rejects(openChat().runStep(run.id), /no longer active/);
   assert.deepEqual(requests.slice(1), [
     { model: 'implement', auth: 'Bearer Implement-key',
       request: { request: 'Plan a migration', task: 'Propose a schema change' } },
@@ -75,11 +89,12 @@ test('a persisted plan only dispatches when approved and uses each assigned acco
       request: { request: 'Plan a migration', task: 'Draft smoke cases', implementation: 'implement result' } }
   ]);
   chat = openChat();
-  assert.deepEqual(chat.snapshot().entries.map(entry => entry.author), ['You', 'Lead', 'Squad', 'Implement', 'Review', 'Tests', 'Squad']);
+  assert.deepEqual(chat.snapshot().entries.map(entry => entry.author),
+    ['You', 'Lead', 'Squad', 'Squad', 'You', 'Implement', 'You', 'Review', 'You', 'Tests', 'Squad']);
   await chat.send('@review Summarize the risks');
   await until(() => !chat.snapshot().busy);
   assert.deepEqual(requests.at(-1).request, {
-    history: [{ author: 'Review', text: 'review result' }],
+    history: [{ author: 'You', text: 'Review compatibility' }, { author: 'Review', text: 'review result' }],
     request: 'Summarize the risks'
   });
   assert.equal(requests.at(-1).model, 'review');
@@ -100,32 +115,48 @@ test('changing an API key invalidates approval and discarding the plan makes no 
   assert.equal(requests.length, 1);
 });
 
-test('stopping an approved run skips the remaining roles', async t => {
+test('stopping a step marks it failed so the user can run, skip, or finish', async t => {
   const { openChat, requests } = await setup(t, (_model, signal) => new Promise((_resolve, reject) => {
     signal.addEventListener('abort', () => reject(signal.reason), { once: true });
   }));
   const chat = openChat();
   await chat.send('Plan this');
   await until(() => !chat.snapshot().busy);
-  await chat.approve(chat.snapshot().plan.id);
+  await (await chat.approve(chat.snapshot().plan.id)).finished;
+  const [run] = chat.snapshot().runs;
+  await chat.runStep(run.id, 'Propose only the index change');
   await until(() => requests.length === 2);
+  assert.equal(requests[1].request.task, 'Propose only the index change', 'the edited brief is sent');
   chat.cancel();
   await until(() => !chat.snapshot().busy);
   assert.deepEqual(requests.map(request => request.model), ['lead', 'implement']);
-  assert.equal(openChat().snapshot().entries.at(-1).text, 'Run stopped.');
+  let saved = openChat().snapshot().runs[0];
+  assert.deepEqual(saved.steps.map(step => step.status), ['failed', 'pending', 'pending']);
+  assert.match(openChat().snapshot().entries.at(-1).text, /stopped/);
+  await chat.skipStep(run.id);
+  saved = openChat().snapshot().runs[0];
+  assert.deepEqual(saved.steps.map(step => step.status), ['skipped', 'pending', 'pending']);
+  await chat.finish(run.id);
+  saved = openChat().snapshot().runs[0];
+  assert.equal(saved.status, 'stopped');
+  assert.deepEqual(saved.steps.map(step => step.status), ['skipped', 'skipped', 'skipped']);
+  assert.equal(requests.length, 2);
+  await chat.removeRun(run.id);
+  assert.deepEqual(openChat().snapshot().runs, []);
 });
 
-test('cancelling a tool invocation stops its run without affecting the shared chat', async t => {
+test('cancelling a tool invocation stops its step without affecting the shared chat', async t => {
   const { openChat, requests } = await setup(t, (_model, signal) => new Promise((_resolve, reject) => {
     signal.addEventListener('abort', () => reject(signal.reason), { once: true });
   }));
   const chat = openChat();
   await (await chat.send('Plan this')).finished;
+  await (await chat.approve(chat.snapshot().plan.id)).finished;
   const controller = new AbortController();
-  const running = await chat.approve(chat.snapshot().plan.id, controller.signal);
+  const running = await chat.runStep(chat.snapshot().runs[0].id, undefined, controller.signal);
   await until(() => requests.length === 2);
   controller.abort();
-  assert.deepEqual(await running.finished, [{ author: 'Squad', text: 'Run stopped.' }]);
+  assert.match((await running.finished).at(-1).text, /stopped/);
   assert.equal(chat.snapshot().busy, false);
   assert.equal(requests.length, 2);
 });
@@ -171,7 +202,7 @@ test('workspace customizations persist across sessions and disable tool use', as
   await customizations.setTool('xdev_sdlc', false);
 
   const { customizations: restored } = openChat();
-  assert.deepEqual(restored.read().skills, [{ id, name: 'Review changes', instructions: 'Check migrations.', enabled: false }]);
+  assert.deepEqual(restored.read().skills, [{ id, name: 'Review changes', description: '', instructions: 'Check migrations.', enabled: false }]);
   assert.throws(() => restored.requireTool('xdev_sdlc'), /disabled in this workspace/);
   await restored.setTool('xdev_sdlc', true);
   assert.doesNotThrow(() => restored.requireTool('xdev_sdlc'));

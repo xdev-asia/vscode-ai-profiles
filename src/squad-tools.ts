@@ -85,7 +85,7 @@ export function registerSquadTools(context: vscode.ExtensionContext, squad: Squa
         confirmationMessages: {
           title: 'Send this message to xDev Squad?',
           message: new vscode.MarkdownString()
-            .appendText('The assigned API profile receives this message and recent Squad context.\n\n')
+            .appendText('The assigned profile receives this message, recent Squad context, and shared memory.\n\n')
             .appendText(messageFrom(input))
         }
       };
@@ -109,7 +109,7 @@ export function registerSquadTools(context: vscode.ExtensionContext, squad: Squa
       return {
         invocationMessage: input.action === 'run' ? 'Running the xDev Squad plan' : 'Discarding the xDev Squad plan',
         confirmationMessages: {
-          title: input.action === 'run' ? 'Send the approved tasks to their API profiles?' : 'Discard this xDev Squad plan?',
+          title: input.action === 'run' ? 'Approve this xDev Squad plan? Steps start only when you run them.' : 'Discard this xDev Squad plan?',
           message: new vscode.MarkdownString().appendText(describePlan(plan))
         }
       };
@@ -128,19 +128,22 @@ export function registerSquadTools(context: vscode.ExtensionContext, squad: Squa
           return 'The xDev Squad plan was discarded.';
         }
 
-        const preview = plan.jobs.map(({ role, profile, brief }) =>
-          `${role} · ${profile}\n${brief.length <= 180 ? brief : brief.slice(0, 180) + '…'}`
+        const preview = plan.jobs.map(({ role, profile, brief, kind }) =>
+          `${role} · ${profile}${kind === 'claude' ? ' · Claude Code worker' : ''}\n${brief.length <= 180 ? brief : brief.slice(0, 180) + '…'}`
         ).join('\n\n');
-        const approve = 'Approve and run';
-        const choice = await vscode.window.showWarningMessage('Run this xDev Squad plan?', {
+        const headless = plan.jobs.some(job => job.kind === 'claude');
+        const approve = 'Approve plan';
+        const choice = await vscode.window.showWarningMessage('Approve this xDev Squad plan?', {
           modal: true,
-          detail: `The original request and tasks will be sent to these API profiles.\n\n${preview}`
+          detail: `Nothing runs yet. You start, edit, or skip each step in xDev Squad → Chat → Worker runs.${headless
+            ? ' Claude Code steps work in a new git worktree; nothing is pushed.' : ''}\n\n${preview}`
         }, approve);
         signal.throwIfAborted();
-        if (choice !== approve) return 'The user declined the xDev Squad run. The plan is still pending.';
+        if (choice !== approve) return 'The user declined the xDev Squad plan. The plan is still pending.';
         squad.customizations.requireTool('xdev_squad_plan');
-        const run = await squad.approve(plan.id, signal);
-        return formatReplies(await run.finished);
+        const run = await squad.approve(plan.id, signal, vscode.workspace.getConfiguration('xdevAi.squad').get('approver') ?? 'human');
+        const replies = formatReplies(await run.finished);
+        return `${replies}\n\nThe plan is approved but no step has run. The user runs each step from xDev Squad → Chat → Worker runs.`;
       });
     }
   });

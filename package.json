@@ -40,6 +40,8 @@
       { "command": "xdevAi.squad.open", "title": "Open Squad", "category": "xDev AI", "icon": "$(organization)" },
       { "command": "xdevAi.squad.workflow", "title": "Open SDLC Workflow", "category": "xDev AI" },
       { "command": "xdevAi.squad.customizations", "title": "Manage Skills and Tools", "category": "xDev AI" },
+      { "command": "xdevAi.squad.memory", "title": "Open Squad Memory", "category": "xDev AI" },
+      { "command": "xdevAi.squad.syncSkills", "title": "Sync Squad Skills and Memory", "category": "xDev AI" },
       { "command": "xdevAi.manageMcp", "title": "Manage MCP", "category": "xDev AI", "icon": "$(plug)" },
       { "command": "xdevAi.manageTerminalAccounts", "title": "Open AI Accounts Sidebar", "category": "xDev AI", "icon": "$(account)" },
       { "command": "xdevAi.addAiAccount", "title": "Add AI Account", "category": "xDev AI", "icon": "$(add)" },
@@ -56,7 +58,7 @@
       "activitybar": [
         { "id": "xdev-ai", "title": "xDev AI", "icon": "$(account)" }
       ],
-      "panel": [
+      "secondarySidebar": [
         { "id": "xdev-ai-squad", "title": "xDev Squad", "icon": "$(organization)" }
       ]
     },
@@ -189,6 +191,59 @@
           "default": "",
           "scope": "machine",
           "description": "Absolute path to Gemini CLI on the workspace host. Leave empty to detect the installation automatically."
+        },
+        "xdevAi.squad.approver": {
+          "type": "string",
+          "enum": ["human", "ai+human", "ai"],
+          "default": "human",
+          "enumDescriptions": [
+            "You start every step yourself.",
+            "Lead's account reviews each finished step; you still start every step.",
+            "A passing review by Lead's account starts the next step. Changes requested, a blocked step, or an error waits for you. Merging always waits for you."
+          ],
+          "markdownDescription": "Default approver for new Squad runs. You can change it on each plan before approving. The AI reviewer is the account assigned to Lead and must differ from the step's account."
+        },
+        "xdevAi.squad.workerAllowedCommands": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["npm test", "npm run build", "npm run lint"],
+          "markdownDescription": "Command prefixes that headless Claude Code workers (Implement and Tests) may run without asking, for example `npm test` or `dotnet test`. Other shell commands are denied and reported in the chat. Read-only git commands are always allowed."
+        },
+        "xdevAi.squad.workerBudgetUsd": {
+          "type": "number",
+          "default": 1,
+          "minimum": 0,
+          "maximum": 50,
+          "markdownDescription": "Spending cap in USD for each headless worker run (`--max-budget-usd`). `0` turns the cap off."
+        },
+        "xdevAi.squad.workerModels": {
+          "type": "object",
+          "default": {},
+          "properties": {
+            "Lead": { "type": "string" },
+            "Implement": { "type": "string" },
+            "Review": { "type": "string" },
+            "Tests": { "type": "string" }
+          },
+          "additionalProperties": false,
+          "markdownDescription": "Claude Code model per Squad role, for example `{ \"Implement\": \"sonnet\", \"Review\": \"haiku\" }`. Empty uses the account default. A cheaper model for Review and Tests saves usage."
+        },
+        "xdevAi.squad.workerTimeoutMinutes": {
+          "type": "number",
+          "default": 20,
+          "minimum": 1,
+          "maximum": 120,
+          "description": "Stop a headless worker that runs longer than this many minutes."
+        },
+        "xdevAi.squad.syncSkillsToProfiles": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Copy enabled Squad skills into each Claude Code account as `xdev-*` user skills, so workers load them on demand. Skills you installed yourself are never changed."
+        },
+        "xdevAi.squad.syncFolder": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Folder used by **Sync with folder** to share skills and Squad memory, usually a clone of your team docs repository. Relative paths start at the first workspace folder."
         }
       }
     }

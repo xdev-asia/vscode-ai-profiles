@@ -8,7 +8,9 @@ function mountSquadChat(vscode, roles) {
   let pending;
   let transcript;
 
+  let lastState;
   function render(state) {
+    lastState = state;
     snapshot = state.teamChat;
     const entries = JSON.stringify(snapshot.entries);
     if (entries !== transcript) {
@@ -42,15 +44,35 @@ function mountSquadChat(vscode, roles) {
       const row = document.createElement('li');
       const label = document.createElement('strong');
       label.textContent = `${job.role} · ${job.profile}`;
+      const badge = document.createElement('span');
+      badge.className = `badge ${job.kind}`;
+      badge.textContent = job.kind === 'claude'
+        ? (job.role === 'Review' ? 'Claude Code · reads the repo' : 'Claude Code · edits the worktree')
+        : 'Text API · no file access';
       const brief = document.createElement('p');
       brief.textContent = job.brief;
-      row.append(label, brief);
+      row.append(label, badge, brief);
       return row;
     }));
+    const headless = (plan?.jobs ?? []).filter(job => job.kind === 'claude').length;
+    const workers = state.sync?.workers;
+    const commands = workers?.allowedCommands?.length ? workers.allowedCommands.join(', ') : 'read-only git only';
+    const approver = byId('plan-approver');
+    if (!plan) approver.dataset.touched = '';
+    if (!approver.dataset.touched && state.sync?.approver) approver.value = state.sync.approver;
+    const approverText = {
+      human: 'Approving runs nothing yet: you start, edit, or skip each step yourself.',
+      'ai+human': 'Approving runs nothing yet. After each step, Lead\'s account reviews it; you still start every step.',
+      ai: 'You start the first step. Each passing AI review then starts the next step; a review asking for changes, a blocked step, or an error stops and waits for you. Merging always waits for you.'
+    }[approver.value] ?? '';
+    byId('plan-cost').textContent = `${approverText}${headless
+      ? ` Claude Code steps use a new git worktree${workers?.budgetUsd ? `, each headless step capped at $${workers.budgetUsd}` : ''}. Allowed commands: ${commands}.` : ''}`;
+    renderRuns(snapshot.runs ?? []);
     const profileFor = role => state.accounts.find(profile => profile.id === state.seats[role]?.account);
     const lead = profileFor('Lead');
+    const leadUsable = lead?.kind === 'api' || (lead?.detail === 'Claude Code' && snapshot.workers);
     byId('chat-status').textContent = status || (plan ? 'Review the roles and briefs before running.' :
-      lead?.kind === 'api' ? `Lead uses ${lead.name} · ${lead.detail}` : 'Assign an API profile to Lead under Roles to start planning.');
+      leadUsable ? `Lead uses ${lead.name} · ${lead.detail}` : 'Assign an API profile or a Claude Code account to Lead under Roles to start planning.');
     byId('stop-chat').hidden = !busy;
     const terminals = roles.filter(role => profileFor(role)?.kind === 'terminal');
     const selected = terminalRole.value;
@@ -61,6 +83,122 @@ function mountSquadChat(vscode, roles) {
     if (terminals.includes(selected)) terminalRole.value = selected;
     byId('chat-terminal').hidden = !terminals.length;
     updateControls();
+  }
+
+  let runsKey;
+  const stepDrafts = new Map();
+  const stepLabels = {
+    pending: 'waiting for you', running: 'running', terminal: 'in terminal', done: 'done',
+    blocked: 'blocked', failed: 'failed', skipped: 'skipped'
+  };
+
+  function element(tag, text, className) {
+    const node = document.createElement(tag);
+    if (text !== undefined) node.textContent = text;
+    if (className) node.className = className;
+    return node;
+  }
+
+  function renderRuns(runs) {
+    byId('chat-runs').hidden = !runs.length;
+    const busy = Boolean(pending) || snapshot.busy;
+    const key = JSON.stringify(runs) + String(busy);
+    if (key === runsKey) return;
+    runsKey = key;
+    byId('run-list').replaceChildren(...runs.map(run => {
+      const item = element('li', undefined, `run ${run.status}`);
+      const cost = run.costUsd ? ` · $${run.costUsd.toFixed(run.costUsd < 0.1 ? 3 : 2)}` : '';
+      const files = run.status === 'active' ? '' : ` · ${run.files ?? 0} file${run.files === 1 ? '' : 's'}`;
+      const approvedBy = { human: 'you approve', 'ai+human': 'AI reviews, you approve', ai: 'AI approves' }[run.approver ?? 'human'];
+      item.append(element('strong', run.prompt.split('\n', 1)[0]),
+        element('small', `${run.branch ?? 'text only'} · ${run.status} · ${approvedBy}${files}${cost}`));
+
+      const steps = element('ol', undefined, 'steps');
+      const current = run.status === 'active'
+        ? run.steps.findIndex(step => step.status !== 'done' && step.status !== 'skipped') : -1;
+      run.steps.forEach((step, index) => {
+        const row = element('li', undefined, `step ${step.status}${index === current ? ' current' : ''}`);
+        row.append(element('span', `${step.role} · ${step.profile} · ${stepLabels[step.status] ?? step.status}`));
+        if (step.gate) {
+          row.append(element('p', `AI review (${step.gate.by}): ${step.gate.verdict === 'pass' ? 'pass' : 'changes requested'}. ${step.gate.reason}`,
+            `gate ${step.gate.verdict}`));
+        }
+        if (index === current) row.append(stepControls(run, step, index, busy));
+        else if (step.summary) row.append(element('p', step.summary.length > 240 ? step.summary.slice(0, 240) + '…' : step.summary, 'subtle'));
+        steps.append(row);
+      });
+      item.append(steps);
+
+      if (run.stat) {
+        const stat = element('details');
+        stat.append(element('summary', 'Changed files'), element('pre', run.stat));
+        item.append(stat);
+      }
+      const actions = element('div', undefined, 'actions');
+      const button = (text, action, args, disabled) => {
+        const control = element('button', text);
+        control.type = 'button';
+        control.disabled = disabled;
+        control.addEventListener('click', () => send(action, { id: run.id, ...args }));
+        actions.append(control);
+      };
+      const active = run.status === 'active';
+      if (active) button('Finish run', 'runFinish', {}, busy);
+      if (run.branch) {
+        button('View diff', 'runDiff', {}, active || !run.commit);
+        button('Merge', 'runMerge', {}, active || busy || !run.commit);
+        button('Open folder', 'runOpen', {}, false);
+        for (const session of run.sessions) {
+          button(`Resume ${session.role} session`, 'runResume', { session: session.sessionId }, busy);
+        }
+      }
+      button('Remove', 'runRemove', {}, busy);
+      item.append(actions);
+      return item;
+    }));
+  }
+
+  function stepControls(run, step, index, busy) {
+    const box = element('div', undefined, 'step-controls');
+    const draftKey = `${run.id}:${index}`;
+    const brief = element('textarea');
+    brief.rows = 3;
+    brief.maxLength = 4000;
+    brief.setAttribute('aria-label', `${step.role} brief`);
+    brief.value = stepDrafts.get(draftKey) ?? step.brief;
+    brief.disabled = busy || step.status === 'terminal' || step.status === 'running';
+    brief.addEventListener('input', () => stepDrafts.set(draftKey, brief.value));
+    const label = element('label', 'Brief for this step');
+    label.append(brief);
+    box.append(label);
+    const actions = element('div', undefined, 'actions');
+    const add = (text, action, args, primary) => {
+      const control = element('button', text, primary ? 'primary' : undefined);
+      control.type = 'button';
+      control.disabled = busy;
+      control.addEventListener('click', () => {
+        stepDrafts.delete(draftKey);
+        send(action, { id: run.id, ...args() });
+      });
+      actions.append(control);
+    };
+    if (step.status === 'terminal') {
+      const summary = element('textarea');
+      summary.rows = 2;
+      summary.maxLength = 2000;
+      summary.placeholder = 'What was done (optional). Later steps receive this summary.';
+      summary.setAttribute('aria-label', `${step.role} summary`);
+      box.append(summary);
+      add('Mark step done', 'stepDone', () => ({ summary: summary.value }), true);
+    } else if (step.status !== 'running') {
+      const again = step.status === 'blocked' || step.status === 'failed';
+      add(step.kind === 'claude' ? (again ? 'Run again' : 'Run headless') : (again ? 'Ask again' : 'Ask API'), 'stepRun',
+        () => ({ brief: brief.value }), true);
+      if (step.kind === 'claude') add('Open in terminal', 'stepTerminal', () => ({ brief: brief.value }));
+    }
+    if (step.status !== 'running') add('Skip step', 'stepSkip', () => ({}));
+    box.append(actions);
+    return box;
   }
 
   function updateControls() {
@@ -101,7 +239,8 @@ function mountSquadChat(vscode, roles) {
       form.requestSubmit();
     }
   });
-  byId('approve-plan').addEventListener('click', () => send('approve', { id: snapshot.plan.id }));
+  byId('approve-plan').addEventListener('click', () => send('approve', { id: snapshot.plan.id, approver: byId('plan-approver').value }));
+  byId('plan-approver').addEventListener('change', () => { byId('plan-approver').dataset.touched = '1'; render(lastState); });
   byId('discard-plan').addEventListener('click', () => send('discard', { id: snapshot.plan.id }));
   byId('stop-chat').addEventListener('click', () => send('stop'));
   byId('chat-add-profile').addEventListener('click', () => send('addProfile'));

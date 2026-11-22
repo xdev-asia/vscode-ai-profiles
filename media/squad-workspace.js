@@ -10,6 +10,7 @@ function mountSquadWorkspace(vscode) {
   let stageKey;
   let savedDraft;
   let skillId;
+  let memoryId;
 
   function renderWorkflow() {
     const { workflow, busy, plan, status, workflowIssue } = state.teamChat;
@@ -74,6 +75,7 @@ function mountSquadWorkspace(vscode) {
       const row = document.createElement('li');
       const label = document.createElement('span');
       label.textContent = `${skill.name} · ${skill.enabled ? 'Enabled' : 'Disabled'}`;
+      if (skill.description) label.title = skill.description;
       const actions = document.createElement('div');
       actions.className = 'actions';
       for (const [text, handler] of [
@@ -99,6 +101,18 @@ function mountSquadWorkspace(vscode) {
     byId('native-customizations').hidden = !nativeTools.length;
     byId('native-tools').disabled = byId('native-skills').disabled = Boolean(pending);
     byId('manage-mcp').disabled = Boolean(pending);
+    const sync = state.sync ?? {};
+    const claudeAccounts = state.accounts.filter(profile => profile.detail === 'Claude Code').length;
+    byId('sync-profiles').textContent = sync.profiles
+      ? `Enabled skills are copied to ${claudeAccounts} Claude Code account${claudeAccounts === 1 ? '' : 's'} as xdev-* skills when you save them and before each run.`
+      : 'Copying skills to Claude Code accounts is off (xdevAi.squad.syncSkillsToProfiles).';
+    byId('sync-folder').textContent = sync.folder
+      ? `Sync folder: ${sync.folder}. Skills go to skills/<name>/SKILL.md and memory to memory/squad-memory.json. In a git folder xDev pulls, commits, and asks before pushing.`
+      : 'Choose a sync folder, such as a clone of your team docs repository, to share skills and memory across machines and teammates.';
+    const last = state.customizations.lastSync;
+    byId('sync-last').textContent = last ? `Last sync ${new Date(last.time).toLocaleString()}: ${last.summary}` : '';
+    byId('sync-now').textContent = sync.folder ? 'Sync with folder' : 'Choose sync folder…';
+    for (const id of ['sync-now', 'sync-accounts', 'squad-settings']) byId(id).disabled = Boolean(pending);
     for (const tool of tools) {
       const available = tool.id === 'xdev_sdlc' || nativeTools.includes(tool.id);
       tool.disabled = !available || Boolean(pending);
@@ -109,10 +123,56 @@ function mountSquadWorkspace(vscode) {
   function editSkill(skill) {
     skillId = skill?.id;
     byId('skill-name').value = skill?.name ?? '';
+    byId('skill-description').value = skill?.description ?? '';
     byId('skill-instructions').value = skill?.instructions ?? '';
     byId('skill-enabled').checked = skill?.enabled ?? true;
     skillForm.hidden = false;
     byId('skill-name').focus();
+  }
+
+  function renderMemory() {
+    const notes = state.memory ?? [];
+    const list = byId('memory-list');
+    const key = JSON.stringify(notes) + String(Boolean(pending));
+    if (key === list.dataset.key) return;
+    list.dataset.key = key;
+    if (!notes.length) {
+      const empty = document.createElement('li');
+      empty.className = 'subtle';
+      empty.textContent = 'No notes yet. Workers add notes after runs, or add one above.';
+      list.replaceChildren(empty);
+      return;
+    }
+    list.replaceChildren(...notes.map(note => {
+      const row = document.createElement('li');
+      const text = document.createElement('span');
+      text.textContent = `${note.pinned ? '📌 ' : ''}${note.text}`;
+      text.title = `${note.source} · ${new Date(note.time).toLocaleString()}`;
+      const source = document.createElement('small');
+      source.textContent = note.source;
+      const actions = document.createElement('div');
+      actions.className = 'actions';
+      for (const [label, handler] of [
+        [note.pinned ? 'Unpin' : 'Pin', () => send('pinMemory', { id: note.id, pinned: !note.pinned }, 'memory')],
+        ['Edit', () => {
+          memoryId = note.id;
+          byId('memory-text').value = note.text;
+          byId('memory-submit').textContent = 'Save';
+          byId('memory-text').focus();
+        }],
+        ['Delete', () => send('removeMemory', { id: note.id }, 'memory')]
+      ]) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = label;
+        button.disabled = Boolean(pending);
+        button.setAttribute('aria-label', `${label} memory note`);
+        button.addEventListener('click', handler);
+        actions.append(button);
+      }
+      row.append(text, source, actions);
+      return row;
+    }));
   }
 
   function render(data) {
@@ -120,6 +180,7 @@ function mountSquadWorkspace(vscode) {
     state = data;
     renderWorkflow();
     renderCustomizations();
+    renderMemory();
   }
 
   function send(action, args, notice = 'customizations') {
@@ -141,6 +202,11 @@ function mountSquadWorkspace(vscode) {
     pending = undefined;
     byId(`${notice}-notice`).textContent = error ?? (action === 'copy' ? 'Stage brief copied.' : '');
     if (!error && action === 'saveSkill') skillForm.hidden = true;
+    if (!error && (action === 'addMemory' || action === 'editMemory')) {
+      byId('memory-text').value = '';
+      byId('memory-submit').textContent = 'Add';
+      memoryId = undefined;
+    }
     if (!error && action === 'start') byId('workflow-brief').value = '';
     render(state);
   }
@@ -161,8 +227,17 @@ function mountSquadWorkspace(vscode) {
   byId('cancel-skill').addEventListener('click', () => { skillForm.hidden = true; });
   skillForm.addEventListener('submit', event => {
     event.preventDefault();
-    send('saveSkill', { id: skillId, name: byId('skill-name').value,
+    send('saveSkill', { id: skillId, name: byId('skill-name').value, description: byId('skill-description').value,
       instructions: byId('skill-instructions').value, enabled: byId('skill-enabled').checked });
+  });
+  byId('sync-now').addEventListener('click', () => send('syncFolder'));
+  byId('sync-accounts').addEventListener('click', () => send('syncProfiles'));
+  byId('squad-settings').addEventListener('click', () => vscode.postMessage({ type: 'squadChat', action: 'settings' }));
+  byId('memory-form').addEventListener('submit', event => {
+    event.preventDefault();
+    const text = byId('memory-text').value;
+    if (memoryId) send('editMemory', { id: memoryId, text }, 'memory');
+    else send('addMemory', { text }, 'memory');
   });
   for (const tool of tools) {
     tool.addEventListener('change', () => send('setTool', { id: tool.id, enabled: tool.checked }));
@@ -173,5 +248,6 @@ function mountSquadWorkspace(vscode) {
   return { render, settle, loadError(error) {
     byId('workflow-notice').textContent = error;
     byId('customizations-notice').textContent = error;
+    byId('memory-notice').textContent = error;
   } };
 }

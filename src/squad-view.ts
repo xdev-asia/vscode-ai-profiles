@@ -1,16 +1,45 @@
 import { randomBytes } from 'node:crypto';
+import { isAbsolute, join } from 'node:path';
 import * as vscode from 'vscode';
 import { Accounts, accountStorageKey } from './accounts';
-import { terminalProfileId, terminalProviders, type TerminalProfiles } from './terminal-profiles';
+import {
+  findTerminalExecutable, terminalProfileEnv, terminalProfileId, terminalProviders, type TerminalProfile, type TerminalProfiles
+} from './terminal-profiles';
 import { chat, providers } from './core';
 import { isRole, noteLimit, readTask, roles, SquadStore, taskLimit, taskStatuses, type Role } from './squad';
-import { chatPromptLimit, SquadChat } from './squad-chat';
+import { chatPromptLimit, SquadChat, type WorkerHost } from './squad-chat';
 import { registerSquadTools } from './squad-tools';
-import { skillInstructionsLimit, skillNameLimit, squadTools } from './squad-customizations';
+import { skillDescriptionLimit, skillInstructionsLimit, skillNameLimit, squadTools } from './squad-customizations';
+import { memoryTextLimit } from './squad-memory';
+import { runClaude, validCommand, type WorkerSettings } from './squad-worker';
+import { git, Worktrees } from './squad-worktree';
+import { mergeSkills, readSyncFolder, syncProfileSkills, writeSyncFolder } from './skill-sync';
 import { workflowBriefLimit, workflowOutputLimit, workflowStages } from './workflow';
 
 const viewId = 'xdevAi.squad';
-type SquadTab = 'workflow' | 'customizations';
+type SquadTab = 'workflow' | 'customizations' | 'memory';
+
+function squadSetting<T>(key: string, fallback: T): T {
+  return vscode.workspace.getConfiguration('xdevAi.squad').get<T>(key) ?? fallback;
+}
+
+function workspaceFolder(): string | undefined {
+  const folder = vscode.workspace.workspaceFolders?.[0]?.uri;
+  return folder?.scheme === 'file' ? folder.fsPath : undefined;
+}
+
+function workerSettings(role: Role): WorkerSettings {
+  const models = squadSetting<Record<string, unknown>>('workerModels', {});
+  const model = typeof models[role] === 'string' && /^[\w.:[\]-]{1,80}$/.test(models[role] as string) ? models[role] as string : undefined;
+  const budget = Number(squadSetting<number>('workerBudgetUsd', 1));
+  const minutes = Number(squadSetting<number>('workerTimeoutMinutes', 20));
+  return {
+    model,
+    budgetUsd: Number.isFinite(budget) && budget >= 0 ? Math.min(budget, 50) : 1,
+    allowedCommands: squadSetting<unknown[]>('workerAllowedCommands', []).filter(validCommand),
+    timeoutMs: (Number.isFinite(minutes) ? Math.min(Math.max(minutes, 1), 120) : 20) * 60_000
+  };
+}
 
 export function registerSquad(
   context: vscode.ExtensionContext, accounts: Accounts, profiles: TerminalProfiles, onProfilesChanged: vscode.Event<void>
@@ -22,6 +51,11 @@ export function registerSquad(
     vscode.commands.registerCommand('xdevAi.squad.open', () => vscode.commands.executeCommand(`${viewId}.focus`)),
     vscode.commands.registerCommand('xdevAi.squad.workflow', () => view.open('workflow')),
     vscode.commands.registerCommand('xdevAi.squad.customizations', () => view.open('customizations')),
+    vscode.commands.registerCommand('xdevAi.squad.memory', () => view.open('memory')),
+    vscode.commands.registerCommand('xdevAi.squad.syncSkills', () => view.syncFolder()),
+    vscode.workspace.onDidChangeConfiguration(event => {
+      if (event.affectsConfiguration('xdevAi.squad')) void view.refresh();
+    }),
     context.secrets.onDidChange(({ key }) => {
       if (key === accountStorageKey) void view.refresh();
     }),
@@ -52,7 +86,93 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
     private readonly profiles: TerminalProfiles
   ) {
     this.store = new SquadStore(context.workspaceState);
-    this.teamChat = new SquadChat(context.workspaceState, accounts, this.store, () => void this.refresh());
+    const storage = context.storageUri ?? context.globalStorageUri;
+    const host: WorkerHost = {
+      profiles: () => profiles.list('claude'),
+      executable: async () => {
+        const executable = await findTerminalExecutable('claude', vscode.workspace.getConfiguration('xdevAi').get<string>('claudeExecutable') ?? '');
+        if (!executable) throw new Error('Claude Code was not found on the workspace host. Set xdevAi.claudeExecutable.');
+        return executable;
+      },
+      folder: workspaceFolder,
+      settings: workerSettings,
+      run: request => runClaude(request),
+      worktrees: new Worktrees(join(storage.fsPath, 'squad-worktrees')),
+      prepare: async () => { await this.syncProfiles(); }
+    };
+    this.teamChat = new SquadChat(context.workspaceState, accounts, this.store, () => void this.refresh(), host);
+  }
+
+  /** Copies enabled skills into every Claude Code account so headless workers load them on demand. */
+  async syncProfiles(): Promise<number> {
+    if (!squadSetting('syncSkillsToProfiles', true)) return 0;
+    return syncProfileSkills(await this.profiles.list('claude'), this.teamChat.customizations.enabledSkills());
+  }
+
+  private syncFolderPath(): string | undefined {
+    const configured = squadSetting<string>('syncFolder', '').trim();
+    if (!configured) return undefined;
+    if (isAbsolute(configured)) return configured;
+    const folder = workspaceFolder();
+    return folder ? join(folder, configured) : undefined;
+  }
+
+  /**
+   * Two-way sync of skills and Squad memory with a folder, normally a clone of the team's docs repository.
+   * Git pull and a local commit happen automatically; pushing always asks first.
+   */
+  async syncFolder(): Promise<void> {
+    let folder = this.syncFolderPath();
+    if (!folder) {
+      const picked = await vscode.window.showOpenDialog({
+        canSelectFolders: true, canSelectFiles: false, canSelectMany: false,
+        openLabel: 'Use for skill sync', title: 'Choose a folder (for example a clone of your docs repository) to sync skills and memory'
+      });
+      if (!picked?.[0]) return;
+      folder = picked[0].fsPath;
+      await vscode.workspace.getConfiguration('xdevAi.squad').update('syncFolder', folder,
+        vscode.workspace.workspaceFolders ? vscode.ConfigurationTarget.Workspace : vscode.ConfigurationTarget.Global);
+    }
+    const repository = await git(['rev-parse', '--show-toplevel'], folder).then(() => true, () => false);
+    const notes: string[] = [];
+    if (repository) {
+      const upstream = await git(['rev-parse', '--abbrev-ref', '@{u}'], folder).then(() => true, () => false);
+      if (upstream) {
+        await git(['pull', '--ff-only', '-q'], folder).catch((error: Error) => notes.push(`Pull skipped: ${error.message}`));
+      }
+    }
+    const customizations = this.teamChat.customizations;
+    const remote = await readSyncFolder(folder);
+    const state = customizations.read();
+    const merge = mergeSkills(state.skills, remote.skills, state.syncBase ?? {});
+    const memoryAdded = await this.teamChat.memory.merge(remote.memory);
+    await writeSyncFolder(folder, merge.skills.filter(skill => !skill.name.endsWith('(sync copy)')), this.teamChat.memory.read());
+    let committed = false;
+    if (repository) {
+      await git(['add', '--', 'skills', 'memory'], folder);
+      const staged = (await git(['diff', '--cached', '--name-only'], folder)).trim();
+      if (staged) {
+        await git(['commit', '-q', '-m', 'xDev: sync skills and memory'], folder)
+          .then(() => { committed = true; }, (error: Error) => notes.push(`Commit failed: ${error.message}`));
+      }
+    }
+    const summary = [
+      `${merge.skills.length} skills`, merge.pulled ? `${merge.pulled} updated from folder` : '',
+      merge.conflicts ? `${merge.conflicts} conflict${merge.conflicts === 1 ? '' : 's'} kept as “(sync copy)”` : '',
+      memoryAdded ? `${memoryAdded} memory notes added` : '', committed ? 'committed locally' : '', ...notes
+    ].filter(Boolean).join(' · ');
+    await customizations.applySync(merge.skills, merge.base, { time: Date.now(), folder, summary });
+    await this.syncProfiles();
+    if (committed) {
+      const push = 'Push';
+      const choice = await vscode.window.showInformationMessage('Skills and memory were committed in the sync folder. Push them to the remote?', {
+        modal: true, detail: `${folder}\nTeammates receive the change on their next sync.`
+      }, push);
+      if (choice === push) {
+        await git(['push', '-q'], folder);
+        await customizations.applySync(merge.skills, merge.base, { time: Date.now(), folder, summary: `${summary} · pushed` });
+      }
+    }
   }
 
   registerChatTools(): void {
@@ -128,6 +248,13 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
         ...this.store.read(),
         teamChat: this.teamChat.snapshot(),
         customizations: this.teamChat.customizations.read(),
+        memory: this.teamChat.memory.read(),
+        sync: {
+          folder: this.syncFolderPath() ?? '',
+          profiles: squadSetting('syncSkillsToProfiles', true),
+          approver: squadSetting('approver', 'human'),
+          workers: { ...workerSettings('Implement'), models: squadSetting('workerModels', {}) }
+        },
         nativeChatTools: this.chatTools,
         accounts,
         running: [...this.running.keys()],
@@ -162,10 +289,36 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
           await this.teamChat.send(message.text);
           return;
         case 'approve':
-          await this.teamChat.approve(message.id);
+          await this.teamChat.approve(message.id, undefined, message.approver ?? squadSetting('approver', 'human'));
           return;
         case 'discard': return this.teamChat.discard(message.id);
         case 'stop': return this.teamChat.cancel();
+        case 'runDiff': return this.showRunDiff(message.id);
+        case 'runOpen': {
+          const run = this.requireWorktree(message.id);
+          await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(run.path), { forceNewWindow: true });
+          return;
+        }
+        case 'runResume': return this.resumeSession(message.id, message.session);
+        case 'runMerge': return this.mergeRun(message.id);
+        case 'stepRun':
+          await this.teamChat.runStep(message.id, message.brief);
+          return;
+        case 'stepTerminal': return this.terminalStep(message.id, message.brief);
+        case 'stepDone': return this.teamChat.completeStep(message.id, message.summary);
+        case 'stepSkip': return this.teamChat.skipStep(message.id);
+        case 'runFinish': return this.teamChat.finish(message.id);
+        case 'runRemove': {
+          const run = this.requireRun(message.id);
+          const remove = run.branch ? 'Remove worktree' : 'Remove run';
+          if (await vscode.window.showWarningMessage(run.branch ? `Remove the worktree and branch ${run.branch}?` : 'Remove this run?', {
+            modal: true, detail: run.branch ? 'Unmerged changes on this branch are deleted.' : 'Its replies stay in the chat.'
+          }, remove) === remove) await this.teamChat.removeRun(run.id);
+          return;
+        }
+        case 'settings':
+          await vscode.commands.executeCommand('workbench.action.openSettings', 'xdevAi.squad');
+          return;
         case 'terminal': return this.receive({ type: 'terminal', role: message.role });
         case 'addProfile':
           await vscode.commands.executeCommand('xdevAi.addAiAccount');
@@ -242,15 +395,41 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
         }, reset) === reset) await squad.resetWorkflow(id);
         return;
       }
-      case 'saveSkill': return squad.customizations.saveSkill(message);
+      case 'saveSkill':
+        await squad.customizations.saveSkill(message);
+        await this.syncProfiles();
+        return;
       case 'removeSkill': {
         const skill = squad.customizations.read().skills.find(candidate => candidate.id === id);
         const remove = 'Delete Skill';
         if (skill && await vscode.window.showWarningMessage(`Delete the skill “${skill.name}”?`, { modal: true }, remove) === remove) {
           await squad.customizations.removeSkill(id);
+          await this.syncProfiles();
         }
         return;
       }
+      case 'syncFolder': return this.syncFolder();
+      case 'syncProfiles': {
+        const count = await this.syncProfiles();
+        void vscode.window.showInformationMessage(count
+          ? `Enabled skills are available to ${count} Claude Code account${count === 1 ? '' : 's'}.`
+          : 'Turn on xdevAi.squad.syncSkillsToProfiles and add a Claude Code account to share skills with workers.');
+        return;
+      }
+      case 'addMemory': {
+        const added = typeof message.text === 'string' ? await squad.memory.add([message.text], 'You') : 0;
+        if (!added) throw new Error(`Enter a new memory note up to ${memoryTextLimit} characters.`);
+        return;
+      }
+      case 'pinMemory':
+        await squad.memory.edit(id, { pinned: message.pinned });
+        return;
+      case 'editMemory':
+        await squad.memory.edit(id, { text: message.text });
+        return;
+      case 'removeMemory':
+        await squad.memory.remove(id);
+        return;
       case 'setTool': return squad.customizations.setTool(id, message.enabled);
       case 'manageMcp': return vscode.commands.executeCommand('xdevAi.manageMcp');
       case 'nativeTools':
@@ -263,6 +442,66 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
         return;
       }
     }
+  }
+
+  private requireRun(id: unknown) {
+    const run = this.teamChat.run(id);
+    if (!run) throw new Error('This run is no longer available.');
+    return run;
+  }
+
+  private requireWorktree(id: unknown) {
+    const run = this.requireRun(id);
+    const { repo, path, branch, base } = run;
+    if (!repo || !path || !branch || !base) throw new Error('This run has no git worktree.');
+    return { ...run, repo, path, branch, base };
+  }
+
+  /** Opens an interactive Claude Code terminal under a profile; the user drives it. */
+  private async openClaudeTerminal(name: string, profile: TerminalProfile, cwd: string, args: string[]): Promise<void> {
+    const executable = await findTerminalExecutable('claude', vscode.workspace.getConfiguration('xdevAi').get<string>('claudeExecutable') ?? '');
+    if (!executable) throw new Error('Claude Code was not found on the workspace host. Set xdevAi.claudeExecutable.');
+    const script = process.platform === 'win32' && /\.cmd$/i.test(executable);
+    vscode.window.createTerminal({
+      name,
+      shellPath: script ? process.env.ComSpec ?? 'cmd.exe' : executable,
+      shellArgs: script ? ['/d', '/s', '/c', executable, ...args] : args,
+      cwd,
+      env: terminalProfileEnv(profile)
+    }).show();
+  }
+
+  private async terminalStep(id: unknown, brief: unknown): Promise<void> {
+    const step = await this.teamChat.startTerminalStep(id, brief);
+    await this.openClaudeTerminal(`${step.role} · ${step.name}`, step.profile, step.cwd, ['--append-system-prompt', step.system, step.prompt]);
+  }
+
+  private async showRunDiff(id: unknown): Promise<void> {
+    const run = this.requireWorktree(id);
+    const diff = await git(['diff', `${run.base}..${run.branch}`], run.repo);
+    const document = await vscode.workspace.openTextDocument({ language: 'diff', content: diff || `No changes on ${run.branch}.` });
+    await vscode.window.showTextDocument(document, { preview: true });
+  }
+
+  private async mergeRun(id: unknown): Promise<void> {
+    const run = this.requireWorktree(id);
+    if (!run.commit) throw new Error('This run has no committed changes to merge.');
+    const current = (await git(['rev-parse', '--abbrev-ref', 'HEAD'], run.repo)).trim();
+    const merge = 'Merge';
+    if (await vscode.window.showWarningMessage(`Merge ${run.branch} into ${current}?`, {
+      modal: true, detail: `${run.files ?? 0} changed files. Nothing is pushed. Commit or stash local changes first.\n\n${run.stat ?? ''}`
+    }, merge) !== merge) return;
+    await git(['merge', '--no-ff', '--no-edit', run.branch], run.repo);
+    void vscode.window.showInformationMessage(`Merged ${run.branch} into ${current}. Remove the run when you no longer need its worktree.`);
+  }
+
+  private async resumeSession(id: unknown, sessionId: unknown): Promise<void> {
+    const run = this.requireWorktree(id);
+    const session = run.sessions.find(candidate => candidate.sessionId === sessionId);
+    if (!session) throw new Error('This worker session is no longer available.');
+    const profile: TerminalProfile | undefined = (await this.profiles.list('claude')).find(candidate => terminalProfileId(candidate) === session.profileId);
+    if (!profile) throw new Error('The Claude Code account for this session was removed.');
+    await this.openClaudeTerminal(`${session.role} · ${session.profile}`, profile, run.path, ['--resume', session.sessionId]);
   }
 
   private async startRequest(role: Role, profileId: string, brief: string): Promise<void> {
@@ -313,6 +552,7 @@ function squadHtml(webview: vscode.Webview, media: vscode.Uri): string {
       <button type="button" id="show-roles" aria-pressed="false">Roles</button>
       <button type="button" id="show-workflow" aria-pressed="false">Workflow</button>
       <button type="button" id="show-customizations" aria-pressed="false">Skills &amp; Tools</button>
+      <button type="button" id="show-memory" aria-pressed="false">Memory</button>
     </nav>
   </header>
   <main id="chat-panel">
@@ -320,10 +560,20 @@ function squadHtml(webview: vscode.Webview, media: vscode.Uri): string {
     <section id="chat-plan" aria-labelledby="plan-title" hidden>
       <h2 id="plan-title">Lead's proposed tasks</h2>
       <ol id="chat-jobs"></ol>
+      <label class="approver">Who approves each step <select id="plan-approver">
+        <option value="human">You: start every step yourself</option>
+        <option value="ai+human">AI reviews each step, you start the next</option>
+        <option value="ai">AI: a passing review starts the next step</option>
+      </select></label>
+      <p id="plan-cost" class="subtle"></p>
       <div class="actions">
-        <button type="button" id="approve-plan">Approve and run</button>
+        <button type="button" id="approve-plan">Approve plan</button>
         <button type="button" id="discard-plan">Discard plan</button>
       </div>
+    </section>
+    <section id="chat-runs" aria-labelledby="runs-title" hidden>
+      <h2 id="runs-title">Worker runs</h2>
+      <ol id="run-list" class="run-list"></ol>
     </section>
     <p id="chat-status" role="status">Loading squad…</p>
     <p id="chat-error" role="alert"></p>
@@ -421,14 +671,27 @@ function squadHtml(webview: vscode.Webview, media: vscode.Uri): string {
   <main id="customizations-panel" class="workspace-panel" hidden>
     <section class="detail">
       <div class="workspace-heading"><h2>Workspace skills</h2><button type="button" id="add-skill" class="primary" disabled>Add skill</button></div>
-      <p class="subtle">Enabled skills are included in AI SDLC drafts for this workspace.</p>
+      <p class="subtle">Enabled skills go into AI SDLC drafts and, as Claude Code skills, into every Claude Code account. Workers load a skill only when its description matches the task.</p>
       <ul class="workspace-list" id="skills"></ul>
       <form id="skill-form" hidden>
         <label>Name <input id="skill-name" maxlength="${skillNameLimit}" required></label>
-        <label>Instructions <textarea id="skill-instructions" rows="4" maxlength="${skillInstructionsLimit}" required></textarea></label>
-        <label class="checkbox"><input id="skill-enabled" type="checkbox"> Enable for SDLC drafts</label>
+        <label>When to use <input id="skill-description" maxlength="${skillDescriptionLimit}"
+          placeholder="One line. Claude reads this to decide when to load the skill."></label>
+        <label>Instructions <textarea id="skill-instructions" rows="6" maxlength="${skillInstructionsLimit}" required></textarea></label>
+        <label class="checkbox"><input id="skill-enabled" type="checkbox"> Enabled</label>
         <div class="actions"><button type="submit" class="primary">Save skill</button><button type="button" id="cancel-skill">Cancel</button></div>
       </form>
+    </section>
+    <section class="detail">
+      <h2>Sync</h2>
+      <p id="sync-profiles" class="subtle"></p>
+      <p id="sync-folder" class="subtle"></p>
+      <p id="sync-last" class="subtle"></p>
+      <div class="actions">
+        <button type="button" id="sync-now" class="primary">Sync with folder</button>
+        <button type="button" id="sync-accounts">Copy skills to Claude accounts</button>
+        <button type="button" id="squad-settings">Worker settings</button>
+      </div>
     </section>
     <section class="detail">
       <h2>Copilot and MCP tools</h2>
@@ -446,6 +709,18 @@ function squadHtml(webview: vscode.Webview, media: vscode.Uri): string {
       <div class="actions"><button type="button" id="manage-mcp">Manage MCP</button></div>
     </section>
     <p id="customizations-notice" class="workspace-notice" role="status"></p>
+  </main>
+  <main id="memory-panel" class="workspace-panel" hidden>
+    <section class="detail">
+      <h2>Shared memory</h2>
+      <p class="subtle">Short facts every agent receives with its task: conventions, decisions, pitfalls. Workers add notes when they learn something durable. Pinned notes always fit in the prompt; others are newest first within a fixed budget.</p>
+      <form id="memory-form" class="memory-form">
+        <label>New note <input id="memory-text" maxlength="${memoryTextLimit}" required placeholder="e.g. API errors use the Problem Details format"></label>
+        <button type="submit" id="memory-submit" class="primary">Add</button>
+      </form>
+      <ul id="memory-list" class="workspace-list"></ul>
+    </section>
+    <p id="memory-notice" class="workspace-notice" role="status"></p>
   </main>
   <script nonce="${nonce}" src="${chatScript}"></script>
   <script nonce="${nonce}" src="${workspaceScript}"></script>
