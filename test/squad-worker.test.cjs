@@ -2,7 +2,9 @@ const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const { PassThrough } = require('node:stream');
 const { test } = require('node:test');
-const { parsePlanOutput, parseWorkerOutput, runClaude, workerArguments, workerEnvironment, workerTools } = require('../dist/squad-worker.js');
+const {
+  describeTool, parsePlanOutput, parseWorkerOutput, runClaude, streamActivities, workerArguments, workerEnvironment, workerTools
+} = require('../dist/squad-worker.js');
 
 const settings = { budgetUsd: 1, allowedCommands: ['npm test', 'rm -rf /; echo', 'dotnet test'], timeoutMs: 60_000 };
 const profile = { provider: 'claude', name: 'Work', configDir: '/profiles/claude/11111111-1111-1111-1111-111111111111' };
@@ -19,7 +21,12 @@ test('worker arguments restrict tools by role and cap spending', () => {
   const args = workerArguments({ role: 'Implement', mode: 'work', prompt: 'Do it', system: 'You are Implement', settings: { ...settings, model: 'sonnet' } });
   const value = flag => args[args.indexOf(flag) + 1];
   assert.equal(value('-p'), 'Do it');
-  assert.equal(value('--output-format'), 'json');
+  assert.equal(value('--output-format'), 'stream-json');
+  assert.ok(args.includes('--verbose'), 'print mode needs --verbose for stream-json');
+  assert.doesNotMatch(value('--allowedTools'), /codegraph/, 'CodeGraph stays off unless enabled');
+  const graph = workerTools('Implement', 'work', [], true);
+  assert.ok(graph.allowed.includes('Bash(codegraph explore:*)'));
+  assert.ok(workerTools('Review', 'gate', [], true).allowed.includes('Bash(codegraph node:*)'));
   assert.equal(value('--tools'), 'Read,Glob,Grep,Edit,Write,Bash');
   assert.match(value('--allowedTools'), /Bash\(npm test:\*\)/);
   assert.match(value('--allowedTools'), /Bash\(dotnet test:\*\)/);
@@ -106,4 +113,34 @@ test('runClaude spawns the CLI in the worktree and can be stopped', async () => 
   });
   await assert.rejects(runClaude(request, failed.spawn), /code 1: Invalid API key.*Sign in/);
   await assert.rejects(runClaude({ ...request, profile: { ...profile, provider: 'codex' } }, done.spawn), /Claude Code terminal account/);
+});
+
+test('stream events become activity, and the result line is returned', async () => {
+  assert.deepEqual(describeTool('Read', { file_path: '/repo/wt/src/a.ts' }, '/repo/wt'), { kind: 'read', text: 'src/a.ts' });
+  assert.deepEqual(describeTool('Edit', { file_path: '/elsewhere/b.ts' }, '/repo/wt'), { kind: 'edit', text: '/elsewhere/b.ts' });
+  assert.deepEqual(describeTool('Bash', { command: 'npm   test\n -- a' }, '/repo/wt'), { kind: 'run', text: 'npm test -- a' });
+  assert.deepEqual(describeTool('Grep', { pattern: 'buildNoiDung', path: '/repo/wt/src' }, '/repo/wt'), { kind: 'search', text: 'buildNoiDung in src' });
+  assert.equal(describeTool('StructuredOutput', {}, '/repo/wt'), undefined);
+  assert.deepEqual(streamActivities({ type: 'user', message: { content: [] } }, '/'), []);
+
+  const events = [
+    { type: 'system', subtype: 'init' },
+    { type: 'assistant', message: { content: [{ type: 'text', text: 'Looking' }, { type: 'tool_use', name: 'Read', input: { file_path: '/repo/wt/a.js' } }] } },
+    { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'StructuredOutput', input: {} }] } }
+  ];
+  const streamed = fakeSpawn(child => {
+    // Split a line across chunks to exercise buffering.
+    const text = events.map(event => JSON.stringify(event)).join('\n') + '\n' + result({ structured_output: { status: 'done', summary: 'ok', files_changed: [], tests: '', memory: [] } });
+    child.stdout.write(text.slice(0, 50));
+    child.stdout.end(text.slice(50));
+    setImmediate(() => child.emit('close', 0));
+  });
+  const seen = [];
+  const request = { executable: '/bin/claude', profile, cwd: '/repo/wt', role: 'Implement', mode: 'work', prompt: 'p', system: 's', settings, onActivity: item => seen.push(item) };
+  const stdout = await runClaude(request, streamed.spawn);
+  assert.deepEqual(seen, [{ kind: 'read', text: 'a.js' }]);
+  assert.equal(parseWorkerOutput(stdout).summary, 'ok');
+
+  const empty = fakeSpawn(child => { child.stdout.end(JSON.stringify(events[0]) + '\n'); setImmediate(() => child.emit('close', 0)); });
+  await assert.rejects(runClaude(request, empty.spawn).then(parseWorkerOutput), /JSON result/);
 });

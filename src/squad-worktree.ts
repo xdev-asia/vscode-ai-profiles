@@ -15,7 +15,49 @@ export interface WorktreeChanges {
   files: number;
 }
 
+export interface FileChange {
+  path: string;
+  status: 'added' | 'modified' | 'deleted' | 'renamed';
+  added: number;
+  removed: number;
+  binary: boolean;
+  patch: string;
+}
+
 export type Git = (args: readonly string[], cwd: string) => Promise<string>;
+
+const patchLimit = 12_000;
+const changeLimit = 60;
+
+/** Splits a unified diff into one entry per file. */
+export function parseDiff(diff: string): FileChange[] {
+  const files: FileChange[] = [];
+  for (const chunk of diff.split(/^(?=diff --git )/m)) {
+    if (!chunk.startsWith('diff --git ')) continue;
+    const lines = chunk.split('\n');
+    const target = lines.find(line => line.startsWith('+++ b/'))?.slice(6)
+      ?? lines.find(line => line.startsWith('rename to '))?.slice(10)
+      ?? lines.find(line => line.startsWith('--- a/'))?.slice(6)
+      ?? /^diff --git a\/.+ b\/(.+)$/.exec(lines[0])?.[1] ?? '';
+    const status = lines.some(line => line.startsWith('new file mode')) ? 'added'
+      : lines.some(line => line.startsWith('deleted file mode')) ? 'deleted'
+        : lines.some(line => line.startsWith('rename from')) ? 'renamed' : 'modified';
+    let added = 0;
+    let removed = 0;
+    const start = lines.findIndex(line => line.startsWith('@@'));
+    for (const line of start < 0 ? [] : lines.slice(start)) {
+      if (line.startsWith('+')) added++;
+      else if (line.startsWith('-')) removed++;
+    }
+    const body = start < 0 ? '' : lines.slice(start).join('\n').trimEnd();
+    files.push({
+      path: target, status, added, removed, binary: lines.some(line => /^Binary files /.test(line)),
+      patch: body.length <= patchLimit ? body : `${body.slice(0, patchLimit)}\n[Truncated]`
+    });
+    if (files.length >= changeLimit) break;
+  }
+  return files;
+}
 
 export const git: Git = (args, cwd) => new Promise((resolve, reject) => {
   execFile('git', [...args], { cwd, maxBuffer: 8_000_000, windowsHide: true, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } },
@@ -66,6 +108,26 @@ export class Worktrees {
     const files = (await this.run(['diff', '--name-only', worktree.base, 'HEAD'], worktree.path)).split('\n').filter(Boolean).length;
     const head = (await this.run(['rev-parse', 'HEAD'], worktree.path)).trim();
     return { commit: head === worktree.base ? undefined : head, stat: stat.slice(-4_000), files };
+  }
+
+  /** Stages everything so new files show up, then lists the run's changes against its base commit. */
+  async changes(worktree: RunWorktree): Promise<FileChange[]> {
+    await this.run(['add', '-A'], worktree.path);
+    return parseDiff(await this.run(['diff', '--cached', '--no-renames', '--no-color', worktree.base], worktree.path));
+  }
+
+  async changedFiles(worktree: RunWorktree): Promise<string[]> {
+    await this.run(['add', '-A'], worktree.path);
+    return (await this.run(['diff', '--cached', '--no-renames', '--name-only', worktree.base], worktree.path)).split('\n').filter(Boolean).slice(0, 200);
+  }
+
+  /** Restores one file to the base commit, or deletes it when the run added it. */
+  async discard(worktree: RunWorktree, file: string): Promise<void> {
+    const changed = await this.changedFiles(worktree);
+    if (!changed.includes(file)) throw new Error('That file has no changes in this run.');
+    const existed = await this.run(['cat-file', '-e', `${worktree.base}:${file}`], worktree.path).then(() => true, () => false);
+    if (existed) await this.run(['checkout', worktree.base, '--', file], worktree.path);
+    else await this.run(['rm', '-f', '-q', '--', file], worktree.path);
   }
 
   async remove(worktree: Pick<RunWorktree, 'repo' | 'path' | 'branch'>): Promise<void> {

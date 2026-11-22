@@ -1,4 +1,5 @@
 import { spawn as spawnProcess, type ChildProcess, type SpawnOptions } from 'node:child_process';
+import { isAbsolute, relative } from 'node:path';
 import type { Role } from './squad';
 import { terminalProfileEnv, type TerminalProfile } from './terminal-profiles';
 
@@ -31,6 +32,15 @@ export interface WorkerSettings {
   budgetUsd: number;
   allowedCommands: readonly string[];
   timeoutMs: number;
+  /** Lets workers query a CodeGraph index with `codegraph explore|node|query`. */
+  codegraph?: boolean;
+}
+
+export type ActivityKind = 'read' | 'search' | 'edit' | 'run' | 'tool';
+
+export interface WorkerActivity {
+  kind: ActivityKind;
+  text: string;
 }
 
 export interface WorkerRequest {
@@ -43,6 +53,8 @@ export interface WorkerRequest {
   system: string;
   settings: WorkerSettings;
   signal?: AbortSignal;
+  /** Called for each tool the worker uses, while it runs. */
+  onActivity?: (activity: WorkerActivity) => void;
 }
 
 type Spawn = (command: string, args: readonly string[], options: SpawnOptions) => ChildProcess;
@@ -93,21 +105,25 @@ const gateSchema = {
 
 const readTools = ['Read', 'Glob', 'Grep'];
 const gitRead = ['Bash(git status:*)', 'Bash(git diff:*)', 'Bash(git log:*)', 'Bash(git show:*)'];
+const codegraphRead = ['Bash(codegraph explore:*)', 'Bash(codegraph node:*)', 'Bash(codegraph query:*)'];
 
 /**
  * Tools each role may use. Built-in tools outside `tools` are not loaded at all, which keeps
  * tool schemas out of the context. In print mode Claude Code denies anything not allowed
  * instead of prompting, and reports the denial in the result.
  */
-export function workerTools(role: Role, mode: WorkerMode, allowedCommands: readonly string[]): { tools: string[]; allowed: string[] } {
+export function workerTools(
+  role: Role, mode: WorkerMode, allowedCommands: readonly string[], codegraph = false
+): { tools: string[]; allowed: string[] } {
   if (mode === 'plan') return { tools: [], allowed: [] };
+  const reads = [...readTools, ...gitRead, ...(codegraph ? codegraphRead : [])];
   if (mode === 'ask' || mode === 'gate' || role === 'Lead' || role === 'Review') {
-    return { tools: [...readTools, 'Bash'], allowed: [...readTools, ...gitRead] };
+    return { tools: [...readTools, 'Bash'], allowed: reads };
   }
   const commands = allowedCommands.map(command => `Bash(${command}:*)`);
   return {
     tools: [...readTools, 'Edit', 'Write', 'Bash'],
-    allowed: [...readTools, 'Edit', 'Write', ...gitRead, ...commands]
+    allowed: [...reads, 'Edit', 'Write', ...commands]
   };
 }
 
@@ -117,10 +133,10 @@ export function validCommand(command: unknown): command is string {
 
 export function workerArguments(request: Omit<WorkerRequest, 'executable' | 'profile' | 'cwd' | 'signal'>): string[] {
   const { role, mode, prompt, system, settings } = request;
-  const { tools, allowed } = workerTools(role, mode, settings.allowedCommands.filter(validCommand));
+  const { tools, allowed } = workerTools(role, mode, settings.allowedCommands.filter(validCommand), settings.codegraph);
   const args = [
     '-p', prompt,
-    '--output-format', 'json',
+    '--output-format', 'stream-json', '--verbose',
     '--json-schema', JSON.stringify(mode === 'plan' ? planSchema : mode === 'gate' ? gateSchema : reportSchema),
     '--append-system-prompt', system,
     '--tools', tools.join(','),
@@ -162,6 +178,46 @@ interface ResultMessage {
   total_cost_usd?: unknown;
   num_turns?: unknown;
   permission_denials?: unknown;
+}
+
+const activityText = 160;
+
+function shortPath(value: unknown, cwd: string): string {
+  if (typeof value !== 'string') return '';
+  const path = isAbsolute(value) ? relative(cwd, value) : value;
+  return (path.startsWith('..') ? value : path || '.').slice(-activityText);
+}
+
+/** Describes one tool call from the stream for the live activity feed. */
+export function describeTool(name: unknown, input: unknown, cwd: string): WorkerActivity | undefined {
+  if (typeof name !== 'string' || name === 'StructuredOutput') return undefined;
+  const args = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>;
+  switch (name) {
+    case 'Read': return { kind: 'read', text: shortPath(args.file_path, cwd) };
+    case 'Edit': case 'MultiEdit': case 'Write': case 'NotebookEdit':
+      return { kind: 'edit', text: shortPath(args.file_path ?? args.notebook_path, cwd) };
+    case 'Glob': case 'Grep': {
+      const pattern = typeof args.pattern === 'string' ? args.pattern : '';
+      const where = typeof args.path === 'string' ? ` in ${shortPath(args.path, cwd)}` : '';
+      return { kind: 'search', text: `${pattern}${where}`.slice(0, activityText) };
+    }
+    case 'Bash': {
+      const command = typeof args.command === 'string' ? args.command.replace(/\s+/g, ' ').trim() : '';
+      return { kind: 'run', text: command.slice(0, activityText) };
+    }
+    default: return { kind: 'tool', text: name.slice(0, 60) };
+  }
+}
+
+/** Reads tool calls from one stream-json event. */
+export function streamActivities(event: unknown, cwd: string): WorkerActivity[] {
+  const message = event as { type?: unknown; message?: { content?: unknown } };
+  if (message?.type !== 'assistant' || !Array.isArray(message.message?.content)) return [];
+  return message.message.content.flatMap(block => {
+    const item = block as { type?: unknown; name?: unknown; input?: unknown };
+    const activity = item?.type === 'tool_use' ? describeTool(item.name, item.input, cwd) : undefined;
+    return activity ? [activity] : [];
+  });
 }
 
 function readResult(stdout: string): ResultMessage {
@@ -245,7 +301,10 @@ export function parseGateOutput(stdout: string): { verdict: 'pass' | 'changes'; 
   return { verdict: gate.verdict, reason: gate.reason.trim().slice(0, 1_000), costUsd: typeof message.total_cost_usd === 'number' ? message.total_cost_usd : 0 };
 }
 
-/** Runs Claude Code once in print mode under the given terminal profile and returns its stdout. */
+/**
+ * Runs Claude Code once in print mode under the given terminal profile. Events stream as JSON lines:
+ * tool calls feed `onActivity`, and the final result line is returned for the parse functions.
+ */
 export function runClaude(request: WorkerRequest, spawn: Spawn = spawnProcess): Promise<string> {
   const { executable, profile, cwd, settings, signal } = request;
   if (profile.provider !== 'claude') return Promise.reject(new Error('Headless workers need a Claude Code terminal account.'));
@@ -257,7 +316,8 @@ export function runClaude(request: WorkerRequest, spawn: Spawn = spawnProcess): 
       windowsScript ? ['/d', '/s', '/c', executable, ...args] : args, {
         cwd, env: workerEnvironment(profile), stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true
       });
-    let stdout = '';
+    let buffer = '';
+    let result = '';
     let stderr = '';
     let settled = false;
     const finish = (error?: Error) => {
@@ -266,7 +326,7 @@ export function runClaude(request: WorkerRequest, spawn: Spawn = spawnProcess): 
       clearTimeout(timer);
       signal?.removeEventListener('abort', abort);
       if (error) reject(error);
-      else resolve(stdout);
+      else resolve(result);
     };
     const stop = () => {
       if (child.exitCode === null && !child.killed) child.kill('SIGTERM');
@@ -280,9 +340,32 @@ export function runClaude(request: WorkerRequest, spawn: Spawn = spawnProcess): 
       finish(new Error(`The worker did not finish within ${Math.round(settings.timeoutMs / 60_000)} minutes.`));
     }, settings.timeoutMs);
     signal?.addEventListener('abort', abort, { once: true });
+    const line = (text: string) => {
+      const trimmed = text.trim();
+      if (!trimmed.startsWith('{')) return;
+      let event: { type?: unknown };
+      try {
+        event = JSON.parse(trimmed) as { type?: unknown };
+      } catch {
+        return;
+      }
+      if (event.type === 'result') result = trimmed;
+      else if (request.onActivity) {
+        for (const activity of streamActivities(event, cwd)) {
+          try {
+            request.onActivity(activity);
+          } catch {
+            // The activity feed is informational; never let it break the run.
+          }
+        }
+      }
+    };
     child.stdout?.setEncoding('utf8').on('data', (chunk: string) => {
-      stdout += chunk;
-      if (stdout.length > outputLimit) {
+      buffer += chunk;
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+      for (const text of lines) line(text);
+      if (buffer.length > outputLimit) {
         stop();
         finish(new Error('The worker output was too large.'));
       }
@@ -292,7 +375,9 @@ export function runClaude(request: WorkerRequest, spawn: Spawn = spawnProcess): 
     });
     child.on('error', error => finish(new Error(`Could not start Claude Code: ${error.message}`)));
     child.on('close', code => {
-      if (code === 0 || stdout.trim().startsWith('{')) return finish();
+      line(buffer);
+      buffer = '';
+      if (code === 0 || result) return finish();
       const detail = stderr.trim().split('\n').at(-1)?.slice(0, 300);
       finish(new Error(`Claude Code exited with code ${code}${detail ? `: ${detail}` : ''}. Sign in to the terminal account again if its session expired.`));
     });

@@ -1,12 +1,17 @@
 import { randomUUID } from 'node:crypto';
+import { join } from 'node:path';
 import type { Memento } from 'vscode';
 import { Accounts, type Account } from './accounts';
 import { chat } from './core';
 import { isRole, roles, SquadStore, type Role } from './squad';
 import { SquadCustomizations, type Skill } from './squad-customizations';
 import { SquadMemory } from './squad-memory';
-import { parseGateOutput, parsePlanOutput, parseWorkerOutput, type WorkerMode, type WorkerRequest, type WorkerResult, type WorkerSettings } from './squad-worker';
-import type { RunWorktree, Worktrees } from './squad-worktree';
+import { suggestRepository } from './squad-codegraph';
+import {
+  parseGateOutput, parsePlanOutput, parseWorkerOutput, type ActivityKind, type WorkerActivity, type WorkerMode, type WorkerRequest,
+  type WorkerResult, type WorkerSettings
+} from './squad-worker';
+import type { FileChange, RunWorktree, Worktrees } from './squad-worktree';
 import { terminalProfileId, type TerminalProfile } from './terminal-profiles';
 import { workflowBriefLimit, workflowOutputLimit, workflowStage, workflowStages, workflowText, type Workflow } from './workflow';
 
@@ -40,6 +45,9 @@ interface Plan {
   id: string;
   prompt: string;
   jobs: Job[];
+  /** Repository the plan most likely targets, relative to the workspace folder. */
+  repo?: string;
+  repos?: string[];
 }
 
 export interface RunSession {
@@ -77,6 +85,8 @@ export interface RunRecord {
   approver?: Approver;
   steps: RunStep[];
   repo?: string;
+  /** The repository the run targets, relative to the workspace folder. */
+  target?: string;
   path?: string;
   branch?: string;
   base?: string;
@@ -95,11 +105,22 @@ interface Thread {
   runs?: RunRecord[];
 }
 
+export interface LiveActivity {
+  role: Role;
+  profile: string;
+  since: number;
+  items: { kind: ActivityKind; text: string; time: number }[];
+  reads: number;
+  edits: number;
+  commands: number;
+}
+
 interface ActiveRun {
   controller: AbortController;
   signal: AbortSignal;
   entries: SquadChatEntry[];
   status: string;
+  live?: LiveActivity;
 }
 
 interface StartedRun {
@@ -117,8 +138,14 @@ export interface WorkerHost {
   folder(): string | undefined;
   settings(role: Role): WorkerSettings;
   run(request: WorkerRequest): Promise<string>;
-  worktrees: Pick<Worktrees, 'create' | 'commit' | 'remove'>;
+  worktrees: Pick<Worktrees, 'create' | 'commit' | 'remove' | 'changes' | 'changedFiles' | 'discard'>;
   prepare?(): Promise<void>;
+  /** Git repositories a run can target, relative to folder(); ['.'] when the folder is one. */
+  repositories?(): Promise<string[]>;
+  /** A CodeGraph excerpt relevant to the request, or undefined when unavailable. */
+  codeContext?(request: string, signal: AbortSignal): Promise<string | undefined>;
+  /** The folder holding a CodeGraph index workers may query, if enabled. */
+  codegraphRoot?(): Promise<string | undefined>;
 }
 
 const roleInstructions: Record<Role, string> = {
@@ -128,9 +155,9 @@ const roleInstructions: Record<Role, string> = {
   Tests: 'Propose tests with high-value cases and expected results.'
 };
 const workerInstructions: Record<WorkerRole, string> = {
-  Implement: 'Make the code changes for your task in this git worktree. Keep the change focused. Run the allowed build or test commands when useful.',
-  Review: 'Review the uncommitted changes in this worktree (git diff) against the task. Report concrete findings with file and line. Do not edit files.',
-  Tests: 'Add or update tests for the change in this worktree and run the allowed test commands. Report what passed and failed.'
+  Implement: 'Make the code changes for your task in this git worktree. Keep the change focused. When the task names an existing screen, module, or file as a model, read it first and mirror its structure and naming. Follow the repository instructions and skills. Run the allowed build or test commands when useful.',
+  Review: 'Review the changes in this worktree (git diff HEAD, and changed_files when given) against the task. Report concrete findings with file and line. Do not edit files.',
+  Tests: 'Add or update tests for the change in this worktree. Run only the tests that cover changed_files (the same module, screen, or domain) plus a type check scoped to them when available; run the whole suite only when shared code changed. Report what passed and failed.'
 };
 const textOnly = 'You are using a text API. You cannot access the workspace, edit files, or run commands. Do not claim that you did.';
 const headless = 'You are a headless Claude Code worker in xDev Squad. Nobody can answer questions during the run: decide reasonably, or report status "blocked" with what you need. Do not commit, push, or change git remotes; xDev commits the worktree for the user. Use available skills when they apply. Report through the required JSON fields and keep the summary short, because other agents read it.';
@@ -153,8 +180,11 @@ function workerText(result: WorkerResult): string {
   ].filter(Boolean).join('\n');
 }
 
+const liveItems = 8;
+
 export class SquadChat {
   private active?: ActiveRun;
+  private notifyTimer?: ReturnType<typeof setTimeout>;
   private workflowIssue?: { id: string; step: number; text: string };
   private writes = Promise.resolve();
   readonly customizations: SquadCustomizations;
@@ -180,9 +210,10 @@ export class SquadChat {
       workflow,
       workflowIssue: this.workflowIssue?.id === workflow?.id && this.workflowIssue?.step === workflow?.approved.length
         ? this.workflowIssue?.text : undefined,
-      plan: plan && { id: plan.id, jobs: plan.jobs },
+      plan: plan && { id: plan.id, jobs: plan.jobs, repo: plan.repo, repos: plan.repos },
       workers: Boolean(this.host),
       busy: Boolean(this.active),
+      live: this.active?.live,
       status: this.active?.status ?? (inFlight ? 'The previous run was interrupted. Send a new message to continue.' : '')
     };
   }
@@ -191,6 +222,8 @@ export class SquadChat {
     const plan = this.read().plan;
     return plan && {
       id: plan.id,
+      repo: plan.repo,
+      repos: plan.repos,
       jobs: plan.jobs.map(({ role, brief, profile, kind }) => ({ role, brief, profile, kind: kind ?? 'api' as AgentKind }))
     };
   }
@@ -229,12 +262,31 @@ export class SquadChat {
       state.entries.push({ author: 'You', text: message, to: role });
     }, async run => {
       const memory = this.memory.context();
+      let code: string | undefined;
+      let repositories: string[] = [];
+      if (role === 'Lead' && this.host) {
+        run.status = 'Lead is reading the code map…';
+        this.changed();
+        [code, repositories] = await Promise.all([
+          this.host.codeContext?.(prompt, run.signal).catch(() => undefined),
+          this.host.repositories?.().catch(() => []) ?? Promise.resolve([])
+        ]);
+        run.signal.throwIfAborted();
+        run.status = 'Lead is responding…';
+        this.changed();
+      }
+      const allowedCommands = this.host && [...workers.values()].some(candidate => candidate.kind === 'claude')
+        ? [...this.host.settings('Implement').allowedCommands] : undefined;
       const capabilities = [...workers].map(([worker, candidate]) => candidate.kind === 'claude'
         ? `${worker} (Claude Code worker: reads the repository, ${worker === 'Review' ? 'reviews the diff' : 'edits files and runs allowed commands'} in a git worktree)`
         : `${worker} (text API: proposes text only)`);
       const leadSystem = `${roleInstructions.Lead} ${agent.kind === 'api' ? textOnly : 'Plan only; do not change files.'} Available worker roles: ${capabilities.join(', ') || 'none'}.
-Return only a JSON object with a "reply" string and a "tasks" array. Each task has a "role" from the available worker roles and a "brief" string. Use each role at most once. Use an empty tasks array for questions, summaries, or when no workers are available. Write briefs that a worker can act on without the chat history. Reply in the user's language. The user reviews proposed tasks in the xDev Squad panel and approves them with a button, then starts each step there, so keep the reply to a short summary of the plan and do not ask the user to reply to start it.`;
-      const content = JSON.stringify({ history, request: prompt, memory: memory.length ? memory : undefined });
+Return only a JSON object with a "reply" string and a "tasks" array. Each task has a "role" from the available worker roles and a "brief" string. Use each role at most once. Use an empty tasks array for questions, summaries, or when no workers are available. Write briefs that a worker can act on without the chat history. Reply in the user's language. The user reviews proposed tasks in the xDev Squad panel and approves them with a button, then starts each step there, so keep the reply to a short summary of the plan and do not ask the user to reply to start it.${repositories.length > 1 ? ' Workers run in one git repository chosen from "repositories": name it in the reply and at the start of each brief, and write file paths relative to that repository\'s root.' : ''}${allowedCommands ? ' Claude Code workers may only run "allowed_commands" and read-only git; do not ask them to run anything else.' : ''}${code ? ' "code" is a CodeGraph excerpt of the relevant symbols and call paths: name concrete files and symbols in each brief so workers do not have to search.' : ''}`;
+      const content = JSON.stringify({
+        history, request: prompt, memory: memory.length ? memory : undefined, code, allowed_commands: allowedCommands,
+        repositories: repositories.length > 1 ? repositories.slice(0, 80) : undefined
+      });
+      const planned = { repos: repositories.length > 1 ? repositories : undefined, code };
 
       if (agent.kind === 'claude') {
         await this.host?.prepare?.();
@@ -242,13 +294,13 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
           executable: await this.host!.executable(), profile: agent.profile, cwd: this.host!.folder()!, role,
           mode: role === 'Lead' ? 'plan' : 'ask', prompt: content,
           system: role === 'Lead' ? leadSystem : `You are ${role} in xDev Squad. Answer the question using the repository. Do not edit files. Reply in the user's language.`,
-          settings: this.host!.settings(role), signal: run.signal
+          settings: this.host!.settings(role), signal: run.signal, onActivity: this.track(run, role, agent.name)
         });
         run.signal.throwIfAborted();
         if (role === 'Lead') {
           const report = parsePlanOutput(stdout);
           const plan = parsePlan(JSON.stringify(report), workers);
-          await this.recordPlan(role, agent, prompt, plan, report.reply, run, report.costUsd);
+          await this.recordPlan(role, agent, prompt, plan, report.reply, run, report.costUsd, planned);
         } else {
           const result = parseWorkerOutput(stdout);
           await this.memory.add(result.memory, role);
@@ -262,17 +314,22 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
         { role: 'user', content }
       ], { signal: run.signal });
       run.signal.throwIfAborted();
-      if (role === 'Lead') await this.recordPlan(role, agent, prompt, parsePlan(answer, workers), answer, run);
+      if (role === 'Lead') await this.recordPlan(role, agent, prompt, parsePlan(answer, workers), answer, run, 0, planned);
       else await this.write(state => state.entries.push(this.reply(role, agent, answer)), run);
     });
   }
 
   private recordPlan(
-    role: Role, agent: Agent, prompt: string, plan: ReturnType<typeof parsePlan>, fallback: string, run: ActiveRun, cost = 0
+    role: Role, agent: Agent, prompt: string, plan: ReturnType<typeof parsePlan>, fallback: string, run: ActiveRun, cost = 0,
+    planned: { repos?: string[]; code?: string } = {}
   ): Promise<void> {
+    run.live = undefined;
     return this.write(state => {
       state.entries.push(this.reply(role, agent, plan?.reply ?? fallback, cost));
-      if (plan?.jobs.length) state.plan = { id: randomUUID(), prompt, jobs: plan.jobs };
+      if (plan?.jobs.length) {
+        const repo = planned.repos && suggestRepository(planned.repos, [plan.reply, ...plan.jobs.map(job => job.brief), planned.code ?? '']);
+        state.plan = { id: randomUUID(), prompt, jobs: plan.jobs, repo, repos: planned.repos };
+      }
       if (!plan || plan.invalid) {
         state.entries.push({ author: 'Squad', text: 'Lead did not return a valid plan. Ask again to generate tasks.' });
       }
@@ -283,7 +340,7 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
    * Approving a plan only prepares a run: its steps and, for Claude Code steps, a git worktree.
    * No agent starts until the user runs a step. Each step pauses the run when it ends.
    */
-  async approve(id: unknown, signal?: AbortSignal, approverInput: unknown = 'human'): Promise<StartedRun> {
+  async approve(id: unknown, signal?: AbortSignal, approverInput: unknown = 'human', repoInput?: unknown): Promise<StartedRun> {
     this.requireIdle();
     const plan = this.requirePlan(id);
     const approver = approvers.find(candidate => candidate === approverInput);
@@ -294,6 +351,14 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
     const headlessJobs = plan.jobs.some(job => job.kind === 'claude');
     const folder = this.host?.folder();
     if (headlessJobs && (!this.host || !folder)) throw new Error('Open a workspace folder to run Claude Code workers.');
+    let target: string | undefined;
+    if (headlessJobs && this.host?.repositories) {
+      const repositories = await this.host.repositories();
+      const chosen = typeof repoInput === 'string' && repoInput ? repoInput : plan.repo ?? (repositories.length === 1 ? repositories[0] : undefined);
+      if (!repositories.length) throw new Error('Claude Code workers need a git repository in this workspace.');
+      if (!chosen || !repositories.includes(chosen)) throw new Error('Choose the repository this run works in.');
+      target = chosen;
+    }
 
     return this.launch('Preparing the run…', signal, state => {
       if (state.plan?.id !== plan.id) throw new Error('This plan is no longer available.');
@@ -306,10 +371,10 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
         run.status = 'Preparing a git worktree…';
         this.changed();
         await this.host!.prepare?.();
-        worktree = await this.host!.worktrees.create(folder!, runId);
+        worktree = await this.host!.worktrees.create(target && target !== '.' ? join(folder!, target) : folder!, runId);
       }
       const record: RunRecord = {
-        id: runId, request: plan.prompt, prompt: shorten(plan.prompt, 500), time: Date.now(), status: 'active', approver, costUsd: 0,
+        id: runId, request: plan.prompt, prompt: shorten(plan.prompt, 500), time: Date.now(), status: 'active', approver, costUsd: 0, target,
         sessions: [], steps: plan.jobs.map(job => ({ ...job, status: 'pending' })), ...worktree
       };
       await this.write(state => {
@@ -411,13 +476,21 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
     try {
       if (agent.kind === 'claude') {
         await this.host!.prepare?.();
+        const changed = step.role !== 'Implement' && record.repo && record.branch && record.base
+          ? await this.host!.worktrees.changedFiles?.(record as RunWorktree).catch(() => []) ?? [] : [];
+        const graph = await this.host!.codegraphRoot?.().catch(() => undefined);
+        const settings = this.host!.settings(step.role);
         const stdout = await this.host!.run({
           executable: await this.host!.executable(), profile: agent.profile, cwd: record.path!, role: step.role, mode: 'work',
-          prompt: JSON.stringify({ request: record.request, task: brief, previous: context.previous.length ? context.previous : undefined, memory: context.memory }),
-          system: `${headless} You are ${step.role}. ${workerInstructions[step.role]} Reply in the user's language.`,
-          settings: this.host!.settings(step.role), signal: run.signal
+          prompt: JSON.stringify({
+            request: record.request, task: brief, repository: record.target && record.target !== '.' ? record.target : undefined,
+            previous: context.previous.length ? context.previous : undefined, changed_files: changed.length ? changed : undefined, memory: context.memory
+          }),
+          system: `${headless} You are ${step.role}. ${workerInstructions[step.role]}${record.target && record.target !== '.' ? ` Your working directory is the root of the repository "${record.target}"; read a leading "${record.target}/" in a path as this directory.` : ''}${graph ? ` A CodeGraph index of the workspace is at ${graph}: run \`codegraph explore -p ${graph} "<symbols or question>"\` to locate code before searching files. Its paths point to the main checkout; edit the matching files in this worktree.` : ''} Reply in the user's language.`,
+          settings: graph ? { ...settings, codegraph: true } : settings, signal: run.signal, onActivity: this.track(run, step.role, agent.name)
         });
         run.signal.throwIfAborted();
+        run.live = undefined;
         const result = parseWorkerOutput(stdout);
         await this.memory.add(result.memory, step.role);
         await this.updateRun(id, (saved, state) => {
@@ -450,6 +523,7 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
       }, run);
       return 'done';
     } catch (error) {
+      run.live = undefined;
       const detail = run.signal.aborted ? 'Step stopped.' : error instanceof Error ? error.message : 'The step failed.';
       await this.updateRun(id, saved => { saved.steps[index].status = 'failed'; }).catch(() => undefined);
       throw new Error(`${step.role}: ${detail}`, { cause: error });
@@ -482,7 +556,7 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
           executable: await this.host!.executable(), profile: reviewer.profile, cwd: record.path ?? this.host!.folder()!, role: 'Lead', mode: 'gate',
           prompt: JSON.stringify(evidence),
           system: `You review one step of an xDev Squad run. ${record.path ? 'Inspect the uncommitted changes with git diff. ' : ''}Do not edit files. ${criteria}`,
-          settings: this.host!.settings('Lead'), signal: run.signal
+          settings: this.host!.settings('Lead'), signal: run.signal, onActivity: this.track(run, 'Lead', reviewer.name)
         });
         const verdict = parseGateOutput(stdout);
         gate = { verdict: verdict.verdict, reason: verdict.reason, by: reviewer.name };
@@ -495,9 +569,11 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
         gate = { ...readGate(answer), by: reviewer.name };
       }
     } catch (error) {
+      run.live = undefined;
       run.signal.throwIfAborted();
       gate = { verdict: 'changes', reason: `The AI review failed: ${error instanceof Error ? error.message : 'unknown error'}`, by: reviewer.name };
     }
+    run.live = undefined;
     run.signal.throwIfAborted();
     await this.updateRun(id, (saved, state) => {
       saved.steps[index].gate = gate;
@@ -593,6 +669,32 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
             : `No file changes on ${saved.branch}${cost ? ` · ${cost}` : ''}.`;
       state.entries.push({ author: 'Squad', run: id, text });
     }, run);
+  }
+
+  private worktreeRun(id: unknown): RunRecord & RunWorktree {
+    const record = this.run(id);
+    if (!record) throw new Error('This run is no longer available.');
+    if (!record.repo || !record.path || !record.branch || !record.base || !this.host) throw new Error('This run has no git worktree.');
+    return record as RunRecord & RunWorktree;
+  }
+
+  /** The run's file changes against its base commit, including work not yet committed. */
+  changes(id: unknown): Promise<FileChange[]> {
+    return this.host!.worktrees.changes(this.worktreeRun(id));
+  }
+
+  /** Reverts one file of a run. A finished run gets a new local commit so merging matches what you see. */
+  async discardFile(id: unknown, file: unknown): Promise<void> {
+    this.requireIdle();
+    const record = this.worktreeRun(id);
+    if (typeof file !== 'string' || !file || file.length > 1_000) throw new Error('Choose a changed file.');
+    await this.host!.worktrees.discard(record, file);
+    let changes: Awaited<ReturnType<WorkerHost['worktrees']['commit']>> | undefined;
+    if (record.status !== 'active' && record.commit) changes = await this.host!.worktrees.commit(record, `xDev Squad: discard ${file}`);
+    await this.updateRun(record.id, (saved, state) => {
+      if (changes) Object.assign(saved, { commit: changes.files ? changes.commit : undefined, stat: changes.stat, files: changes.files });
+      state.entries.push({ author: 'Squad', run: record.id, text: `Discarded the changes to ${file}${changes ? ` and committed the result to ${saved.branch}` : ''}.` });
+    });
   }
 
   async removeRun(id: unknown): Promise<void> {
@@ -770,6 +872,28 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
     const label = agent.kind === 'claude' ? `${agent.name} · Claude Code` : agent.name;
     const price = formatCost(cost);
     return { author: role, profile: price ? `${label} · ${price}` : label, text: shorten(answer, responseLimit) };
+  }
+
+  /** Feeds a worker's tool calls into the live activity shown while it runs. */
+  private track(run: ActiveRun, role: Role, profile: string): (activity: WorkerActivity) => void {
+    run.live = { role, profile, since: Date.now(), items: [], reads: 0, edits: 0, commands: 0 };
+    const live = run.live;
+    return activity => {
+      if (run.live !== live) return;
+      live.items = [...live.items, { ...activity, time: Date.now() }].slice(-liveItems);
+      if (activity.kind === 'read' || activity.kind === 'search') live.reads++;
+      else if (activity.kind === 'edit') live.edits++;
+      else if (activity.kind === 'run') live.commands++;
+      this.notifySoon();
+    };
+  }
+
+  private notifySoon(): void {
+    if (this.notifyTimer) return;
+    this.notifyTimer = setTimeout(() => {
+      this.notifyTimer = undefined;
+      this.changed();
+    }, 250);
   }
 
   private read(): Thread {

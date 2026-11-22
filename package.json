@@ -240,6 +240,11 @@
           "default": true,
           "markdownDescription": "Copy enabled Squad skills into each Claude Code account as `xdev-*` user skills, so workers load them on demand. Skills you installed yourself are never changed."
         },
+        "xdevAi.squad.codegraph": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "When the workspace folder has a CodeGraph index (`.codegraph/`), give Lead an excerpt of the relevant code before planning and let workers query it with `codegraph explore`. The lookup stops after 20 seconds."
+        },
         "xdevAi.squad.syncFolder": {
           "type": "string",
           "default": "",

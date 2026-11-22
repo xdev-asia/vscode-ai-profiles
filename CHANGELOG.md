@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Team board at the top of Squad Chat: each role's account and live state, with the working role highlighted.
+- Live activity while a headless step runs: files read and edited, commands run, counts, and a timer. A notice appears when a step ends.
+- Review a run's changes inside the panel: changed files with added and removed lines, a colored patch, **Open diff** in the editor, and **Discard** for one file.
+- Workspaces with several git repositories: choose the repository for a run when approving its plan. xDev suggests the one the plan names.
+- When the workspace has a CodeGraph index, Lead plans with an excerpt of the relevant code, and workers may query it. Setting: `xdevAi.squad.codegraph`.
+- Review and Tests receive the run's changed files, and Tests runs only the tests that cover them.
+
+### Changed
+
+- Headless workers stream their progress (`--output-format stream-json`).
+
 ## 0.8.0 - 2026-11-22
 
 ### Added
