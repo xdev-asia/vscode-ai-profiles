@@ -122,6 +122,14 @@ test('stream events become activity, and the result line is returned', async () 
   assert.deepEqual(describeTool('Grep', { pattern: 'buildNoiDung', path: '/repo/wt/src' }, '/repo/wt'), { kind: 'search', text: 'buildNoiDung in src' });
   assert.equal(describeTool('StructuredOutput', {}, '/repo/wt'), undefined);
   assert.deepEqual(streamActivities({ type: 'user', message: { content: [] } }, '/'), []);
+  const calls = new Map();
+  streamActivities({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'curl x' } }, { type: 'tool_use', id: 't2', name: 'Bash', input: { command: 'npm test' } }] } }, '/', calls);
+  assert.deepEqual(streamActivities({ type: 'user', message: { content: [
+    { type: 'tool_result', tool_use_id: 't1', is_error: true, content: "Claude requested permissions to use Bash, but you haven't granted it yet." },
+    { type: 'tool_result', tool_use_id: 't2', is_error: true, content: 'Exit code 1' },
+    { type: 'tool_result', tool_use_id: 't1', is_error: true, content: 'This Bash command contains multiple operations. The following part requires approval: ls -la /tmp' },
+    { type: 'tool_result', tool_use_id: 't3', is_error: true, content: 'unknown call' }
+  ] } }, '/', calls), [{ kind: 'denied', text: 'curl x' }, { kind: 'failed', text: 'npm test' }, { kind: 'denied', text: 'curl x' }]);
 
   const events = [
     { type: 'system', subtype: 'init' },

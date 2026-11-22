@@ -359,3 +359,8 @@ button.accent:hover:not(:disabled) { background: var(--vscode-button-hoverBackgr
 @media (prefers-reduced-motion: reduce) {
   .member .avatar, .live .pulse, .live-list li.latest, #chat-messages article.fresh, .toast.show { animation: none !important; }
 }
+
+/* Plan briefs stay short so Approve stays in view; click one to read it all. */
+#chat-jobs p.brief { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; cursor: pointer; }
+#chat-jobs p.brief.open { display: block; }
+.kind.denied, .kind.failed { color: var(--warning); border-color: currentColor; }

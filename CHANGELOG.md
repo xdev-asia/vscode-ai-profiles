@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.0 - 2026-11-22
 
 ### Added
 
@@ -10,10 +10,14 @@
 - Workspaces with several git repositories: choose the repository for a run when approving its plan. xDev suggests the one the plan names.
 - When the workspace has a CodeGraph index, Lead plans with an excerpt of the relevant code, and workers may query it. Setting: `xdevAi.squad.codegraph`.
 - Review and Tests receive the run's changed files, and Tests runs only the tests that cover them.
+- **xDev AI: Clean Up Squad Worktrees** (also in the Squad view menu) lists Squad worktrees that no run in this window tracks, such as runs from another window. You pick which to remove; a branch is deleted only when it is merged.
+- The live feed marks commands that were blocked by the allowed list or failed.
 
 ### Changed
 
 - Headless workers stream their progress (`--output-format stream-json`).
+- When CodeGraph does not answer within 20 seconds, Squad plans without it for 10 minutes instead of waiting on every message.
+- Long task briefs in a plan are collapsed to three lines; click one to read it all.
 
 ## 0.8.0 - 2026-11-22
 

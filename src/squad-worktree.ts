@@ -24,6 +24,15 @@ export interface FileChange {
   patch: string;
 }
 
+export interface LeftoverWorktree {
+  repo: string;
+  path: string;
+  branch: string;
+  merged: boolean;
+  /** Last commit time on the branch, in milliseconds. */
+  changed: number;
+}
+
 export type Git = (args: readonly string[], cwd: string) => Promise<string>;
 
 const patchLimit = 12_000;
@@ -128,6 +137,32 @@ export class Worktrees {
     const existed = await this.run(['cat-file', '-e', `${worktree.base}:${file}`], worktree.path).then(() => true, () => false);
     if (existed) await this.run(['checkout', worktree.base, '--', file], worktree.path);
     else await this.run(['rm', '-f', '-q', '--', file], worktree.path);
+  }
+
+  /**
+   * Squad worktrees of a repository that no run in this window knows about, for example from another
+   * window or a cleared workspace state. Each entry says whether its branch is merged into HEAD.
+   */
+  async leftovers(repo: string, known: ReadonlySet<string>): Promise<LeftoverWorktree[]> {
+    const listing = await this.run(['worktree', 'list', '--porcelain'], repo).catch(() => '');
+    const found: LeftoverWorktree[] = [];
+    for (const block of listing.split(/\n\n+/)) {
+      const path = /^worktree (.+)$/m.exec(block)?.[1];
+      const branch = /^branch refs\/heads\/(xdev\/squad\/[\w-]+)$/m.exec(block)?.[1];
+      if (!path || !branch || known.has(path)) continue;
+      const merged = await this.run(['merge-base', '--is-ancestor', branch, 'HEAD'], repo).then(() => true, () => false);
+      const changed = Number((await this.run(['log', '-1', '--format=%ct', branch], repo).catch(() => '0')).trim()) * 1000;
+      found.push({ repo, path, branch, merged, changed });
+    }
+    return found;
+  }
+
+  /** Removes a leftover worktree. Its branch is deleted only when merged; otherwise it is kept and reported. */
+  async clean(worktree: LeftoverWorktree): Promise<{ branchKept: boolean }> {
+    await this.run(['worktree', 'remove', '--force', worktree.path], worktree.repo).catch(() => undefined);
+    await this.run(['worktree', 'prune'], worktree.repo).catch(() => undefined);
+    const deleted = await this.run(['branch', '-d', worktree.branch], worktree.repo).then(() => true, () => false);
+    return { branchKept: !deleted };
   }
 
   async remove(worktree: Pick<RunWorktree, 'repo' | 'path' | 'branch'>): Promise<void> {

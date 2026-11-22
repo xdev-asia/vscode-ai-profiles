@@ -9,6 +9,7 @@ function mountSquadChat(vscode, roles) {
   let transcript;
 
   let lastState;
+  const openBriefs = new Set();
   function render(state) {
     lastState = state;
     snapshot = state.teamChat;
@@ -42,6 +43,7 @@ function mountSquadChat(vscode, roles) {
 
     const { plan, status, busy } = snapshot;
     byId('chat-plan').hidden = !plan;
+    if (!plan) openBriefs.clear();
     byId('chat-jobs').replaceChildren(...(plan?.jobs ?? []).map(job => {
       const row = document.createElement('li');
       const label = document.createElement('strong');
@@ -53,6 +55,12 @@ function mountSquadChat(vscode, roles) {
         : 'Text API · no file access';
       const brief = document.createElement('p');
       brief.textContent = job.brief;
+      brief.className = openBriefs.has(job.role) ? 'brief open' : 'brief';
+      brief.title = 'Click to show or hide the full brief';
+      brief.addEventListener('click', () => {
+        if (openBriefs.has(job.role)) openBriefs.delete(job.role); else openBriefs.add(job.role);
+        brief.classList.toggle('open');
+      });
       row.append(label, badge, brief);
       return row;
     }));
@@ -147,7 +155,7 @@ function mountSquadChat(vscode, roles) {
     }));
   }
 
-  const kindLabel = { read: 'Read', search: 'Search', edit: 'Edit', run: 'Run', tool: 'Tool' };
+  const kindLabel = { read: 'Read', search: 'Search', edit: 'Edit', run: 'Run', tool: 'Tool', denied: 'Blocked', failed: 'Failed' };
   let liveKey;
   let liveSince;
   function elapsed(since) {
@@ -171,7 +179,8 @@ function mountSquadChat(vscode, roles) {
     const counts = [
       live.reads && `${live.reads} read${live.reads === 1 ? '' : 's'}`,
       live.edits && `${live.edits} edit${live.edits === 1 ? '' : 's'}`,
-      live.commands && `${live.commands} command${live.commands === 1 ? '' : 's'}`
+      live.commands && `${live.commands} command${live.commands === 1 ? '' : 's'}`,
+      live.problems && `${live.problems} blocked or failed`
     ].filter(Boolean).join(' · ');
     const list = element('ol', undefined, 'live-list');
     for (const [position, item] of live.items.entries()) {

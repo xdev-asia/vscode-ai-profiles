@@ -388,3 +388,35 @@ test('worktree changes list staged and new files, and discard restores or delete
   await assert.rejects(readFile(join(tree.path, 'b.txt')));
   assert.deepEqual(await worktrees.changes(tree), []);
 });
+
+test('leftover Squad worktrees are found and cleaned, keeping unmerged branches', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'xdev-leftover-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const repo = join(root, 'repo');
+  const run = (...args) => execFileSync('git', args, { cwd: repo, encoding: 'utf8' });
+  execFileSync('git', ['init', '-q', '-b', 'main', repo]);
+  run('config', 'user.email', 'dev@example.com');
+  run('config', 'user.name', 'Dev');
+  await writeFile(join(repo, 'a.txt'), 'one\n');
+  run('add', '.');
+  run('commit', '-q', '-m', 'init');
+  const worktrees = new Worktrees(join(root, 'trees'));
+  const merged = await worktrees.create(repo, 'aaaaaaaa-0000-0000-0000-000000000000');
+  const unmerged = await worktrees.create(repo, 'bbbbbbbb-0000-0000-0000-000000000000');
+  const tracked = await worktrees.create(repo, 'cccccccc-0000-0000-0000-000000000000');
+  await writeFile(join(unmerged.path, 'b.txt'), 'new\n');
+  await worktrees.commit(unmerged, 'work');
+  run('worktree', 'add', '-q', '-b', 'feature/other', join(root, 'other'));
+
+  const found = await worktrees.leftovers(repo, new Set([tracked.path]));
+  assert.deepEqual(found.map(item => [item.branch, item.merged]).sort(), [['xdev/squad/aaaaaaaa', true], ['xdev/squad/bbbbbbbb', false]]);
+  assert.ok(found.every(item => item.changed > 0));
+  for (const item of found) await worktrees.clean(item);
+  const branches = run('branch', '--list');
+  assert.doesNotMatch(branches, /aaaaaaaa/, 'merged branch deleted');
+  assert.match(branches, /bbbbbbbb/, 'unmerged branch kept');
+  assert.match(branches, /cccccccc/, 'tracked run untouched');
+  assert.match(branches, /feature\/other/, 'other worktrees untouched');
+  assert.deepEqual((await worktrees.leftovers(repo, new Set([tracked.path]))).length, 0);
+  void merged;
+});

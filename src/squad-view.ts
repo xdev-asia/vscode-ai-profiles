@@ -54,6 +54,13 @@ export function registerSquad(
     vscode.commands.registerCommand('xdevAi.squad.customizations', () => view.open('customizations')),
     vscode.commands.registerCommand('xdevAi.squad.memory', () => view.open('memory')),
     vscode.commands.registerCommand('xdevAi.squad.syncSkills', () => view.syncFolder()),
+    vscode.commands.registerCommand('xdevAi.squad.cleanWorktrees', async () => {
+      try {
+        await view.cleanWorktrees();
+      } catch (error) {
+        void vscode.window.showErrorMessage(error instanceof Error ? error.message : 'Could not clean up Squad worktrees.');
+      }
+    }),
     vscode.workspace.onDidChangeConfiguration(event => {
       if (event.affectsConfiguration('xdevAi.squad')) void view.refresh();
     }),
@@ -98,12 +105,20 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
       folder: workspaceFolder,
       settings: workerSettings,
       run: request => runClaude(request),
-      worktrees: new Worktrees(join(storage.fsPath, 'squad-worktrees')),
+      worktrees: this.worktrees = new Worktrees(join(storage.fsPath, 'squad-worktrees')),
       prepare: async () => { await this.syncProfiles(); },
       repositories: () => this.repositories(),
       codeContext: async (request, signal) => {
         const folder = workspaceFolder();
-        return folder && squadSetting('codegraph', true) ? exploreCode(folder, request, { signal }) : undefined;
+        if (!folder || !squadSetting('codegraph', true) || Date.now() < this.codegraphPausedUntil) return undefined;
+        const started = Date.now();
+        const text = await exploreCode(folder, request, { signal });
+        if (!text && !signal.aborted && Date.now() - started > 15_000) {
+          // A busy or locked index would otherwise delay every message by the full timeout.
+          this.codegraphPausedUntil = Date.now() + 10 * 60_000;
+          void vscode.window.showWarningMessage('CodeGraph did not answer within 20 seconds. Squad plans without it for the next 10 minutes. Check the index with "codegraph status".');
+        }
+        return text;
       },
       codegraphRoot: async () => {
         const folder = workspaceFolder();
@@ -114,6 +129,39 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
   }
 
   private repositoryCache?: { folder: string; time: number; list: Promise<string[]> };
+  private codegraphPausedUntil = 0;
+  private readonly worktrees: Worktrees;
+
+  /**
+   * Lists Squad worktrees in the workspace's repositories that no run in this window tracks, lets the user
+   * pick which to remove, and deletes a branch only when it is merged.
+   */
+  async cleanWorktrees(): Promise<void> {
+    const folder = workspaceFolder();
+    if (!folder) throw new Error('Open a workspace folder first.');
+    const known = new Set(this.teamChat.snapshot().runs.flatMap(run => run.path ? [run.path] : []));
+    const repos = [...new Set(await Promise.all((await this.repositories()).map(repo => git(['rev-parse', '--show-toplevel'], repo === '.' ? folder : join(folder, repo)).then(top => top.trim(), () => ''))))].filter(Boolean);
+    const leftovers = (await Promise.all(repos.map(repo => this.worktrees.leftovers(repo, known)))).flat();
+    if (!leftovers.length) {
+      void vscode.window.showInformationMessage('No leftover Squad worktrees in this workspace.');
+      return;
+    }
+    const day = 86_400_000;
+    const picked = await vscode.window.showQuickPick(leftovers.map(item => ({
+      label: item.branch,
+      description: relative(folder, item.repo) || '.',
+      detail: `${item.merged ? 'Merged' : 'Not merged: the branch is kept'} · last commit ${item.changed ? `${Math.max(0, Math.round((Date.now() - item.changed) / day))} days ago` : 'unknown'} · ${item.path}`,
+      picked: item.merged || Date.now() - item.changed > day,
+      item
+    })), {
+      canPickMany: true, title: 'Remove leftover Squad worktrees',
+      placeHolder: 'Uncommitted files in a removed worktree are deleted. Another window may still use a recent one.'
+    });
+    if (!picked?.length) return;
+    const kept: string[] = [];
+    for (const { item } of picked) if ((await this.worktrees.clean(item)).branchKept) kept.push(item.branch);
+    void vscode.window.showInformationMessage(`Removed ${picked.length} worktree${picked.length === 1 ? '' : 's'}.${kept.length ? ` Kept unmerged branch${kept.length === 1 ? '' : 'es'}: ${kept.join(', ')}.` : ''}`);
+  }
 
   /** Git repositories in the workspace folder, cached for a minute because a large workspace is slow to scan. */
   repositories(): Promise<string[]> {

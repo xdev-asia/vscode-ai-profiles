@@ -113,6 +113,7 @@ export interface LiveActivity {
   reads: number;
   edits: number;
   commands: number;
+  problems?: number;
 }
 
 interface ActiveRun {
@@ -884,6 +885,7 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
       if (activity.kind === 'read' || activity.kind === 'search') live.reads++;
       else if (activity.kind === 'edit') live.edits++;
       else if (activity.kind === 'run') live.commands++;
+      else if (activity.kind === 'denied' || activity.kind === 'failed') live.problems = (live.problems ?? 0) + 1;
       this.notifySoon();
     };
   }

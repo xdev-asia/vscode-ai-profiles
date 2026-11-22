@@ -36,7 +36,7 @@ export interface WorkerSettings {
   codegraph?: boolean;
 }
 
-export type ActivityKind = 'read' | 'search' | 'edit' | 'run' | 'tool';
+export type ActivityKind = 'read' | 'search' | 'edit' | 'run' | 'tool' | 'denied' | 'failed';
 
 export interface WorkerActivity {
   kind: ActivityKind;
@@ -209,14 +209,30 @@ export function describeTool(name: unknown, input: unknown, cwd: string): Worker
   }
 }
 
-/** Reads tool calls from one stream-json event. */
-export function streamActivities(event: unknown, cwd: string): WorkerActivity[] {
+/**
+ * Reads tool calls from one stream-json event. `calls` remembers each call by id so a tool result that
+ * failed or was denied can be reported against the call it belongs to.
+ */
+export function streamActivities(event: unknown, cwd: string, calls = new Map<string, WorkerActivity>()): WorkerActivity[] {
   const message = event as { type?: unknown; message?: { content?: unknown } };
-  if (message?.type !== 'assistant' || !Array.isArray(message.message?.content)) return [];
+  if (!Array.isArray(message?.message?.content)) return [];
+  if (message.type === 'assistant') {
+    return message.message.content.flatMap(block => {
+      const item = block as { type?: unknown; id?: unknown; name?: unknown; input?: unknown };
+      const activity = item?.type === 'tool_use' ? describeTool(item.name, item.input, cwd) : undefined;
+      if (activity && typeof item.id === 'string') calls.set(item.id, activity);
+      return activity ? [activity] : [];
+    });
+  }
+  if (message.type !== 'user') return [];
   return message.message.content.flatMap(block => {
-    const item = block as { type?: unknown; name?: unknown; input?: unknown };
-    const activity = item?.type === 'tool_use' ? describeTool(item.name, item.input, cwd) : undefined;
-    return activity ? [activity] : [];
+    const item = block as { type?: unknown; tool_use_id?: unknown; is_error?: unknown; content?: unknown };
+    if (item?.type !== 'tool_result' || item.is_error !== true || typeof item.tool_use_id !== 'string') return [];
+    const call = calls.get(item.tool_use_id);
+    if (!call) return [];
+    const detail = typeof item.content === 'string' ? item.content : JSON.stringify(item.content ?? '');
+    const denied = /permission|not allowed|denied|haven't granted|requires approval/i.test(detail);
+    return [{ kind: denied ? 'denied' : 'failed', text: call.text } satisfies WorkerActivity];
   });
 }
 
@@ -340,6 +356,7 @@ export function runClaude(request: WorkerRequest, spawn: Spawn = spawnProcess): 
       finish(new Error(`The worker did not finish within ${Math.round(settings.timeoutMs / 60_000)} minutes.`));
     }, settings.timeoutMs);
     signal?.addEventListener('abort', abort, { once: true });
+    const calls = new Map<string, WorkerActivity>();
     const line = (text: string) => {
       const trimmed = text.trim();
       if (!trimmed.startsWith('{')) return;
@@ -351,7 +368,7 @@ export function runClaude(request: WorkerRequest, spawn: Spawn = spawnProcess): 
       }
       if (event.type === 'result') result = trimmed;
       else if (request.onActivity) {
-        for (const activity of streamActivities(event, cwd)) {
+        for (const activity of streamActivities(event, cwd, calls)) {
           try {
             request.onActivity(activity);
           } catch {

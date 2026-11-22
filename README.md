@@ -121,6 +121,8 @@ Assign a **Claude Code** terminal account (instead of an API profile) to a role 
 - **Repository instructions.** Workers run inside the chosen repository's worktree, so Claude Code loads that repository's `CLAUDE.md` and `.claude/skills`. When a task names an existing screen or file as a model, Implement reads it first and mirrors its structure.
 - **Focused tests.** Review and Tests receive the run's changed files. Tests runs only the tests that cover them, and the whole suite only when shared code changed. Add your test commands, such as `npx vitest run`, to `xdevAi.squad.workerAllowedCommands`.
 
+**Clean up.** Each window keeps its own run list, so runs started in another window do not appear here. Run **xDev AI: Clean Up Squad Worktrees** from the Squad view menu to list leftover `xdev/squad/*` worktrees, pick the ones to remove, and delete their branches when merged. Unmerged branches are kept.
+
 A step that reports **blocked** or fails waits for you. You can run it again with a new brief, open it in a terminal, or skip it. Headless steps deny commands outside the allowed list without prompting and list them in the chat. Each role always uses the account you assigned; xDev never switches accounts by itself.
 
 **Let AI approve steps.** Before approving a plan, choose **Who approves each step** (default from `xdevAi.squad.approver`):
