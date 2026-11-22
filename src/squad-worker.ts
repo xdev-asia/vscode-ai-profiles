@@ -24,7 +24,7 @@ export interface WorkerResult extends WorkerReport {
 
 export interface PlanReport {
   reply: string;
-  tasks: { role: string; brief: string }[];
+  tasks: { role: string; brief: string; repo?: string }[];
 }
 
 export interface WorkerSettings {
@@ -81,12 +81,17 @@ const reportSchema = {
 const planSchema = {
   type: 'object',
   properties: {
-    reply: { type: 'string' },
+    reply: { type: 'string', description: 'A short summary of the plan for the user, at most 80 words, without labels or disclaimers.' },
     tasks: {
       type: 'array',
+      maxItems: 8,
       items: {
         type: 'object',
-        properties: { role: { type: 'string' }, brief: { type: 'string' } },
+        properties: {
+          role: { type: 'string' },
+          brief: { type: 'string' },
+          repo: { type: 'string', description: 'The repository from "repositories" this task works in. Empty when there is only one.' }
+        },
         required: ['role', 'brief']
       }
     }
@@ -300,7 +305,8 @@ export function parsePlanOutput(stdout: string): PlanReport & { costUsd: number 
     reply: plan.reply,
     tasks: plan.tasks.map(task => ({
       role: typeof task?.role === 'string' ? task.role : '',
-      brief: typeof task?.brief === 'string' ? task.brief : ''
+      brief: typeof task?.brief === 'string' ? task.brief : '',
+      ...(typeof task?.repo === 'string' && task.repo.trim() ? { repo: task.repo.trim() } : {})
     })),
     costUsd: typeof message.total_cost_usd === 'number' ? message.total_cost_usd : 0
   };

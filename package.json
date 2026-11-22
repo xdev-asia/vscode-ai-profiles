@@ -2,7 +2,7 @@
   "name": "xdev-ai",
   "displayName": "xDev AI",
   "description": "Manage AI accounts, open Claude Code, Codex, and Gemini terminals, and coordinate AI tasks in VS Code.",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "publisher": "xdev-asia",
   "icon": "media/icon.png",
   "private": true,
@@ -245,7 +245,36 @@
         "xdevAi.squad.codegraph": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "When the workspace folder has a CodeGraph index (`.codegraph/`), give Lead an excerpt of the relevant code before planning and let workers query it with `codegraph explore`. The lookup stops after 20 seconds."
+          "markdownDescription": "When the workspace folder has a CodeGraph index (`.codegraph/`), give Lead an excerpt of the relevant code before planning and let workers query it with `codegraph explore`. The lookup stops after `xdevAi.squad.codegraphTimeoutSeconds`."
+        },
+        "xdevAi.squad.codegraphTimeoutSeconds": {
+          "type": "number",
+          "default": 20,
+          "minimum": 5,
+          "maximum": 300,
+          "markdownDescription": "How long Lead waits for the CodeGraph excerpt before planning without it. A very large index can need 60–90 seconds per query. After a timeout, Squad skips CodeGraph for 10 minutes."
+        },
+        "xdevAi.squad.repositoryAllowedCommands": {
+          "type": "object",
+          "additionalProperties": { "type": "array", "items": { "type": "string" } },
+          "default": {},
+          "markdownDescription": "Extra command prefixes per repository, added to `xdevAi.squad.workerAllowedCommands` for steps in that repository. Key by the repository's path in the workspace or by its folder name, for example `{ \"his/backend/his-service\": [\"dotnet build\", \"dotnet test\"], \"his-portal\": [\"npx vitest run\", \"npx tsc\"] }`."
+        },
+        "xdevAi.squad.mergeRequests": {
+          "type": "string",
+          "enum": ["auto", "gitlab", "push"],
+          "enumDescriptions": [
+            "Open a merge request with git push options when the remote URL contains gitlab; otherwise only push.",
+            "Always open a merge request with GitLab push options (self-hosted GitLab under another domain).",
+            "Only push the branch."
+          ],
+          "default": "auto",
+          "markdownDescription": "What **Push & MR** on a Squad run does after you confirm. GitLab merge requests use push options, so no API token is needed."
+        },
+        "xdevAi.squad.mergeRequestTarget": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Default target branch for **Push & MR**, for example `dev`. Empty uses the remote's default branch, then the branch the run started from. You can change it in the dialog."
         },
         "xdevAi.squad.syncFolder": {
           "type": "string",
@@ -268,6 +297,7 @@
     "@types/vscode": "1.95.0",
     "@vscode/vsce": "4.1.1",
     "esbuild": "0.28.2",
+    "jsdom": "26.1.0",
     "typescript": "5.9.3"
   }
 }

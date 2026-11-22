@@ -44,7 +44,9 @@ function mountSquadChat(vscode, roles) {
     const { plan, status, busy } = snapshot;
     byId('chat-plan').hidden = !plan;
     if (!plan) openBriefs.clear();
-    byId('chat-jobs').replaceChildren(...(plan?.jobs ?? []).map(job => {
+    if ((plan?.id ?? '') !== jobPlan) { jobRepos.clear(); jobPlan = plan?.id ?? ''; }
+    const repos = plan?.repos ?? [];
+    byId('chat-jobs').replaceChildren(...(plan?.jobs ?? []).map((job, index) => {
       const row = document.createElement('li');
       const label = document.createElement('strong');
       label.textContent = `${job.role} · ${job.profile}`;
@@ -55,13 +57,15 @@ function mountSquadChat(vscode, roles) {
         : 'Text API · no file access';
       const brief = document.createElement('p');
       brief.textContent = job.brief;
-      brief.className = openBriefs.has(job.role) ? 'brief open' : 'brief';
+      brief.className = openBriefs.has(index) ? 'brief open' : 'brief';
       brief.title = 'Click to show or hide the full brief';
       brief.addEventListener('click', () => {
-        if (openBriefs.has(job.role)) openBriefs.delete(job.role); else openBriefs.add(job.role);
+        if (openBriefs.has(index)) openBriefs.delete(index); else openBriefs.add(index);
         brief.classList.toggle('open');
       });
-      row.append(label, badge, brief);
+      row.append(label, badge);
+      if (job.kind === 'claude' && repos.length > 1) row.append(repoPicker(job, index, repos));
+      row.append(brief);
       return row;
     }));
     const headless = (plan?.jobs ?? []).filter(job => job.kind === 'claude').length;
@@ -75,7 +79,6 @@ function mountSquadChat(vscode, roles) {
       'ai+human': 'Approving runs nothing yet. After each step, Lead\'s account reviews it; you still start every step.',
       ai: 'You start the first step. Each passing AI review then starts the next step; a review asking for changes, a blocked step, or an error stops and waits for you. Merging always waits for you.'
     }[approver.value] ?? '';
-    renderRepo(plan, headless);
     byId('plan-cost').textContent = `${approverText}${headless
       ? ` Claude Code steps use a new git worktree${workers?.budgetUsd ? `, each headless step capped at $${workers.budgetUsd}` : ''}. Allowed commands: ${commands}.` : ''}`;
     renderRuns(snapshot.runs ?? []);
@@ -86,7 +89,8 @@ function mountSquadChat(vscode, roles) {
     const leadUsable = lead?.kind === 'api' || (lead?.detail === 'Claude Code' && snapshot.workers);
     byId('chat-status').textContent = status || (plan ? 'Review the roles and briefs before running.' :
       leadUsable ? `Lead uses ${lead.name} · ${lead.detail}` : 'Assign an API profile or a Claude Code account to Lead under Roles to start planning.');
-    byId('stop-chat').hidden = !busy;
+    byId('stop-chat').hidden = !busy || snapshot.remote;
+    renderAssignAll(state, lead);
     const terminals = roles.filter(role => profileFor(role)?.kind === 'terminal');
     const selected = terminalRole.value;
     terminalRole.replaceChildren(...terminals.map(role => {
@@ -98,25 +102,30 @@ function mountSquadChat(vscode, roles) {
     updateControls();
   }
 
-  const repoSelect = byId('plan-repo');
-  function renderRepo(plan, headless) {
-    const repos = plan?.repos ?? [];
-    const field = byId('plan-repo-field');
-    field.hidden = !headless || repos.length < 2;
-    if (!plan) { repoSelect.dataset.touched = ''; repoSelect.dataset.plan = ''; }
-    if (field.hidden) return;
-    if (repoSelect.dataset.plan !== plan.id) {
-      repoSelect.dataset.plan = plan.id;
-      repoSelect.dataset.touched = '';
-      const choose = new Option('Choose a repository…', '');
-      choose.disabled = true;
-      repoSelect.replaceChildren(choose, ...repos.map(repo => new Option(repo, repo)));
-    }
-    if (!repoSelect.dataset.touched) repoSelect.value = plan.repo ?? '';
-    byId('plan-repo-hint').textContent = plan.repo && !repoSelect.dataset.touched ? 'Suggested from the plan.' : '';
+  // The repository each Claude Code task works in, as the user changed it; otherwise Lead's or the suggested one.
+  const jobRepos = new Map();
+  let jobPlan = '';
+  function jobRepo(job, index) {
+    return jobRepos.get(index) ?? job.repo ?? '';
+  }
+  function repoPicker(job, index, repos) {
+    const field = element('label', undefined, 'job-repo');
+    field.append(element('span', 'Repository'));
+    const select = element('select');
+    select.setAttribute('aria-label', `${job.role} repository`);
+    const choose = new Option('Choose a repository…', '');
+    choose.disabled = true;
+    select.append(choose, ...repos.map(repo => new Option(repo, repo)));
+    select.value = jobRepo(job, index);
+    const hint = element('small', job.repo && !jobRepos.has(index) ? 'suggested' : '', 'subtle');
+    select.addEventListener('change', () => { jobRepos.set(index, select.value); hint.textContent = ''; updateControls(); });
+    field.append(select, hint);
+    return field;
   }
   function repoMissing() {
-    return !byId('plan-repo-field').hidden && !repoSelect.value;
+    const plan = snapshot?.plan;
+    if (!plan || (plan.repos ?? []).length < 2) return false;
+    return plan.jobs.some((job, index) => job.kind === 'claude' && !jobRepo(job, index));
   }
 
   const boardRoles = ['Lead', 'Implement', 'Review', 'Tests'];
@@ -131,7 +140,10 @@ function mountSquadChat(vscode, roles) {
     const current = active ? active.steps.findIndex(step => step.status !== 'done' && step.status !== 'skipped') : -1;
     const members = boardRoles.filter(role => roles.includes(role)).map(role => {
       const profile = state.accounts.find(item => item.id === state.seats[role]?.account);
-      const index = active ? active.steps.findIndex(step => step.role === role) : -1;
+      // A run can have several steps for one role (one per repository, or feedback rounds): show the current or latest one.
+      const indexes = active ? active.steps.flatMap((step, position) => step.role === role ? [position] : []) : [];
+      const index = indexes.includes(current) ? current
+        : indexes.find(position => active.steps[position].status === 'running') ?? indexes.filter(position => active.steps[position].status !== 'pending').at(-1) ?? indexes[0] ?? -1;
       const step = index >= 0 ? active.steps[index] : undefined;
       let status = profile ? 'idle' : 'vacant';
       if (snapshot.plan?.jobs.some(job => job.role === role)) status = 'proposed';
@@ -234,7 +246,8 @@ function mountSquadChat(vscode, roles) {
           else if (step.status === 'blocked' || step.status === 'failed') toast(`! ${step.role} ${step.status}`, 'warn');
         });
         const before = stepStatuses.get(run.id);
-        if (before === 'active' && run.status !== 'active' && run.commit) toast(`Committed ${run.files ?? 0} file${run.files === 1 ? '' : 's'} to ${run.branch}`, 'good');
+        const files = (run.trees ?? []).reduce((sum, tree) => sum + (tree.files ?? 0), 0);
+        if (before === 'active' && run.status !== 'active' && (run.trees ?? []).some(tree => tree.commit)) toast(`Committed ${files} file${files === 1 ? '' : 's'} to ${run.trees[0].branch}`, 'good');
       }
     }
     stepStatuses = next;
@@ -250,10 +263,23 @@ function mountSquadChat(vscode, roles) {
     }
     return pre;
   }
+  function duration(ms) {
+    const seconds = Math.max(0, Math.round(ms / 1000));
+    if (seconds < 60) return `${seconds}s`;
+    const minutes = Math.round(seconds / 60);
+    return minutes < 60 ? `${minutes}m` : `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, '0')}m`;
+  }
+  function money(cost) {
+    return `$${cost.toFixed(cost < 0.1 ? 3 : 2)}`;
+  }
+
+  const feedbackDrafts = new Map();
   function changesView(run, busy) {
     const files = diffs.get(run.id);
     const box = element('div', undefined, 'changes');
     if (!files) return box;
+    const trees = run.trees ?? [];
+    const multiple = trees.length > 1;
     const added = files.reduce((sum, file) => sum + file.added, 0);
     const removed = files.reduce((sum, file) => sum + file.removed, 0);
     const head = element('div', undefined, 'changes-head');
@@ -267,10 +293,19 @@ function mountSquadChat(vscode, roles) {
     if (!files.length) box.append(element('p', 'No changes yet.', 'subtle'));
     const open = openFiles.get(run.id) ?? new Set();
     openFiles.set(run.id, open);
+    const draft = feedbackDrafts.get(run.id) ?? { text: '', repo: trees[0]?.target ?? '' };
+    feedbackDrafts.set(run.id, draft);
+    const comment = element('textarea');
+    let lastRepo;
     for (const file of files) {
+      if (multiple && file.repo !== lastRepo) {
+        lastRepo = file.repo;
+        box.append(element('p', file.repo === '.' ? 'workspace' : file.repo, 'repo-head'));
+      }
+      const key = `${file.repo}:${file.path}`;
       const details = element('details', undefined, 'file');
-      details.open = open.has(file.path);
-      details.addEventListener('toggle', () => { if (details.open) open.add(file.path); else open.delete(file.path); });
+      details.open = open.has(key);
+      details.addEventListener('toggle', () => { if (details.open) open.add(key); else open.delete(key); });
       const summary = element('summary');
       const total = Math.max(1, file.added + file.removed);
       const bar = element('span', undefined, 'bar');
@@ -280,17 +315,58 @@ function mountSquadChat(vscode, roles) {
       details.append(summary);
       details.append(file.binary ? element('p', 'Binary file.', 'subtle') : patchView(file.patch || '(no textual changes)'));
       const actions = element('div', undefined, 'actions');
-      const openButton = element('button', 'Open diff');
-      openButton.type = 'button';
-      openButton.addEventListener('click', () => send('runOpenFile', { id: run.id, file: file.path }));
-      const discard = element('button', 'Discard');
-      discard.type = 'button';
-      discard.disabled = busy;
-      discard.addEventListener('click', () => send('runDiscard', { id: run.id, file: file.path }));
-      actions.append(openButton, discard);
+      const action = (text, handler, disabled) => {
+        const control = element('button', text);
+        control.type = 'button';
+        control.disabled = Boolean(disabled);
+        control.addEventListener('click', handler);
+        actions.append(control);
+      };
+      action('Open diff', () => send('runOpenFile', { id: run.id, file: file.path, repo: file.repo }));
+      action('Comment', () => {
+        draft.repo = file.repo;
+        draft.text = `${draft.text ? `${draft.text.trimEnd()}\n` : ''}${file.path}: `;
+        comment.value = draft.text;
+        comment.dispatchEvent(new Event('input'));
+        if (repoSelect) repoSelect.value = draft.repo;
+        comment.focus();
+        comment.setSelectionRange(comment.value.length, comment.value.length);
+      }, busy || run.trees?.find(tree => tree.target === file.repo)?.merged);
+      action('Discard', () => send('runDiscard', { id: run.id, file: file.path, repo: file.repo }), busy);
       details.append(actions);
       box.append(details);
     }
+    // Review feedback goes back to Implement as a new step in the same worktree.
+    const form = element('div', undefined, 'feedback');
+    comment.rows = 3;
+    comment.maxLength = 4000;
+    comment.placeholder = 'Ask Implement for changes, e.g. "src/api.ts: validate the date range". Use Comment on a file to start a line.';
+    comment.setAttribute('aria-label', 'Requested changes');
+    comment.value = draft.text;
+    comment.disabled = busy;
+    const label = element('label', 'Request changes');
+    label.append(comment);
+    form.append(label);
+    let repoSelect;
+    const controls = element('div', undefined, 'actions');
+    if (multiple) {
+      repoSelect = element('select');
+      repoSelect.setAttribute('aria-label', 'Repository for the requested changes');
+      repoSelect.append(...trees.filter(tree => !tree.merged).map(tree => new Option(tree.target === '.' ? 'workspace' : tree.target, tree.target)));
+      repoSelect.value = draft.repo;
+      repoSelect.disabled = busy;
+      repoSelect.addEventListener('change', () => { draft.repo = repoSelect.value; });
+      controls.append(repoSelect);
+    }
+    const submit = element('button', 'Request changes', 'primary');
+    submit.type = 'button';
+    const sync = () => { submit.disabled = busy || !comment.value.trim(); };
+    comment.addEventListener('input', () => { draft.text = comment.value; sync(); });
+    sync();
+    submit.addEventListener('click', () => send('runRequestChanges', { id: run.id, text: comment.value, repo: multiple ? repoSelect.value : undefined }));
+    controls.append(submit);
+    form.append(controls);
+    if (trees.some(tree => !tree.merged)) box.append(form);
     return box;
   }
 
@@ -308,9 +384,23 @@ function mountSquadChat(vscode, roles) {
     return node;
   }
 
+  function renderMetrics(metrics) {
+    const node = byId('runs-metrics');
+    node.hidden = !metrics;
+    if (!metrics) return;
+    node.textContent = [
+      `Last 30 days: ${metrics.runs} run${metrics.runs === 1 ? '' : 's'}`,
+      `median ${duration(metrics.medianMs)} to commit`,
+      `${Math.round(metrics.firstPass * 100)}% of steps passed first time`,
+      `${metrics.files} file${metrics.files === 1 ? '' : 's'}`,
+      metrics.costUsd ? money(metrics.costUsd) : ''
+    ].filter(Boolean).join(' · ');
+  }
+
   function renderRuns(runs) {
     byId('chat-runs').hidden = !runs.length;
     announce(runs);
+    renderMetrics(snapshot.metrics);
     const busy = Boolean(pending) || snapshot.busy;
     for (const id of diffs.keys()) if (!runs.some(run => run.id === id)) diffs.delete(id);
     const key = JSON.stringify(runs) + String(busy) + JSON.stringify([...diffs]);
@@ -318,18 +408,28 @@ function mountSquadChat(vscode, roles) {
     runsKey = key;
     byId('run-list').replaceChildren(...runs.map(run => {
       const item = element('li', undefined, `run ${run.status}`);
-      const cost = run.costUsd ? ` · $${run.costUsd.toFixed(run.costUsd < 0.1 ? 3 : 2)}` : '';
-      const files = run.status === 'active' ? '' : ` · ${run.files ?? 0} file${run.files === 1 ? '' : 's'}`;
+      const trees = run.trees ?? [];
+      const multiple = trees.length > 1;
+      const branch = trees[0]?.branch;
+      const fileCount = trees.reduce((sum, tree) => sum + (tree.files ?? 0), 0);
+      const cost = run.costUsd ? ` · ${money(run.costUsd)}` : '';
+      const files = run.status === 'active' ? '' : ` · ${fileCount} file${fileCount === 1 ? '' : 's'}`;
+      const took = run.finished ? ` · ${duration(run.finished - run.time)}` : '';
       const approvedBy = { human: 'you approve', 'ai+human': 'AI reviews, you approve', ai: 'AI approves' }[run.approver ?? 'human'];
+      const where = trees.filter(tree => tree.target !== '.').map(tree => tree.target).join(' + ');
       item.append(element('strong', run.prompt.split('\n', 1)[0]),
-        element('small', `${run.target && run.target !== '.' ? `${run.target} · ` : ''}${run.branch ?? 'text only'} · ${run.status} · ${approvedBy}${files}${cost}`));
+        element('small', `${where ? `${where} · ` : ''}${branch ?? 'text only'} · ${run.status} · ${approvedBy}${files}${took}${cost}`));
 
       const steps = element('ol', undefined, 'steps');
       const current = run.status === 'active'
         ? run.steps.findIndex(step => step.status !== 'done' && step.status !== 'skipped') : -1;
       run.steps.forEach((step, index) => {
         const row = element('li', undefined, `step ${step.status}${index === current ? ' current' : ''}`);
-        row.append(element('span', `${step.role} · ${step.profile} · ${stepLabels[step.status] ?? step.status}`));
+        const facts = [
+          step.role + (step.feedback ? ' (feedback)' : ''), multiple && step.repo ? step.repo : '', step.profile, stepLabels[step.status] ?? step.status,
+          step.ms ? duration(step.ms) : '', step.attempts > 1 ? `${step.attempts} tries` : '', step.costUsd ? money(step.costUsd) : ''
+        ].filter(Boolean);
+        row.append(element('span', facts.join(' · ')));
         if (step.gate) {
           row.append(element('p', `AI review (${step.gate.by}): ${step.gate.verdict === 'pass' ? 'pass' : 'changes requested'}. ${step.gate.reason}`,
             `gate ${step.gate.verdict}`));
@@ -340,14 +440,32 @@ function mountSquadChat(vscode, roles) {
       });
       item.append(steps);
 
-      if (run.stat) {
+      const stats = trees.filter(tree => tree.stat);
+      if (stats.length) {
         const stat = element('details');
-        stat.append(element('summary', 'Changed files'), element('pre', run.stat));
+        stat.append(element('summary', 'Changed files'), element('pre', stats.map(tree => `${multiple ? `# ${tree.target}\n` : ''}${tree.stat}`).join('\n\n')));
         item.append(stat);
       }
+      const pushed = trees.filter(tree => tree.pushed);
+      if (pushed.length) {
+        const links = element('ul', undefined, 'pushed');
+        for (const tree of pushed) {
+          const row = element('li');
+          row.append(element('span', `${multiple ? `${tree.target}: ` : ''}pushed to ${tree.pushed.remote}${tree.pushed.mergeRequest ? ` · MR into ${tree.pushed.target}` : ''}${tree.merged ? ' · merged locally' : ''}`));
+          if (tree.pushed.url) {
+            const link = element('button', /merge_requests\/\d+|pull\/\d+/.test(tree.pushed.url) ? 'Open MR' : 'Create MR', 'link');
+            link.type = 'button';
+            link.title = tree.pushed.url;
+            link.addEventListener('click', () => send('runLink', { id: run.id, repo: tree.target }));
+            row.append(link);
+          }
+          links.append(row);
+        }
+        item.append(links);
+      }
       const actions = element('div', undefined, 'actions');
-      const button = (text, action, args, disabled) => {
-        const control = element('button', text);
+      const button = (text, action, args, disabled, className) => {
+        const control = element('button', text, className);
         control.type = 'button';
         control.disabled = disabled;
         control.addEventListener('click', () => send(action, { id: run.id, ...args }));
@@ -355,7 +473,8 @@ function mountSquadChat(vscode, roles) {
       };
       const active = run.status === 'active';
       if (active) button('Finish run', 'runFinish', {}, busy);
-      if (run.branch) {
+      if (branch) {
+        const committed = trees.some(tree => tree.commit);
         const shown = diffs.has(run.id);
         const changes = element('button', shown ? 'Hide changes' : 'Changes', shown ? undefined : 'accent');
         changes.type = 'button';
@@ -364,11 +483,13 @@ function mountSquadChat(vscode, roles) {
           else send('runChanges', { id: run.id });
         });
         actions.append(changes);
-        button('Full diff', 'runDiff', {}, active || !run.commit);
-        button('Merge', 'runMerge', {}, active || busy || !run.commit);
+        button('Full diff', 'runDiff', {}, active || !committed);
+        button(trees.every(tree => !tree.commit || tree.merged) && trees.some(tree => tree.merged) ? 'Merged' : 'Merge', 'runMerge', {},
+          active || busy || !trees.some(tree => tree.commit && !tree.merged));
+        button(trees.some(tree => tree.pushed) ? 'Push again' : 'Push & MR', 'runPush', {}, active || busy || !committed, committed && !active && !pushed.length ? 'accent' : undefined);
         button('Open folder', 'runOpen', {}, false);
         for (const session of run.sessions) {
-          button(`Resume ${session.role} session`, 'runResume', { session: session.sessionId }, busy);
+          button(`Resume ${session.role}${multiple && session.repo ? ` (${session.repo})` : ''}`, 'runResume', { session: session.sessionId }, busy);
         }
       }
       button('Remove', 'runRemove', {}, busy);
@@ -421,10 +542,21 @@ function mountSquadChat(vscode, roles) {
     return box;
   }
 
+  // First run: one click gives every role the same account instead of four trips to Roles.
+  let assignAccount;
+  function renderAssignAll(state, lead) {
+    const node = byId('chat-assign-all');
+    const assigned = roles.some(role => state.seats[role]?.account);
+    const candidate = state.accounts.find(profile => profile.detail === 'Claude Code') ?? state.accounts[0];
+    node.hidden = Boolean(lead) || assigned || !candidate;
+    assignAccount = node.hidden ? undefined : candidate.id;
+    if (!node.hidden) node.textContent = `Use ${candidate.name} for all roles`;
+  }
+
   function updateControls() {
     message.disabled = !snapshot;
     byId('send-chat').disabled = !snapshot || snapshot.busy || Boolean(snapshot.plan || pending) || !message.value.trim();
-    for (const id of ['stop-chat', 'open-chat-terminal', 'chat-add-profile']) {
+    for (const id of ['stop-chat', 'open-chat-terminal', 'chat-add-profile', 'chat-assign-all']) {
       byId(id).disabled = !snapshot || Boolean(pending);
     }
     byId('approve-plan').disabled = Boolean(pending || snapshot?.busy) || repoMissing();
@@ -433,7 +565,7 @@ function mountSquadChat(vscode, roles) {
 
   function send(action, args = {}) {
     if (!snapshot || pending) return;
-    pending = { action, text: args.text };
+    pending = { action, text: args.text, id: args.id };
     error.textContent = '';
     updateControls();
     vscode.postMessage({ type: 'squadChat', action, ...args });
@@ -447,6 +579,7 @@ function mountSquadChat(vscode, roles) {
     }
     if (data.error) error.textContent = data.error;
     else if (pending.action === 'send' && pending.text === message.value) message.value = '';
+    else if (pending.action === 'runRequestChanges') { feedbackDrafts.delete(pending.id); diffs.delete(pending.id); runsKey = undefined; }
     pending = undefined;
     updateControls();
     if (snapshot && runsKey === undefined) renderRuns(snapshot.runs ?? []);
@@ -465,9 +598,10 @@ function mountSquadChat(vscode, roles) {
     }
   });
   byId('approve-plan').addEventListener('click', () => send('approve', {
-    id: snapshot.plan.id, approver: byId('plan-approver').value, repo: byId('plan-repo-field').hidden ? undefined : repoSelect.value
+    id: snapshot.plan.id, approver: byId('plan-approver').value,
+    repos: (snapshot.plan.repos ?? []).length > 1 ? snapshot.plan.jobs.map((job, index) => job.kind === 'claude' ? jobRepo(job, index) : '') : undefined
   }));
-  repoSelect.addEventListener('change', () => { repoSelect.dataset.touched = '1'; byId('plan-repo-hint').textContent = ''; updateControls(); });
+  byId('chat-assign-all').addEventListener('click', () => { if (assignAccount) send('assignAll', { account: assignAccount }); });
   byId('plan-approver').addEventListener('change', () => { byId('plan-approver').dataset.touched = '1'; render(lastState); });
   byId('discard-plan').addEventListener('click', () => send('discard', { id: snapshot.plan.id }));
   byId('stop-chat').addEventListener('click', () => send('stop'));

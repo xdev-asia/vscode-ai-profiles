@@ -100,28 +100,41 @@ If VS Code reports that the workflow command is missing after an update, check *
 
 ### Run Claude Code workers on the repository
 
-Assign a **Claude Code** terminal account (instead of an API profile) to a role under **Roles**. That role then runs Claude Code headless (`claude -p`) under the account's own sign-in, and can read the repository and, for Implement and Tests, edit files and run allowed commands. A Claude Code account on Lead plans with the same subscription, without file tools.
+Assign a **Claude Code** terminal account (instead of an API profile) to a role under **Roles**. **Use for all roles** under the profile gives every role the same account; a fresh workspace also offers this in Chat. That role then runs Claude Code headless (`claude -p`) under the account's own sign-in, and can read the repository and, for Implement and Tests, edit files and run allowed commands. A Claude Code account on Lead plans with the same subscription, without file tools.
 
 1. Open a workspace folder that is a git repository with at least one commit, or a folder that holds several repositories.
-2. Send a request to Lead and review the plan. Each task shows whether it runs as **Claude Code** or **Text API**, and the plan shows the spending cap and allowed commands. In a folder with several repositories, choose the **Repository** the run works in; xDev suggests the one the plan names.
-3. Click **Approve plan**. This runs nothing yet. It lists the steps under **Worker runs** and, for Claude Code steps, creates a git worktree on a new local branch `xdev/squad/<id>`, so your checkout is not changed.
+2. Send a request to Lead and review the plan. Each task shows whether it runs as **Claude Code** or **Text API**, and the plan shows the spending cap and allowed commands. In a folder with several repositories, each Claude Code task shows its **Repository**. Lead picks it (a backend API and the screen that calls it get one Implement task each); otherwise xDev suggests one from the brief. Change it before approving.
+3. Click **Approve plan**. This runs nothing yet. It lists the steps under **Worker runs** and, for Claude Code steps, creates a git worktree on a new local branch `xdev/squad/<id>` in each repository the tasks use, so your checkouts are not changed.
 4. You control every step. Edit the brief of the current step, then choose:
    - **Run headless**: Claude Code runs the step once (`claude -p`) and stops. Implement edits, Review reads the diff, Tests adds and runs tests. Text API steps show **Ask API** instead.
    - **Open in terminal**: an interactive Claude Code session opens in the worktree under the role's account, with the brief as its first message. You drive it and approve its actions. Click **Mark step done** and add a short summary for later steps.
    - **Skip step**, or **Finish run** to stop early.
 
    No step starts another. Each step receives the request, its brief, short summaries of earlier steps, and shared memory, not full transcripts.
-5. When the last step is done, or when you click **Finish run**, xDev commits the worktree to its branch, locally. Click **Changes** to review each changed file in the panel, open it in the diff editor, or **Discard** it. Use **Full diff**, **Merge** (asks first, never pushes), **Open folder**, **Resume … session** to continue a headless step interactively, or **Remove** to delete the worktree and branch.
+5. When the last step is done, or when you click **Finish run**, xDev commits the worktree to its branch, locally. Click **Changes** to review each changed file in the panel, open it in the diff editor, or **Discard** it. Use **Full diff**, **Merge** (local, asks first), **Open folder**, **Resume … session** to continue a headless step interactively, or **Remove** to delete the worktrees and local branch.
+6. Not right yet? Under **Changes**, write what to change in **Request changes** (click **Comment** on a file to start a line). Implement gets it as a new step in the same worktree; a finished run reopens and commits again on the same branch.
+7. Click **Push & MR** to push the branch of every committed repository. xDev asks for the target branch (default `xdevAi.squad.mergeRequestTarget`, else the remote's default branch) and shows the remote and the number of commits before pushing. On GitLab it opens or updates a merge request with git push options, so no API token is needed; **Open MR** opens it. Other remotes are only pushed (`xdevAi.squad.mergeRequests`).
+
+**Measure it.** Each step shows its time, cost, and retries, and each run its time to commit. Above Worker runs, a 30-day summary shows the number of runs, the median time to commit, the share of steps that passed first time, files changed, and cost.
 
 **See the squad at work.** The team board at the top of Chat shows each role's account and state: proposed, up next, working, done, blocked. While a headless step runs, a live feed lists the files it reads and edits and the commands it runs, with a timer. A short notice appears when a step ends.
 
 **Work faster in large workspaces.**
 
-- **CodeGraph.** When the workspace folder has a CodeGraph index (`.codegraph/`), Lead receives an excerpt of the relevant symbols and call paths before planning, so briefs name concrete files. Workers may run `codegraph explore`, `node`, and `query`. The lookup gives up after 20 seconds. Turn it off with `xdevAi.squad.codegraph`.
+- **CodeGraph.** When the workspace folder has a CodeGraph index (`.codegraph/`), Lead receives an excerpt of the relevant symbols and call paths before planning, so briefs name concrete files. Workers may run `codegraph explore`, `node`, and `query`. The lookup gives up after `xdevAi.squad.codegraphTimeoutSeconds` (20 by default); a very large index can need 60–90 seconds per query. A stale index lock clears with `codegraph unlock`. Turn it off with `xdevAi.squad.codegraph`.
 - **Repository instructions.** Workers run inside the chosen repository's worktree, so Claude Code loads that repository's `CLAUDE.md` and `.claude/skills`. When a task names an existing screen or file as a model, Implement reads it first and mirrors its structure.
-- **Focused tests.** Review and Tests receive the run's changed files. Tests runs only the tests that cover them, and the whole suite only when shared code changed. Add your test commands, such as `npx vitest run`, to `xdevAi.squad.workerAllowedCommands`.
+- **Focused tests.** Review and Tests receive the run's changed files. Tests runs only the tests that cover them, and the whole suite only when shared code changed. Add your test commands, such as `npx vitest run`, to `xdevAi.squad.workerAllowedCommands`, and commands for one repository to `xdevAi.squad.repositoryAllowedCommands`:
 
-**Clean up.** Each window keeps its own run list, so runs started in another window do not appear here. Run **xDev AI: Clean Up Squad Worktrees** from the Squad view menu to list leftover `xdev/squad/*` worktrees, pick the ones to remove, and delete their branches when merged. Unmerged branches are kept.
+  ```json
+  "xdevAi.squad.repositoryAllowedCommands": {
+    "his/backend/his-service": ["dotnet build", "dotnet test"],
+    "his-portal": ["npx vitest run", "npx tsc --noEmit"]
+  }
+  ```
+
+**Several windows.** Roles, runs, memory, and skills are shared by every window that opens the workspace. While one window runs a step, the others show it and wait; if that window closes, the run is reported as interrupted.
+
+**Clean up.** Worktrees from older versions or from removed runs can stay behind. Run **xDev AI: Clean Up Squad Worktrees** from the Squad view menu to list leftover `xdev/squad/*` worktrees, pick the ones to remove, and delete their branches when merged. Unmerged branches are kept.
 
 A step that reports **blocked** or fails waits for you. You can run it again with a new brief, open it in a terminal, or skip it. Headless steps deny commands outside the allowed list without prompting and list them in the chat. Each role always uses the account you assigned; xDev never switches accounts by itself.
 

@@ -83,6 +83,18 @@ export class SquadStore {
     });
   }
 
+  /** Gives every role the same profile, keeping each role's task. */
+  assignAll(account: string, all: readonly Role[]): Promise<void> {
+    return this.update(squad => {
+      for (const role of all) {
+        const seat = squad.seats[role] ?? emptySeat;
+        if (seat.account === account) continue;
+        squad.seats[role] = { ...seat, account, response: undefined };
+      }
+      squad.activity.unshift({ from: 'Lead', message: 'Assigned one profile to every role', time: Date.now() });
+    });
+  }
+
   handoff(from: Role, to: Role, note: string): Promise<void> {
     return this.update(squad => {
       squad.activity.unshift({ from, to, message: note, time: Date.now() });
