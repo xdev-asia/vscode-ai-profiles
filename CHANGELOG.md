@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.1 - 2026-11-22
+
+### Added
+
+- `xdevAi.squad.baseBranch`: start new worktrees from a branch such as `origin/dev` (fetched first) instead of your checkout's branch, so a merge request carries only the run's own commits.
+- New worktrees initialize submodules and link `node_modules` from your checkout (`xdevAi.squad.worktreeLinks`), so builds and tests work without reinstalling. Linked paths are never committed.
+
 ## 0.10.0 - 2026-11-22
 
 ### Added

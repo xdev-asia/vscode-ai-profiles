@@ -80,7 +80,7 @@ function mountSquadChat(vscode, roles) {
       ai: 'You start the first step. Each passing AI review then starts the next step; a review asking for changes, a blocked step, or an error stops and waits for you. Merging always waits for you.'
     }[approver.value] ?? '';
     byId('plan-cost').textContent = `${approverText}${headless
-      ? ` Claude Code steps use a new git worktree${workers?.budgetUsd ? `, each headless step capped at $${workers.budgetUsd}` : ''}. Allowed commands: ${commands}.` : ''}`;
+      ? ` Claude Code steps use a new git worktree from ${workers?.baseBranch || 'your current branch'}${workers?.budgetUsd ? `, each headless step capped at $${workers.budgetUsd}` : ''}. Allowed commands: ${commands}.` : ''}`;
     renderRuns(snapshot.runs ?? []);
     renderBoard(state);
     renderLive(snapshot.live, busy);
