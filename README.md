@@ -62,7 +62,7 @@ On the code-server host, check `claude --version` and update Claude Code if your
 
 ## Coordinate work with Squad
 
-Open **xDev Squad** in the bottom panel, click **Open Squad** on the Terminal toolbar, or run **xDev AI: Open Squad** from the Command Palette.
+Open **xDev Squad** in the Secondary Side Bar on the right, next to Chat, click **Open Squad** on the Terminal toolbar, or run **xDev AI: Open Squad** from the Command Palette.
 
 ### Use one chat for the squad
 

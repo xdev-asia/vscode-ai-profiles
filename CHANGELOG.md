@@ -13,6 +13,7 @@
 
 ### Changed
 
+- xDev Squad now opens in the Secondary Side Bar on the right, like Chat, with the message box kept at the bottom. Drag its icon to move it elsewhere. VS Code versions without Secondary Side Bar contributions show it in the Explorer.
 - Skills can hold up to 8,000 characters, and a workspace can store up to 40 skills. SDLC drafts include enabled skills within a 12,000-character budget.
 
 ## 0.7.1 - 2026-11-19

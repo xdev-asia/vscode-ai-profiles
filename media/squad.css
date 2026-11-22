@@ -226,3 +226,24 @@ summary { cursor: pointer; font-weight: 600; }
 .steps p.gate { margin: 2px 0 0; font-size: 0.92em; }
 .steps p.gate.pass { color: var(--vscode-testing-iconPassed, var(--vscode-foreground)); }
 .steps p.gate.changes { color: var(--warning); }
+
+/* Side bar layout: keep tabs on top and the message box at the bottom, like Chat. */
+body { background: var(--vscode-sideBar-background, var(--vscode-editor-background)); }
+.top, #chat-composer { background: var(--vscode-sideBar-background, var(--vscode-editor-background)); }
+#chat-panel:not([hidden]) { display: flex; flex-direction: column; min-height: calc(100vh - 80px); }
+#chat-composer { position: sticky; bottom: 0; margin-top: auto; padding-block: 6px 10px; margin-bottom: -14px; border-block-start: 1px solid var(--border); }
+#chat-composer textarea { min-height: 3.2em; }
+@media (max-width: 520px) {
+  body { padding: 8px 10px; }
+  .top { position: sticky; top: 0; z-index: 1; margin: -8px -10px 8px; padding: 6px 10px; border-block-end: 1px solid var(--border); }
+  .top h1 { display: none; }
+  .top nav button { padding: 3px 6px; }
+  #chat-panel:not([hidden]) { min-height: calc(100vh - 60px); }
+  #chat-messages { max-height: none; }
+  #chat-composer { margin-bottom: -8px; }
+  .roles { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .roles .seat-card { grid-column: auto !important; }
+  .roles .seat-card::before, .roles .seat-card::after { display: none; }
+  .memory-form { flex-direction: column; align-items: stretch; }
+  .approver select { margin: 4px 0 0; }
+}

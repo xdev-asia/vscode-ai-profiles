@@ -58,7 +58,7 @@
       "activitybar": [
         { "id": "xdev-ai", "title": "xDev AI", "icon": "$(account)" }
       ],
-      "panel": [
+      "secondarySidebar": [
         { "id": "xdev-ai-squad", "title": "xDev Squad", "icon": "$(organization)" }
       ]
     },
