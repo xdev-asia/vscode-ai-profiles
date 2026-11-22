@@ -142,6 +142,8 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
       run: request => runClaude(request),
       worktrees: this.worktrees = new Worktrees(worktreeRoot),
       repositoryCommands,
+      baseBranch: () => squadSetting<string>('baseBranch', '').trim() || undefined,
+      worktreeLinks: () => squadSetting<unknown[]>('worktreeLinks', ['node_modules']).filter((item): item is string => typeof item === 'string'),
       prepare: async () => { await this.syncProfiles(); },
       repositories: () => this.repositories(),
       codeContext: async (request, signal) => {
@@ -371,7 +373,10 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
           folder: this.syncFolderPath() ?? '',
           profiles: squadSetting('syncSkillsToProfiles', true),
           approver: squadSetting('approver', 'human'),
-          workers: { ...workerSettings('Implement'), models: squadSetting('workerModels', {}), repositoryCommands: repositoryCommands() }
+          workers: {
+            ...workerSettings('Implement'), models: squadSetting('workerModels', {}), repositoryCommands: repositoryCommands(),
+            baseBranch: squadSetting<string>('baseBranch', '').trim()
+          }
         },
         nativeChatTools: this.chatTools,
         accounts,

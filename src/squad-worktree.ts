@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
-import { mkdir } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { access, lstat, mkdir, symlink } from 'node:fs/promises';
+import { dirname, isAbsolute, join, normalize, sep } from 'node:path';
 
 export interface RunWorktree {
   repo: string;
@@ -9,6 +9,8 @@ export interface RunWorktree {
   base: string;
   /** The branch the repository's checkout was on when the run started, if any. */
   source?: string;
+  /** Paths linked from the main checkout; never staged or committed. */
+  linked?: string[];
 }
 
 export type MergeRequestMode = 'auto' | 'gitlab' | 'push';
@@ -117,6 +119,11 @@ export function mergeRequestUrl(output: string): string | undefined {
   return requests.find(link => /\/(merge_requests|pull)\/\d+/.test(link)) ?? requests[0];
 }
 
+/** Stages every change in a worktree except the folders linked from the main checkout. */
+function stageAll(worktree: Pick<RunWorktree, 'linked'>): string[] {
+  return ['add', '-A', '--', '.', ...(worktree.linked ?? []).map(path => `:(exclude)${path}`)];
+}
+
 /** A branch name safe to pass to git as a value. */
 export function validBranch(name: unknown): name is string {
   return typeof name === 'string' && name.length <= 200 && /^[\w./-]+$/.test(name) && !name.startsWith('-') && !name.includes('..') && !name.endsWith('/') && !name.endsWith('.lock');
@@ -137,19 +144,66 @@ export class Worktrees {
     }
   }
 
-  /** Creates the run's worktree. A run across several repositories passes a label so each gets its own folder. */
-  async create(folder: string, id: string, label?: string): Promise<RunWorktree> {
+  /**
+   * Creates the run's worktree from `start` (for example `origin/dev`, fetched first) or from HEAD.
+   * A run across several repositories passes a label so each gets its own folder.
+   */
+  async create(folder: string, id: string, label?: string, start?: string): Promise<RunWorktree> {
     const repo = await this.repository(folder);
-    const base = (await this.run(['rev-parse', 'HEAD'], repo).catch(() => {
-      throw new Error('The repository has no commits yet. Make a first commit before running workers.');
-    })).trim();
-    const source = (await this.run(['rev-parse', '--abbrev-ref', 'HEAD'], repo).catch(() => '')).trim();
+    let base: string;
+    let source: string;
+    if (start) {
+      if (!validBranch(start)) throw new Error(`"${start}" is not a valid base branch. Check xdevAi.squad.baseBranch.`);
+      const remotes = (await this.run(['remote'], repo).catch(() => '')).split('\n').map(name => name.trim()).filter(Boolean);
+      const remote = remotes.find(name => start.startsWith(`${name}/`));
+      // Fetch so the run starts from the remote branch as it is now; work offline from the last fetch if this fails.
+      if (remote) await this.runAll(['fetch', '-q', remote, start.slice(remote.length + 1)], repo).catch(() => undefined);
+      base = (await this.run(['rev-parse', '--verify', `${start}^{commit}`], repo).catch(() => {
+        throw new Error(`The base branch ${start} does not exist in ${repo}. Check xdevAi.squad.baseBranch.`);
+      })).trim();
+      source = remote ? start.slice(remote.length + 1) : start;
+    } else {
+      base = (await this.run(['rev-parse', 'HEAD'], repo).catch(() => {
+        throw new Error('The repository has no commits yet. Make a first commit before running workers.');
+      })).trim();
+      source = (await this.run(['rev-parse', '--abbrev-ref', 'HEAD'], repo).catch(() => '')).trim();
+    }
     const name = id.slice(0, 8);
     const branch = `xdev/squad/${name}`;
     const path = label ? join(this.root, name, label.replace(/[^\w.-]+/g, '-').slice(0, 60)) : join(this.root, name);
     await mkdir(dirname(path), { recursive: true, mode: 0o700 });
     await this.run(['worktree', 'add', '-b', branch, path, base], repo);
     return { repo, path, branch, base, ...(source && source !== 'HEAD' ? { source } : {}) };
+  }
+
+  /**
+   * Makes a fresh worktree usable for builds and tests: initializes submodules and links folders such as
+   * node_modules from the main checkout, which a new checkout lacks. Returns notes for anything that failed.
+   */
+  async setup(worktree: RunWorktree, links: readonly string[]): Promise<{ notes: string[]; linked: string[] }> {
+    const notes: string[] = [];
+    const linked: string[] = [];
+    const modules = await access(join(worktree.path, '.gitmodules')).then(() => true, () => false);
+    if (modules) {
+      await this.runAll(['submodule', 'update', '--init', '--recursive', '--quiet'], worktree.path)
+        .catch((error: Error) => notes.push(`Submodules were not initialized: ${error.message}`));
+    }
+    for (const link of links) {
+      const relative = normalize(link.trim()).replace(/[\\/]+$/, '');
+      if (!relative || relative === '.' || isAbsolute(relative) || relative.split(sep).includes('..')) continue;
+      const source = join(worktree.repo, relative);
+      const target = join(worktree.path, relative);
+      if (!(await access(source).then(() => true, () => false))) continue;
+      if (await lstat(target).then(() => true, () => false)) continue;
+      try {
+        await mkdir(dirname(target), { recursive: true });
+        await symlink(source, target, process.platform === 'win32' ? 'junction' : undefined);
+        linked.push(relative.split(sep).join('/'));
+      } catch (error) {
+        notes.push(`Could not link ${relative}: ${error instanceof Error ? error.message : 'unknown error'}`);
+      }
+    }
+    return { notes, linked };
   }
 
   /** The remote a run's branch is pushed to: origin, or the only remote. */
@@ -193,7 +247,7 @@ export class Worktrees {
 
   /** Commits whatever the workers left in the worktree to its branch, locally. */
   async commit(worktree: RunWorktree, message: string): Promise<WorktreeChanges> {
-    await this.run(['add', '-A'], worktree.path);
+    await this.run(stageAll(worktree), worktree.path);
     const staged = (await this.run(['diff', '--cached', '--name-only'], worktree.path)).split('\n').filter(Boolean);
     if (staged.length) {
       const email = (await this.run(['config', 'user.email'], worktree.path).catch(() => '')).trim();
@@ -208,12 +262,12 @@ export class Worktrees {
 
   /** Stages everything so new files show up, then lists the run's changes against its base commit. */
   async changes(worktree: RunWorktree): Promise<FileChange[]> {
-    await this.run(['add', '-A'], worktree.path);
+    await this.run(stageAll(worktree), worktree.path);
     return parseDiff(await this.run(['diff', '--cached', '--no-renames', '--no-color', worktree.base], worktree.path));
   }
 
   async changedFiles(worktree: RunWorktree): Promise<string[]> {
-    await this.run(['add', '-A'], worktree.path);
+    await this.run(stageAll(worktree), worktree.path);
     return (await this.run(['diff', '--cached', '--no-renames', '--name-only', worktree.base], worktree.path)).split('\n').filter(Boolean).slice(0, 200);
   }
 

@@ -586,6 +586,18 @@ test('worktrees push to the remote, ask GitLab for a merge request, and hide cre
   const pushed = await worktrees.push(tree, { target: 'dev', title: 'Add b\nsecond line', mode: 'gitlab' });
   assert.deepEqual([pushed.remote, pushed.target, pushed.mergeRequest], ['origin', 'dev', true]);
   assert.match(run(remote, 'branch', '--list'), /xdev\/squad\/12345678/);
+
+  // A checkout on a feature branch far from dev: the run starts from origin/dev, so the merge request carries only its own work.
+  run(repo, 'checkout', '-q', '-b', 'devstack/feature');
+  await writeFile(join(repo, 'local.txt'), 'unmerged feature work\n');
+  run(repo, 'add', '.');
+  run(repo, 'commit', '-q', '-m', 'feature work');
+  const fromDev = await worktrees.create(repo, 'abcdef12-bbbb', undefined, 'origin/dev');
+  assert.equal(fromDev.base, run(repo, 'rev-parse', 'origin/dev').trim());
+  assert.equal(fromDev.source, 'dev');
+  await assert.rejects(readFile(join(fromDev.path, 'local.txt')), 'the feature branch is not in the run');
+  await assert.rejects(worktrees.create(repo, 'abcdef13-cccc', undefined, 'origin/nope'), /base branch origin\/nope does not exist/);
+  await assert.rejects(worktrees.create(repo, 'abcdef14-dddd', undefined, '--upload-pack=x'), /not a valid base branch/);
 });
 
 test('one profile can be given to every role at once, keeping each task', async () => {
@@ -625,4 +637,46 @@ test('shared state lives in one file that every window reads, falling back to va
   assert.equal(first.get('other'), 1);
   await writeFile(file, '{"broken');
   assert.equal(first.get('other'), 1, 'a damaged file keeps the last good state');
+});
+
+test('a new worktree gets submodules and linked node_modules, and never commits the link', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'xdev-setup-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  // Local submodules need the file protocol, which git disables by default.
+  const saved = { ...process.env };
+  Object.assign(process.env, { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'protocol.file.allow', GIT_CONFIG_VALUE_0: 'always' });
+  t.after(() => { for (const key of ['GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0']) if (saved[key] === undefined) delete process.env[key]; });
+  const run = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8' });
+  const init = async (path, file) => {
+    execFileSync('git', ['init', '-q', '-b', 'main', path]);
+    run(path, 'config', 'user.email', 'dev@example.com');
+    run(path, 'config', 'user.name', 'Dev');
+    await writeFile(join(path, file), 'x\n');
+    run(path, 'add', '.');
+    run(path, 'commit', '-q', '-m', 'init');
+  };
+  const ui = join(root, 'ui');
+  const repo = join(root, 'portal');
+  await init(ui, 'Button.tsx');
+  await init(repo, '.gitignore');
+  await writeFile(join(repo, '.gitignore'), 'node_modules/\n');
+  run(repo, 'submodule', 'add', '-q', ui, 'packages/ui');
+  run(repo, 'add', '.');
+  run(repo, 'commit', '-q', '-m', 'submodule');
+  const { mkdir } = require('node:fs/promises');
+  await mkdir(join(repo, 'node_modules', 'vitest'), { recursive: true });
+  await writeFile(join(repo, 'node_modules', 'vitest', 'index.js'), 'module.exports = 1;\n');
+
+  const worktrees = new Worktrees(join(root, 'trees'));
+  const tree = await worktrees.create(repo, '99999999-aaaa');
+  const { notes, linked } = await worktrees.setup(tree, ['node_modules', '../outside', '/etc', 'missing']);
+  assert.deepEqual(notes, []);
+  assert.deepEqual(linked, ['node_modules'], 'unsafe and missing paths are skipped');
+  assert.equal(await readFile(join(tree.path, 'packages/ui/Button.tsx'), 'utf8'), 'x\n', 'submodule initialized');
+  assert.equal(await readFile(join(tree.path, 'node_modules/vitest/index.js'), 'utf8'), 'module.exports = 1;\n', 'node_modules linked');
+  const withLinks = { ...tree, linked };
+  await writeFile(join(tree.path, 'a.ts'), 'export {};\n');
+  assert.deepEqual((await worktrees.changes(withLinks)).map(change => change.path), ['a.ts']);
+  await worktrees.commit(withLinks, 'add a');
+  assert.deepEqual(run(tree.path, 'show', '--name-only', '--format=', 'HEAD').trim().split('\n'), ['a.ts'], 'the link is not committed');
 });

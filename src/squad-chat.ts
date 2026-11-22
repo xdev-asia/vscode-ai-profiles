@@ -185,7 +185,11 @@ export interface WorkerHost {
   /** Worker settings for a role, with the allowed commands of the repository the step works in. */
   settings(role: Role, repo?: string): WorkerSettings;
   run(request: WorkerRequest): Promise<string>;
-  worktrees: Pick<Worktrees, 'create' | 'commit' | 'remove' | 'changes' | 'changedFiles' | 'discard'>;
+  worktrees: Pick<Worktrees, 'create' | 'commit' | 'remove' | 'changes' | 'changedFiles' | 'discard'> & Partial<Pick<Worktrees, 'setup'>>;
+  /** Paths, such as node_modules, linked from the main checkout into each new worktree. */
+  worktreeLinks?(): readonly string[];
+  /** The branch new worktrees start from, such as origin/dev; HEAD when undefined. */
+  baseBranch?(): string | undefined;
   /** Allowed commands per repository that differ from the workspace default. */
   repositoryCommands?(): Record<string, readonly string[]>;
   prepare?(): Promise<void>;
@@ -497,6 +501,7 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
     }, async run => {
       const runId = randomUUID();
       const trees: RunTree[] = [];
+      const setupNotes: string[] = [];
       if (targets.length) {
         run.status = targets.length > 1 ? `Preparing ${targets.length} git worktrees…` : 'Preparing a git worktree…';
         this.changed();
@@ -504,8 +509,11 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
         try {
           for (const [index, target] of targets.entries()) {
             const worktree = await this.host!.worktrees.create(target !== '.' ? join(folder!, target) : folder!, runId,
-              targets.length > 1 ? `${index + 1}-${target.split('/').at(-1)}` : undefined);
-            trees.push({ ...worktree, target });
+              targets.length > 1 ? `${index + 1}-${target.split('/').at(-1)}` : undefined, this.host!.baseBranch?.());
+            const prepared = await this.host!.worktrees.setup?.(worktree, this.host!.worktreeLinks?.() ?? [])
+              .catch((error: Error) => ({ notes: [error.message], linked: [] as string[] }));
+            trees.push({ ...worktree, target, ...(prepared?.linked.length ? { linked: prepared.linked } : {}) });
+            setupNotes.push(...(prepared?.notes ?? []).map(note => targets.length > 1 ? `${repoName(target)}: ${note}` : note));
           }
         } catch (error) {
           for (const tree of trees) await this.host!.worktrees.remove(tree).catch(() => undefined);
@@ -519,11 +527,12 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
       await this.write(state => {
         state.runs = [record, ...(state.runs ?? [])].slice(0, runLimit);
         const branch = trees[0]?.branch;
+        const from = trees[0]?.source ? ` from ${trees[0].source}` : '';
         state.entries.push({
           author: 'Squad', run: runId,
           text: `${!branch ? '' : trees.length > 1
-            ? `Branch ${branch} is ready in ${trees.length} repositories (${trees.map(tree => repoName(tree.target)).join(', ')}), each in a separate worktree; your checkouts are not changed. `
-            : `Branch ${branch} is ready in a separate worktree; your checkout is not changed. `}Nothing has run yet. Start each step under Worker runs: run it, open it in a terminal, or skip it.`
+            ? `Branch ${branch} is ready${from} in ${trees.length} repositories (${trees.map(tree => repoName(tree.target)).join(', ')}), each in a separate worktree; your checkouts are not changed. `
+            : `Branch ${branch} is ready${from} in a separate worktree; your checkout is not changed. `}Nothing has run yet. Start each step under Worker runs: run it, open it in a terminal, or skip it.${setupNotes.length ? ` Setup: ${setupNotes.join('; ')}` : ''}`
         });
       }, run);
     });

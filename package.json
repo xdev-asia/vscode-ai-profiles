@@ -2,7 +2,7 @@
   "name": "xdev-ai",
   "displayName": "xDev AI",
   "description": "Manage AI accounts, open Claude Code, Codex, and Gemini terminals, and coordinate AI tasks in VS Code.",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "publisher": "xdev-asia",
   "icon": "media/icon.png",
   "private": true,
@@ -270,6 +270,17 @@
           ],
           "default": "auto",
           "markdownDescription": "What **Push & MR** on a Squad run does after you confirm. GitLab merge requests use push options, so no API token is needed."
+        },
+        "xdevAi.squad.baseBranch": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Branch new Squad worktrees start from, for example `origin/dev` (fetched first). Empty starts from the branch your checkout is on, which puts that branch's unmerged commits into every merge request."
+        },
+        "xdevAi.squad.worktreeLinks": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["node_modules"],
+          "markdownDescription": "Paths, relative to a repository, linked from your checkout into each new Squad worktree so builds and tests work without reinstalling, for example `node_modules` or `packages/ui-component/node_modules`. Submodules are initialized in every new worktree. Workers share these folders with your checkout, so keep install commands out of the allowed commands."
         },
         "xdevAi.squad.mergeRequestTarget": {
           "type": "string",
