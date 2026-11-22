@@ -7,7 +7,7 @@ import {
 } from './terminal-profiles';
 import { chat, providers } from './core';
 import { isRole, noteLimit, readTask, roles, SquadStore, type Role } from './squad';
-import { SquadChat, type RunTree, type WorkerHost } from './squad-chat';
+import { runTitle, SquadChat, type RunTree, type WorkerHost } from './squad-chat';
 import { FileMemento, workspaceKey } from './squad-state';
 import { registerSquadTools } from './squad-tools';
 import { squadPage } from './squad-html';
@@ -711,6 +711,12 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
       validateInput: value => validBranch(value.trim()) ? undefined : 'Enter a branch name.'
     });
     if (!target) return;
+    const title = await vscode.window.showInputBox({
+      title: mergeRequests ? 'Merge request title' : 'Title', value: runTitle(run.request),
+      prompt: 'Teammates see this title. Follow your team\'s convention, for example "test(shared): add hisFlag tests".',
+      validateInput: value => value.trim() ? undefined : 'Enter a title.'
+    });
+    if (!title) return;
     const ahead = await Promise.all(plans.map(plan => this.worktrees.ahead(plan.tree, plan.remote.name, target.trim())));
     const push = mergeRequests ? 'Push and open merge request' : 'Push';
     const lines = plans.map((plan, index) => `${multiple ? `${plan.tree.target}: ` : ''}${plan.tree.branch} → ${plan.remote.name} (${plan.remote.url})${ahead[index] !== undefined ? ` · ${ahead[index]} commit${ahead[index] === 1 ? '' : 's'} not on ${target.trim()}` : ''}`);
@@ -718,9 +724,8 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
       modal: true,
       detail: `${lines.join('\n')}\n${mergeRequests ? `GitLab opens a merge request into ${target.trim()} (or updates the open one).` : 'The remote may print a link to open a pull request.'} Teammates can see the branch once it is pushed.`
     }, push) !== push) return;
-    const title = run.request.split('\n', 1)[0];
     for (const plan of plans) {
-      const result = await this.worktrees.push(plan.tree, { target: target.trim(), title, mode });
+      const result = await this.worktrees.push(plan.tree, { target: target.trim(), title: title.trim(), mode });
       await this.teamChat.recordPush(run.id, plan.tree.target, result);
     }
     const links = this.teamChat.run(run.id)?.trees?.flatMap(tree => tree.pushed?.url ? [tree.pushed.url] : []) ?? [];

@@ -274,6 +274,13 @@ export function squadMetrics(history: readonly RunMetric[], now = Date.now()): S
   };
 }
 
+/** A short title for a run's commits and merge requests: the request's first sentence, at most 72 characters. */
+export function runTitle(request: string): string {
+  const line = request.trim().split('\n', 1)[0].trim();
+  const sentence = line.split(/(?<=[.!?:;])\s+|\s+\((?=\d+\))/u, 1)[0].replace(/[.:;]+$/, '').trim() || line;
+  return sentence.length <= 72 ? sentence : `${sentence.slice(0, 71).trimEnd()}…`;
+}
+
 function repoName(target: string): string {
   return target === '.' ? 'workspace' : target;
 }
@@ -825,7 +832,7 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
     const issues: string[] = [];
     for (const tree of record.trees ?? []) {
       try {
-        results.set(tree.target, await this.host!.worktrees.commit(tree, `xDev Squad: ${record.request.split('\n', 1)[0]}`));
+        results.set(tree.target, await this.host!.worktrees.commit(tree, runTitle(record.request)));
       } catch (error) {
         issues.push(`${(record.trees?.length ?? 0) > 1 ? `${repoName(tree.target)}: ` : ''}${error instanceof Error ? error.message : 'Could not commit the worktree.'}`);
       }

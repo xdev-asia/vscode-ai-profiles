@@ -680,3 +680,11 @@ test('a new worktree gets submodules and linked node_modules, and never commits 
   await worktrees.commit(withLinks, 'add a');
   assert.deepEqual(run(tree.path, 'show', '--name-only', '--format=', 'HEAD').trim().split('\n'), ['a.ts'], 'the link is not committed');
 });
+
+test('runs get a short title for commits and merge requests', () => {
+  const { runTitle } = require('../dist/squad-chat.js');
+  assert.equal(runTitle('Chỉ thêm unit test, không sửa code sản phẩm. (1) Repo his/backend/his-service: tạo test'), 'Chỉ thêm unit test, không sửa code sản phẩm');
+  assert.equal(runTitle('Add a health endpoint'), 'Add a health endpoint');
+  assert.equal(runTitle('Fix the login\nwith more detail'), 'Fix the login');
+  assert.equal(runTitle('x'.repeat(100)).length, 72);
+});
