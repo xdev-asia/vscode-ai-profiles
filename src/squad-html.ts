@@ -26,6 +26,7 @@ export function squadPage({ cspSource, nonce, script, chatScript, workspaceScrip
       <button type="button" id="show-workflow" aria-pressed="false">Workflow</button>
       <button type="button" id="show-customizations" aria-pressed="false">Skills &amp; Tools</button>
       <button type="button" id="show-memory" aria-pressed="false">Memory</button>
+      <button type="button" id="show-project" aria-pressed="false">Project</button>
     </nav>
   </header>
   <main id="chat-panel">
@@ -201,6 +202,26 @@ export function squadPage({ cspSource, nonce, script, chatScript, workspaceScrip
       <ul id="memory-list" class="workspace-list"></ul>
     </section>
     <p id="memory-notice" class="workspace-notice" role="status"></p>
+  </main>
+  <main id="project-panel" class="workspace-panel" hidden>
+    <section class="detail">
+      <div class="workspace-heading"><h2 id="project-name">Project</h2><button type="button" id="project-edit">Edit project settings</button></div>
+      <p class="subtle">Squad roles, runs, memory, and these settings belong to this project. Values set in the project's <code>.vscode/settings.json</code> are marked “project”; the rest come from your user settings or defaults.</p>
+      <dl id="project-settings" class="project-settings"></dl>
+    </section>
+    <section class="detail">
+      <div class="workspace-heading"><h2>MCP servers for workers</h2><button type="button" id="project-add-mcp" class="primary">Add server</button></div>
+      <p class="subtle">Workers never load your own MCP servers. Only the servers listed here start, only their listed tools can be called, and AI reviews get none.</p>
+      <ul id="project-mcp" class="workspace-list"></ul>
+      <div class="actions"><button type="button" id="project-mcp-file" hidden>Open .mcp.json</button></div>
+    </section>
+    <section class="detail">
+      <div class="workspace-heading"><h2>Storage</h2><button type="button" id="project-check">Check storage</button></div>
+      <p id="project-disk" class="subtle"></p>
+      <ul id="project-storage" class="workspace-list"></ul>
+      <div class="actions"><button type="button" id="project-clean" class="primary">Clean up…</button></div>
+    </section>
+    <p id="project-notice" class="workspace-notice" role="status"></p>
   </main>
   <div id="squad-toast" class="toast" role="status" hidden></div>
   <script nonce="${nonce}" src="${chatScript}"></script>

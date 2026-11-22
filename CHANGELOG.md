@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.11.0 - 2026-11-22
+
+### Added
+
+- MCP servers for workers, per project: `xdevAi.squad.mcpServers` grants a server (from the project's `.mcp.json`, or defined in the setting) to chosen roles, with the tools workers may call. Other tools of the server are denied, your own MCP servers are still never loaded, AI reviews get none, and server definitions reach Claude Code through a private file that is deleted after the run. Ignored in untrusted workspaces.
+- **Project** tab in Squad: this project's settings and where each comes from (project or user settings), the workers' MCP servers (**Add server**, **Remove**), and storage: free disk, size of each run's worktrees, unused worktree folders, worker transcripts, and Squad state. **Clean up…** deletes what you pick. Command: **xDev AI: Open Squad Project Settings and Storage**.
+- Automatic cleanup: a run whose work is merged or pushed (with nothing committed since) is removed after `xdevAi.squad.cleanupAfterDays` (7; `0` turns it off), with its worktrees, local branches, and worker transcripts. Pushed branches stay on the remote.
+- `xdevAi.squad.minFreeDiskGb` (2): Squad refuses to create worktrees or start a worker step when the disk is fuller than that.
+
+### Fixed
+
+- Squad keeps 10 runs per project. Before, the 11th run dropped the oldest from the list but left its worktrees on disk. Now the oldest run makes room only when its work is merged or pushed; otherwise Squad asks you to push, merge, or remove a run first.
+- Removing a run also deletes the Claude Code transcripts its workers left in each account.
+- MCP tool calls show as `server · tool` in the live activity feed.
+
 ## 0.10.1 - 2026-11-22
 
 ### Added

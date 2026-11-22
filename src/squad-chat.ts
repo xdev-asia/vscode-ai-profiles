@@ -199,6 +199,24 @@ export interface WorkerHost {
   codeContext?(request: string, signal: AbortSignal): Promise<string | undefined>;
   /** The folder holding a CodeGraph index workers may query, if enabled. */
   codegraphRoot?(): Promise<string | undefined>;
+  /** Throws when the disk holding the worktrees is too full to start more work. */
+  checkDisk?(): Promise<void>;
+  /** Deletes the Claude Code transcripts that workers left for these worktree paths. */
+  forgetSessions?(paths: readonly string[]): Promise<void>;
+}
+
+/**
+ * A finished run whose work is safe elsewhere: every worktree is merged, or pushed with nothing committed
+ * since. Removing such a run loses nothing but its local worktrees.
+ */
+export function disposableRun(record: RunRecord): boolean {
+  if (record.status === 'active') return false;
+  return (record.trees ?? []).every(tree => tree.merged || (tree.pushed && tree.pushed.time >= (record.finished ?? 0)));
+}
+
+/** When a disposable run last changed: its last merge or push, else when it finished or started. */
+export function settledAt(record: RunRecord): number {
+  return Math.max(record.finished ?? record.time, ...(record.trees ?? []).map(tree => Math.max(tree.merged ?? 0, tree.pushed?.time ?? 0)));
 }
 
 const roleInstructions: Record<Role, string> = {
@@ -500,12 +518,19 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
       }
     }
     const targets = [...new Set(jobs.flatMap(job => job.kind === 'claude' ? [job.repo ?? '.'] : []))];
+    // Squad keeps a fixed number of runs. The oldest runs make room only when their work is merged or pushed.
+    const overflow = (this.read().runs ?? []).slice(runLimit - 1);
+    if (overflow.some(old => !disposableRun(old))) {
+      throw new Error(`Squad keeps ${runLimit} runs per project. Push, merge, or remove an older run before approving another plan.`);
+    }
+    if (targets.length) await this.host?.checkDisk?.();
 
     return this.launch('Preparing the run…', signal, state => {
       if (state.plan?.id !== plan.id) throw new Error('This plan is no longer available.');
       state.plan = undefined;
       state.entries.push({ author: 'Squad', text: 'Plan approved.' });
     }, async run => {
+      for (const old of overflow) await this.disposeRun(old);
       const runId = randomUUID();
       const trees: RunTree[] = [];
       const setupNotes: string[] = [];
@@ -644,6 +669,7 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
     const elapsed = (saved: RunStep) => (saved.ms ?? 0) + Date.now() - started;
     try {
       if (agent.kind === 'claude') {
+        await this.host!.checkDisk?.();
         await this.host!.prepare?.();
         const tree = this.treeFor(record, step)!;
         const target = tree.target !== '.' ? tree.target : undefined;
@@ -963,12 +989,49 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
     if (record.trees?.length) {
       if (!this.host) throw new Error('Claude Code workers are not available here.');
       for (const tree of record.trees) await this.host.worktrees.remove(tree);
+      await this.host.forgetSessions?.(record.trees.map(tree => tree.path)).catch(() => undefined);
     }
     const branch = record.trees?.[0]?.branch;
     await this.write(state => {
       state.runs = (state.runs ?? []).filter(candidate => candidate.id !== id);
       state.entries.push({ author: 'Squad', text: branch ? `Removed the worktree${(record.trees?.length ?? 0) > 1 ? 's' : ''} and branch ${branch}.` : 'Removed the run.' });
     });
+  }
+
+  /** Removes a run whose work is merged or pushed, with its worktrees, local branches, and worker transcripts. */
+  private async disposeRun(record: RunRecord, reason = 'to make room for a new run'): Promise<void> {
+    if (!disposableRun(record)) return;
+    for (const tree of record.trees ?? []) await this.host?.worktrees.remove(tree).catch(() => undefined);
+    if (record.trees?.length) await this.host?.forgetSessions?.(record.trees.map(tree => tree.path)).catch(() => undefined);
+    await this.write(state => {
+      if (!state.runs?.some(candidate => candidate.id === record.id)) return;
+      state.runs = state.runs.filter(candidate => candidate.id !== record.id);
+      const branch = record.trees?.[0]?.branch;
+      state.entries.push({ author: 'Squad', text: `Cleaned up the run “${runTitle(record.request)}”${branch ? ` (${branch})` : ''} ${reason}; its work is merged or pushed.` });
+    });
+  }
+
+  /** Removes one run whose work is merged or pushed, at the user's request. */
+  async cleanRun(id: unknown): Promise<void> {
+    this.requireIdle();
+    const record = this.run(id);
+    if (!record) return;
+    if (!disposableRun(record)) throw new Error('This run has work that is not merged or pushed. Use Remove on its card instead.');
+    await this.disposeRun(record, 'from Project storage');
+  }
+
+  /** Runs that `pruneRuns` would remove now: merged or pushed, and settled more than `days` ago. */
+  staleRuns(days: number, now = Date.now()): RunRecord[] {
+    if (!(days > 0)) return [];
+    return (this.read().runs ?? []).filter(record => record.trees?.length && disposableRun(record) && now - settledAt(record) > days * 86_400_000);
+  }
+
+  /** Removes stale runs (see `staleRuns`). Does nothing while a run is in progress in any window. */
+  async pruneRuns(days: number, now = Date.now()): Promise<number> {
+    if (this.active || this.remoteRun(this.read().inFlight)) return 0;
+    const stale = this.staleRuns(days, now);
+    for (const record of stale) await this.disposeRun(record, `after ${days} day${days === 1 ? '' : 's'}`);
+    return stale.length;
   }
 
   async discard(id: unknown): Promise<void> {

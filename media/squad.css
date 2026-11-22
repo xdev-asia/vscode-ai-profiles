@@ -383,3 +383,12 @@ button.link:hover { color: var(--vscode-textLink-activeForeground, var(--accent)
 /* Long patch lines scroll inside the patch instead of widening the run card and the panel. */
 .run-list > li, .changes, .changes details.file { min-width: 0; max-width: 100%; }
 .changes .patch { max-width: 100%; box-sizing: border-box; }
+
+.project-settings { display: grid; grid-template-columns: minmax(8em, max-content) 1fr; gap: 4px 12px; margin: 8px 0 0; }
+.project-settings dt { color: var(--vscode-descriptionForeground); white-space: pre; }
+.project-settings dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.project-settings .scope { font-size: 0.85em; padding: 0 4px; border-radius: 3px; border: 1px solid var(--vscode-panel-border); }
+.project-settings .scope.project { color: var(--vscode-textLink-foreground); border-color: currentColor; }
+#project-panel .problem { color: var(--vscode-errorForeground); }
+#project-panel .workspace-list li { min-width: 0; overflow-wrap: anywhere; }
+@media (max-width: 300px) { .project-settings { grid-template-columns: 1fr; } .project-settings dd { margin-bottom: 4px; } }

@@ -294,11 +294,11 @@ test('worktrees branch from HEAD and commit only inside the worktree', async t =
 test('Lead gets the code map and repositories, the plan suggests a repository, and workers stream activity', async t => {
   let chat;
   const live = [];
-  const repos = ['his/backend/his-service', 'his/frontend/his-portal'];
+  const repos = ['services/billing-api', 'apps/web-portal'];
   const { open, runs, worktrees } = await setup(t, request => {
     if (request.mode === 'plan') {
-      return report({ reply: 'Làm trong his/frontend/his-portal', tasks: [
-        { role: 'Implement', brief: 'Thêm bil40 giống src/domains/bil/pages/bil32 trong his/frontend/his-portal' },
+      return report({ reply: 'Làm trong apps/web-portal', tasks: [
+        { role: 'Implement', brief: 'Thêm monthly giống src/pages/invoices/daily trong apps/web-portal' },
         { role: 'Tests', brief: 'Test mapper' }
       ] });
     }
@@ -308,14 +308,14 @@ test('Lead gets the code map and repositories, the plan suggests a repository, a
     return report({ status: 'done', summary: 'ok', files_changed: ['src/a.ts'], tests: '', memory: [] });
   }, {
     repositories: async () => repos,
-    codeContext: async request => `bil32Rules.ts · buildNoiDung (for: ${request})`,
+    codeContext: async request => `dailyRules.ts · buildNoiDung (for: ${request})`,
     codegraphRoot: async () => '/repo'
   });
   chat = open();
-  await chat.send('Thêm màn bil40 giống bil32');
+  await chat.send('Thêm màn monthly giống daily');
   await settle(chat);
   const lead = JSON.parse(runs[0].prompt);
-  assert.match(lead.code, /^bil32Rules\.ts · buildNoiDung/);
+  assert.match(lead.code, /^dailyRules\.ts · buildNoiDung/);
   assert.deepEqual(lead.repositories, repos);
   assert.match(runs[0].system, /file paths relative to the task's repository root/);
   assert.match(runs[0].system, /one Implement task per repository/);
@@ -323,21 +323,21 @@ test('Lead gets the code map and repositories, the plan suggests a repository, a
   assert.match(runs[0].system, /may only run "allowed_commands"/);
   assert.match(runs[0].system, /CodeGraph excerpt/);
   const { plan } = chat.snapshot();
-  assert.deepEqual(plan.jobs.map(job => job.repo), ['his/frontend/his-portal', 'his/frontend/his-portal'], 'suggested from the brief, then from the plan');
+  assert.deepEqual(plan.jobs.map(job => job.repo), ['apps/web-portal', 'apps/web-portal'], 'suggested from the brief, then from the plan');
   assert.deepEqual(plan.repos, repos);
 
-  await (await chat.approve(plan.id, undefined, 'human', 'his/backend/his-service')).finished;
-  assert.equal(worktrees.created[0].repo, '/repo/his/backend/his-service', 'the user can override the suggestion');
+  await (await chat.approve(plan.id, undefined, 'human', 'services/billing-api')).finished;
+  assert.equal(worktrees.created[0].repo, '/repo/services/billing-api', 'the user can override the suggestion');
   const runId = chat.snapshot().runs[0].id;
-  assert.equal(chat.snapshot().runs[0].trees[0].target, 'his/backend/his-service');
+  assert.equal(chat.snapshot().runs[0].trees[0].target, 'services/billing-api');
   await (await chat.runStep(runId)).finished;
   assert.equal(live[0].role, 'Implement');
   assert.deepEqual(live[0].items.map(item => [item.kind, item.text]), [['edit', 'src/a.ts'], ['run', 'npx vitest run src/a.test.ts']]);
   assert.deepEqual([live[0].edits, live[0].commands], [1, 1]);
   assert.equal(chat.snapshot().live, undefined, 'activity clears when the step ends');
   assert.match(runs[1].system, /codegraph explore -p \/repo/);
-  assert.match(runs[1].system, /root of the repository "his\/backend\/his-service"/);
-  assert.equal(JSON.parse(runs[1].prompt).repository, 'his/backend/his-service');
+  assert.match(runs[1].system, /root of the repository "services\/billing-api"/);
+  assert.equal(JSON.parse(runs[1].prompt).repository, 'services/billing-api');
   assert.equal(runs[1].settings.codegraph, true);
   assert.equal(JSON.parse(runs[1].prompt).changed_files, undefined, 'Implement starts from the task');
 
@@ -546,9 +546,9 @@ test('runs saved by older versions are read as one-repository runs', async t => 
 
 test('worktrees push to the remote, ask GitLab for a merge request, and hide credentials', async t => {
   const { safeRemoteUrl, mergeRequestUrl, validBranch } = require('../dist/squad-worktree.js');
-  assert.equal(safeRemoteUrl('https://user:tok@gitlab.fis.vn/a/b.git\n'), 'https://gitlab.fis.vn/a/b.git');
-  assert.equal(safeRemoteUrl('git@gitlab.fis.vn:a/b.git'), 'git@gitlab.fis.vn:a/b.git');
-  assert.equal(mergeRequestUrl('remote:\nremote: View merge request for xdev/squad/1:\nremote:   https://gitlab.fis.vn/a/b/-/merge_requests/12\nremote:'), 'https://gitlab.fis.vn/a/b/-/merge_requests/12');
+  assert.equal(safeRemoteUrl('https://user:tok@gitlab.example.com/a/b.git\n'), 'https://gitlab.example.com/a/b.git');
+  assert.equal(safeRemoteUrl('git@gitlab.example.com:a/b.git'), 'git@gitlab.example.com:a/b.git');
+  assert.equal(mergeRequestUrl('remote:\nremote: View merge request for xdev/squad/1:\nremote:   https://gitlab.example.com/a/b/-/merge_requests/12\nremote:'), 'https://gitlab.example.com/a/b/-/merge_requests/12');
   assert.equal(mergeRequestUrl('remote: Create a pull request for \'x\' on GitHub by visiting:\nremote:      https://github.com/o/r/pull/new/x\n'), 'https://github.com/o/r/pull/new/x');
   assert.equal(mergeRequestUrl('Everything up-to-date'), undefined);
   assert.equal(validBranch('dev'), true);
@@ -613,7 +613,7 @@ test('shared state lives in one file that every window reads, falling back to va
   const { FileMemento, workspaceKey } = require('../dist/squad-state.js');
   const root = await mkdtemp(join(tmpdir(), 'xdev-state-'));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const key = workspaceKey('file:///home/u/ehospital');
+  const key = workspaceKey('file:///home/u/project');
   assert.match(key, /^[0-9a-f]{16}$/);
   assert.notEqual(key, workspaceKey('file:///home/u/other'));
   const file = join(root, 'squad-state', `${key}.json`);
@@ -683,7 +683,7 @@ test('a new worktree gets submodules and linked node_modules, and never commits 
 
 test('runs get a short title for commits and merge requests', () => {
   const { runTitle } = require('../dist/squad-chat.js');
-  assert.equal(runTitle('Chỉ thêm unit test, không sửa code sản phẩm. (1) Repo his/backend/his-service: tạo test'), 'Chỉ thêm unit test, không sửa code sản phẩm');
+  assert.equal(runTitle('Chỉ thêm unit test, không sửa code sản phẩm. (1) Repo services/billing-api: tạo test'), 'Chỉ thêm unit test, không sửa code sản phẩm');
   assert.equal(runTitle('Add a health endpoint'), 'Add a health endpoint');
   assert.equal(runTitle('Fix the login\nwith more detail'), 'Fix the login');
   assert.equal(runTitle('x'.repeat(100)).length, 72);
