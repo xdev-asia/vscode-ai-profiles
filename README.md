@@ -149,6 +149,28 @@ Without `command` or `url`, the server of the same name in `.mcp.json` is used. 
 
 A stdio server starts in the worker's worktree. If it reads data folders or writes logs relative to its working directory, set those paths as absolute paths in `env`; otherwise it cannot find its data, and its log files show up in the run's changes. For a server that also has data tools, list only the tools workers need, for example its schema tools, and keep tools that return personal data out of the list.
 
+**Give workers the project's `.env`.** A worktree is a clean checkout, so untracked `.env` files are missing and tests that need them fail. List them per repository:
+
+```json
+"xdevAi.squad.workerEnvFiles": {
+  "services/ops": [".env"],
+  "services/studio": ["api/.env"]
+}
+```
+
+When Implement or Tests starts, Squad reads these files from your checkout and sets their variables in the worker's environment, so allowed commands such as `uv run pytest` see them. The values are not copied into the worktree, not put in the prompt (the worker gets only the names), and not shown in the panel. No role may read the files: Squad adds a Claude Code deny rule for each. Workers run only allowed commands, so they cannot print the environment unless an allowed command does; a failing test that prints a connection string still ends up in the run's output. Variables that would change the worker itself (`ANTHROPIC_*`, `CLAUDE_*`, `OPENAI_*`, `PATH`, `HOME`, `NODE_OPTIONS`, …) are skipped. Keep the files themselves in your secret store (for example Vault) rather than in Squad's sync folder.
+
+**Ask for a deploy.** Describe how each repository deploys:
+
+```json
+"xdevAi.squad.deployTargets": {
+  "services/api": { "from": "dev", "to": "build-dev" },
+  "services/studio": { "from": "main", "health": "https://studio.dev.example.com/healthz" }
+}
+```
+
+On a pushed run, **Deploy** fetches the branches and shows, per repository, how many commits `from` has that `to` lacks and whether the run's merge request is merged into `from` yet (a squash merge is not detected). After you confirm, it opens a GitLab merge request from `from` into `to` (through a temporary `xdev/deploy/<id>` branch, removed when merged); merging it starts your pipeline. Without `to`, merging into `from` is the deploy and only the health check runs. **Check health** calls the `health` address from the extension host and shows the HTTP status on the run. Squad does not watch CI servers or merge anything.
+
 **Keep the disk from filling up.** The Project tab shows free disk and, after **Check storage**, the size of each run's worktrees, unused worktree folders, worker transcripts, and Squad state. **Clean up…** lists what can go: runs whose work is merged or pushed, unused worktree folders (unmerged branches are kept), and transcripts of removed runs. Squad also:
 
 - removes a run whose work is merged or pushed, with nothing committed since, after `xdevAi.squad.cleanupAfterDays` (7 by default; pushed branches stay on the remote);
@@ -182,6 +204,9 @@ The reviewer is the account assigned to Lead and must differ from the account th
 | `xdevAi.squad.mcpServers` | `{}` | MCP servers workers may use in this project, with their allowed tools and roles. |
 | `xdevAi.squad.cleanupAfterDays` | `7` | Remove runs whose work is merged or pushed after this many days. `0` turns it off. |
 | `xdevAi.squad.minFreeDiskGb` | `2` | Free disk Squad needs before creating worktrees or starting a step. `0` turns the check off. |
+| `xdevAi.squad.repositoryBaseBranches` | `{}` | Base branch per repository, overriding `xdevAi.squad.baseBranch`; its merge requests target it. |
+| `xdevAi.squad.workerEnvFiles` | `{}` | `.env` files per repository whose variables Implement and Tests get as environment variables. |
+| `xdevAi.squad.deployTargets` | `{}` | How each repository deploys (`from`, `to`, `health`), for **Deploy** and **Check health** on a run. |
 
 Workers do not use `--dangerously-skip-permissions` or `--bare` (bare mode ignores claude.ai sign-in). Built-in tools a role does not need are not loaded, and only the MCP servers granted in `xdevAi.squad.mcpServers` start (`--strict-mcp-config` with `--mcp-config`), which keeps each request small. [Claude Code headless mode](https://code.claude.com/docs/en/headless) · [CLI reference](https://code.claude.com/docs/en/cli-reference)
 

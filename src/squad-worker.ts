@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative } from 'node:path';
 import type { Role } from './squad';
+import { envDenyRules } from './squad-env';
 import type { WorkerMcp } from './squad-mcp';
 import { terminalProfileEnv, type TerminalProfile } from './terminal-profiles';
 
@@ -39,6 +40,10 @@ export interface WorkerSettings {
   codegraph?: boolean;
   /** MCP servers this project grants the role, and the rules for the tools it may call. Never used by AI gates. */
   mcp?: WorkerMcp;
+  /** Variables from the project's .env files, set for the worker's commands. Never in the prompt. */
+  env?: Record<string, string>;
+  /** Absolute paths of the project's .env files, which no role may read. */
+  denyRead?: readonly string[];
 }
 
 export type ActivityKind = 'read' | 'search' | 'edit' | 'run' | 'tool' | 'denied' | 'failed';
@@ -166,6 +171,7 @@ export function workerArguments(request: Omit<WorkerRequest, 'executable' | 'pro
   ];
   if (mcp) args.push('--mcp-config', mcpConfig!);
   if (allowed.length) args.push('--allowedTools', allowed.join(','));
+  if (settings.denyRead?.length) args.push('--disallowedTools', envDenyRules(settings.denyRead).join(','));
   if (settings.budgetUsd > 0) args.push('--max-budget-usd', String(settings.budgetUsd));
   if (settings.model) args.push('--model', settings.model);
   if (mode !== 'work') args.push('--no-session-persistence');
@@ -362,7 +368,7 @@ export function runClaude(request: WorkerRequest, spawn: Spawn = spawnProcess): 
     const windowsScript = process.platform === 'win32' && /\.cmd$/i.test(executable);
     const child = spawn(windowsScript ? process.env.ComSpec ?? 'cmd.exe' : executable,
       windowsScript ? ['/d', '/s', '/c', executable, ...args] : args, {
-        cwd, env: workerEnvironment(profile), stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true
+        cwd, env: workerEnvironment(profile, { ...process.env, ...settings.env }), stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true
       });
     let buffer = '';
     let result = '';

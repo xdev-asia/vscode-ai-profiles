@@ -11,6 +11,8 @@ export interface RunWorktree {
   source?: string;
   /** Paths linked from the main checkout; never staged or committed. */
   linked?: string[];
+  /** Set when the configured base branch did not exist and the run started from the remote's default branch. */
+  fallbackFrom?: string;
 }
 
 export type MergeRequestMode = 'auto' | 'gitlab' | 'push';
@@ -152,16 +154,26 @@ export class Worktrees {
     const repo = await this.repository(folder);
     let base: string;
     let source: string;
+    let fallback: string | undefined;
     if (start) {
       if (!validBranch(start)) throw new Error(`"${start}" is not a valid base branch. Check xdevAi.squad.baseBranch.`);
       const remotes = (await this.run(['remote'], repo).catch(() => '')).split('\n').map(name => name.trim()).filter(Boolean);
       const remote = remotes.find(name => start.startsWith(`${name}/`));
       // Fetch so the run starts from the remote branch as it is now; work offline from the last fetch if this fails.
       if (remote) await this.runAll(['fetch', '-q', remote, start.slice(remote.length + 1)], repo).catch(() => undefined);
-      base = (await this.run(['rev-parse', '--verify', `${start}^{commit}`], repo).catch(() => {
-        throw new Error(`The base branch ${start} does not exist in ${repo}. Check xdevAi.squad.baseBranch.`);
-      })).trim();
-      source = remote ? start.slice(remote.length + 1) : start;
+      let from = start;
+      let found = (await this.run(['rev-parse', '--verify', `${start}^{commit}`], repo).catch(() => '')).trim();
+      if (!found && remote) {
+        // A workspace often mixes repositories whose main line differs (dev here, main there): fall back to the
+        // remote's default branch instead of failing, and say so.
+        const head = (await this.run(['symbolic-ref', '--short', `refs/remotes/${remote}/HEAD`], repo).catch(() => '')).trim();
+        found = head ? (await this.run(['rev-parse', '--verify', `${head}^{commit}`], repo).catch(() => '')).trim() : '';
+        if (found) from = head;
+      }
+      if (!found) throw new Error(`The base branch ${start} does not exist in ${repo}. Check xdevAi.squad.baseBranch.`);
+      base = found;
+      source = remote ? from.slice(remote.length + 1) : from;
+      if (from !== start) fallback = start;
     } else {
       base = (await this.run(['rev-parse', 'HEAD'], repo).catch(() => {
         throw new Error('The repository has no commits yet. Make a first commit before running workers.');
@@ -173,7 +185,7 @@ export class Worktrees {
     const path = label ? join(this.root, name, label.replace(/[^\w.-]+/g, '-').slice(0, 60)) : join(this.root, name);
     await mkdir(dirname(path), { recursive: true, mode: 0o700 });
     await this.run(['worktree', 'add', '-b', branch, path, base], repo);
-    return { repo, path, branch, base, ...(source && source !== 'HEAD' ? { source } : {}) };
+    return { repo, path, branch, base, ...(source && source !== 'HEAD' ? { source } : {}), ...(fallback ? { fallbackFrom: fallback } : {}) };
   }
 
   /**
@@ -222,6 +234,12 @@ export class Worktrees {
     return fromRemote || worktree.source || 'main';
   }
 
+  /** Whether the remote branch is known locally (after a fetch). */
+  async hasRemoteBranch(repo: string, remote: string, branch: string): Promise<boolean> {
+    if (!validBranch(branch)) return false;
+    return this.run(['rev-parse', '--verify', '-q', `refs/remotes/${remote}/${branch}`], repo).then(() => true, () => false);
+  }
+
   /** Commits on the run's branch that the remote target branch does not have yet, when the remote branch is known locally. */
   async ahead(worktree: RunWorktree, remote: string, target: string): Promise<number | undefined> {
     const count = await this.run(['rev-list', '--count', `refs/remotes/${remote}/${target}..${worktree.branch}`], worktree.repo).catch(() => '');
@@ -243,6 +261,38 @@ export class Worktrees {
     ] : [];
     const output = await this.runAll(['push', '-u', ...pushOptions, remote.name, `${worktree.branch}:refs/heads/${worktree.branch}`], worktree.path);
     return { remote: remote.name, target: options.target, url: mergeRequestUrl(output), mergeRequest };
+  }
+
+  /** Fetches one branch from the remote. False when the remote has no such branch. */
+  async fetchBranch(repo: string, remote: string, branch: string): Promise<boolean> {
+    if (!validBranch(branch)) return false;
+    return this.runAll(['fetch', '-q', remote, `+refs/heads/${branch}:refs/remotes/${remote}/${branch}`], repo).then(() => true, () => false);
+  }
+
+  /** Whether a commit is on the fetched remote branch (merged with a merge commit or fast-forward; not after a squash). */
+  async contains(repo: string, remote: string, branch: string, commit: string): Promise<boolean> {
+    return this.run(['merge-base', '--is-ancestor', commit, `refs/remotes/${remote}/${branch}`], repo).then(() => true, () => false);
+  }
+
+  /** Commits on remote/from that remote/to does not have: what a deploy would bring. */
+  async behind(repo: string, remote: string, from: string, to: string): Promise<number | undefined> {
+    const count = await this.run(['rev-list', '--count', `refs/remotes/${remote}/${to}..refs/remotes/${remote}/${from}`], repo).catch(() => '');
+    return count.trim() ? Number(count.trim()) : undefined;
+  }
+
+  /**
+   * Asks for a deploy: pushes the fetched remote/from to a new branch and, on GitLab, opens a merge request from it
+   * into `to` with push options. Nothing is merged; merging the request starts the deploy pipeline.
+   */
+  async deploy(repo: string, options: { from: string; to: string; branch: string; title: string; mode: MergeRequestMode }): Promise<PushResult> {
+    if (![options.from, options.to, options.branch].every(validBranch)) throw new Error('Enter valid branch names for the deploy.');
+    const remote = await this.remote({ repo });
+    const mergeRequest = options.mode === 'gitlab' || (options.mode === 'auto' && remote.host === 'gitlab');
+    if (!mergeRequest) throw new Error('Deploy merge requests need a GitLab remote (xdevAi.squad.mergeRequests).');
+    const title = options.title.replace(/\s+/g, ' ').trim().slice(0, 120) || `Deploy ${options.from} to ${options.to}`;
+    const output = await this.runAll(['push', '-o', 'merge_request.create', '-o', `merge_request.target=${options.to}`, '-o', `merge_request.title=${title}`,
+      '-o', 'merge_request.remove_source_branch', remote.name, `refs/remotes/${remote.name}/${options.from}:refs/heads/${options.branch}`], repo);
+    return { remote: remote.name, target: options.to, url: mergeRequestUrl(output), mergeRequest };
   }
 
   /** Commits whatever the workers left in the worktree to its branch, locally. */

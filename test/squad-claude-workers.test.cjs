@@ -596,7 +596,8 @@ test('worktrees push to the remote, ask GitLab for a merge request, and hide cre
   assert.equal(fromDev.base, run(repo, 'rev-parse', 'origin/dev').trim());
   assert.equal(fromDev.source, 'dev');
   await assert.rejects(readFile(join(fromDev.path, 'local.txt')), 'the feature branch is not in the run');
-  await assert.rejects(worktrees.create(repo, 'abcdef13-cccc', undefined, 'origin/nope'), /base branch origin\/nope does not exist/);
+  const missing = await worktrees.create(repo, 'abcdef13-cccc', undefined, 'origin/nope');
+  assert.equal(missing.fallbackFrom, 'origin/nope', 'a missing base branch falls back to the remote default branch');
   await assert.rejects(worktrees.create(repo, 'abcdef14-dddd', undefined, '--upload-pack=x'), /not a valid base branch/);
 });
 

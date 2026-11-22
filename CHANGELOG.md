@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.12.0 - 2026-11-22
+
+### Added
+
+- Project `.env` files for workers: `xdevAi.squad.workerEnvFiles` lists, per repository, the `.env` files whose variables Implement and Tests get when they run commands. Squad reads them from your checkout when a step starts and sets them in the worker's environment. Values are never copied into the worktree, put in a prompt, or shown; the worker is told only the variable names. No role may read these files (Claude Code deny rules; verified for Read and Grep). Variables that would change the worker itself (`ANTHROPIC_*`, `CLAUDE_*`, `PATH`, …) are skipped.
+- **Deploy** on a pushed run, for repositories in `xdevAi.squad.deployTargets` (`from`, `to`, `health`). Squad fetches the branches, shows how many commits would deploy and whether the run's merge request is merged, and after you confirm opens a GitLab merge request from → to with push options. Merging it, which starts the pipeline, stays with you. **Check health** calls the health address and shows the status on the run.
+- The Project tab lists each `.env` file with its variable names (never values) and each deploy target.
+- `xdevAi.squad.repositoryBaseBranches`: a base branch per repository, for workspaces that mix repositories whose main line differs (`dev` in some, `main` in others). Merge requests from such a repository target its own base branch.
+
+### Changed
+
+- A repository without the configured base branch now starts from its remote's default branch, and the run says so, instead of failing.
+- **Push & MR** uses each repository's own target when they differ, and shows them before pushing. The configured `mergeRequestTarget` applies only where the remote has that branch.
+
 ## 0.11.0 - 2026-11-22
 
 ### Added

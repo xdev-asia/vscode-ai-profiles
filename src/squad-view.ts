@@ -9,6 +9,7 @@ import {
 import { chat, providers } from './core';
 import { isRole, noteLimit, readTask, roles, SquadStore, type Role } from './squad';
 import { disposableRun, runTitle, settledAt, SquadChat, type RunTree, type WorkerHost } from './squad-chat';
+import { allEnvFiles, envFilesFor, loadEnv } from './squad-env';
 import { readMcpGrants, readProjectMcp, workerMcp, type McpGrant } from './squad-mcp';
 import { folderSize, formatBytes, freeBytes, removeFolders, sessionFolder, sessionFolders } from './squad-storage';
 import { FileMemento, workspaceKey } from './squad-state';
@@ -58,6 +59,54 @@ function mcpGrants(): McpGrant[] {
   return readMcpGrants(squadSetting<unknown>('mcpServers', {}), readProjectMcp(folder));
 }
 
+export interface DeployTarget {
+  /** The branch merge requests land on, for example dev. */
+  from: string;
+  /** The branch whose changes start the deploy pipeline, for example build-dev. Without it, merging into `from` deploys. */
+  to?: string;
+  /** An https address that answers when the deployed app is up. */
+  health?: string;
+}
+
+/** xdevAi.squad.deployTargets, validated: { repo: { from, to?, health? } }. */
+function deployTargets(): Record<string, DeployTarget> {
+  const configured = squadSetting<Record<string, unknown>>('deployTargets', {});
+  if (!configured || typeof configured !== 'object' || Array.isArray(configured)) return {};
+  return Object.fromEntries(Object.entries(configured).flatMap(([repo, value]) => {
+    const entry = value as Record<string, unknown> | null;
+    if (!entry || typeof entry !== 'object' || !repo.trim()) return [];
+    const from = typeof entry.from === 'string' && validBranch(entry.from.trim()) ? entry.from.trim() : undefined;
+    const to = typeof entry.to === 'string' && validBranch(entry.to.trim()) ? entry.to.trim() : undefined;
+    const health = typeof entry.health === 'string' && /^https?:\/\/[^\s]+$/i.test(entry.health.trim()) ? entry.health.trim() : undefined;
+    if (!from || from === to) return [];
+    return [[repo.trim().replace(/\/+$/, ''), { from, ...(to ? { to } : {}), ...(health ? { health } : {}) }]];
+  }));
+}
+
+function deployFor(repo: string): DeployTarget | undefined {
+  const targets = deployTargets();
+  return targets[repo] ?? targets[repo.split('/').at(-1)!];
+}
+
+/** Base branches per repository (xdevAi.squad.repositoryBaseBranches), keyed by path or folder name. */
+function repositoryBases(): Record<string, string> {
+  const configured = squadSetting<Record<string, unknown>>('repositoryBaseBranches', {});
+  if (!configured || typeof configured !== 'object' || Array.isArray(configured)) return {};
+  return Object.fromEntries(Object.entries(configured).flatMap(([repo, branch]) =>
+    typeof branch === 'string' && validBranch(branch.trim()) && repo.trim() ? [[repo.trim().replace(/\/+$/, ''), branch.trim()]] : []));
+}
+
+function ownBase(repo: string | undefined): string | undefined {
+  if (!repo) return undefined;
+  const bases = repositoryBases();
+  return bases[repo] ?? bases[repo.split('/').at(-1)!];
+}
+
+/** The branch a repository's worktrees start from: its own base branch, else xdevAi.squad.baseBranch, else HEAD. */
+function baseBranchFor(repo?: string): string | undefined {
+  return ownBase(repo) ?? (squadSetting<string>('baseBranch', '').trim() || undefined);
+}
+
 function cleanupDays(): number {
   const days = Number(squadSetting<number>('cleanupAfterDays', 7));
   return Number.isFinite(days) ? Math.min(Math.max(Math.round(days), 0), 365) : 7;
@@ -78,8 +127,23 @@ function workerSettings(role: Role, repo?: string): WorkerSettings {
     budgetUsd: Number.isFinite(budget) && budget >= 0 ? Math.min(budget, 50) : 1,
     allowedCommands: commandsFor(repo),
     timeoutMs: (Number.isFinite(minutes) ? Math.min(Math.max(minutes, 1), 120) : 20) * 60_000,
-    mcp: workerMcp(mcpGrants(), role)
+    mcp: workerMcp(mcpGrants(), role),
+    ...workerEnv(role, repo)
   };
+}
+
+/**
+ * The project's .env values for the roles that run commands (Implement, Tests), read from the main checkout when
+ * the step starts; and, for every role, the files no worker may read. Nothing in an untrusted workspace.
+ */
+function workerEnv(role: Role, repo?: string): Pick<WorkerSettings, 'env' | 'denyRead'> {
+  const folder = workspaceFolder();
+  if (!folder || !vscode.workspace.isTrusted) return {};
+  const setting = squadSetting<unknown>('workerEnvFiles', {});
+  const denyRead = allEnvFiles(setting, folder).filter(file => !file.problem).map(file => file.path);
+  const own = repo && (role === 'Implement' || role === 'Tests') ? envFilesFor(setting, folder, repo) : [];
+  const env = own.length ? loadEnv(own) : undefined;
+  return { ...(env && Object.keys(env).length ? { env } : {}), ...(denyRead.length ? { denyRead } : {}) };
 }
 
 function codegraphTimeoutMs(): number {
@@ -199,7 +263,7 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
       run: request => runClaude(request),
       worktrees: this.worktrees = new Worktrees(worktreeRoot),
       repositoryCommands,
-      baseBranch: () => squadSetting<string>('baseBranch', '').trim() || undefined,
+      baseBranch: repo => baseBranchFor(repo),
       worktreeLinks: () => squadSetting<unknown[]>('worktreeLinks', ['node_modules']).filter((item): item is string => typeof item === 'string'),
       prepare: async () => { await this.syncProfiles(); },
       repositories: () => this.repositories(),
@@ -271,7 +335,7 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
     const grants = mcpGrants();
     const projectServers = folder && vscode.workspace.isTrusted ? Object.keys(readProjectMcp(folder)) : [];
     const keys = ['baseBranch', 'mergeRequests', 'mergeRequestTarget', 'workerBudgetUsd', 'workerTimeoutMinutes', 'workerAllowedCommands',
-      'repositoryAllowedCommands', 'worktreeLinks', 'codegraph', 'mcpServers', 'cleanupAfterDays', 'minFreeDiskGb'];
+      'repositoryAllowedCommands', 'worktreeLinks', 'codegraph', 'mcpServers', 'cleanupAfterDays', 'minFreeDiskGb', 'workerEnvFiles', 'deployTargets', 'repositoryBaseBranches'];
     const free = await freeBytes(this.worktreeRoot).catch(() => undefined);
     return {
       name: vscode.workspace.name ?? (folder ? basename(folder) : ''),
@@ -280,6 +344,7 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
       repositories: await this.repositories().catch(() => [] as string[]),
       settings: {
         baseBranch: squadSetting<string>('baseBranch', '').trim(),
+        repositoryBases: repositoryBases(),
         mergeRequests: squadSetting<string>('mergeRequests', 'auto'),
         mergeRequestTarget: squadSetting<string>('mergeRequestTarget', '').trim(),
         budgetUsd: workerSettings('Implement').budgetUsd,
@@ -295,6 +360,10 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
       mcp: grants.map(grant => ({
         name: grant.name, source: grant.source, tools: grant.tools, roles: grant.roles, problem: grant.problem, server: describeServer(grant)
       })),
+      // Variable names only; values never leave the extension host.
+      envFiles: folder && vscode.workspace.isTrusted ? allEnvFiles(squadSetting<unknown>('workerEnvFiles', {}), folder)
+        .map(({ repo, file, names, skipped, problem }) => ({ repo, file, names, skipped, problem })) : [],
+      deploy: deployTargets(),
       mcpFile: Boolean(folder && existsSync(join(folder, '.mcp.json'))),
       mcpAvailable: projectServers.filter(name => !grants.some(grant => grant.name === name)),
       disk: { free, minimum: minFreeBytes() },
@@ -712,7 +781,8 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
           workers: {
             ...workerSettings('Implement'), models: squadSetting('workerModels', {}), repositoryCommands: repositoryCommands(),
             baseBranch: squadSetting<string>('baseBranch', '').trim()
-          }
+          },
+          deploy: deployTargets()
         },
         nativeChatTools: this.chatTools,
         project: await this.projectInfo(),
@@ -788,6 +858,14 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
           await this.teamChat.requestChanges(message.id, message.text, message.repo);
           return;
         case 'runPush': return this.pushRun(message.id);
+        case 'runDeploy': return this.deployRun(message.id);
+        case 'runHealth': return this.checkHealth(message.id, true);
+        case 'runDeployLink': {
+          const tree = this.teamChat.runTree(message.id, message.repo).tree;
+          if (!tree.deploy?.url) throw new Error('This deploy has no merge request link.');
+          await vscode.env.openExternal(vscode.Uri.parse(tree.deploy.url));
+          return;
+        }
         case 'runLink': {
           const tree = this.teamChat.runTree(message.id, message.repo).tree;
           if (!tree.pushed?.url) throw new Error('This branch has no merge request link yet.');
@@ -1055,32 +1133,38 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
     const configured = squadSetting<string>('mergeRequestTarget', '').trim();
     const plans = await Promise.all(trees.map(async tree => {
       const remote = await this.worktrees.remote(tree);
-      return { tree, remote, target: configured || await this.worktrees.defaultTarget(tree, remote.name) };
+      // A repository with its own base branch targets it; otherwise the configured target, when the remote has it.
+      const own = ownBase(tree.target) && tree.source;
+      const shared = configured && (await this.worktrees.hasRemoteBranch(tree.repo, remote.name, configured)) ? configured : undefined;
+      return { tree, remote, target: own || shared || tree.source || await this.worktrees.defaultTarget(tree, remote.name) };
     }));
     const multiple = plans.length > 1;
     const mergeRequests = plans.some(plan => mode === 'gitlab' || (mode === 'auto' && plan.remote.host === 'gitlab'));
-    // One target branch for all repositories keeps the dialogs short; the default comes from the first one.
-    const target = await vscode.window.showInputBox({
+    const differ = new Set(plans.map(plan => plan.target)).size > 1;
+    // One target branch for all repositories keeps the dialogs short; when they differ, each keeps its own (shown before pushing).
+    const asked = differ ? plans[0].target : await vscode.window.showInputBox({
       title: mergeRequests ? 'Target branch for the merge request' : 'Branch the pull request should target',
       value: plans[0].target, prompt: multiple ? `Used for ${plans.map(plan => plan.tree.target).join(', ')}.` : undefined,
       validateInput: value => validBranch(value.trim()) ? undefined : 'Enter a branch name.'
     });
-    if (!target) return;
+    if (!asked) return;
+    if (!differ) for (const plan of plans) plan.target = asked.trim();
+    const target = asked;
     const title = await vscode.window.showInputBox({
       title: mergeRequests ? 'Merge request title' : 'Title', value: runTitle(run.request),
       prompt: 'Teammates see this title. Follow your team\'s convention, for example "test(api): add date parser tests".',
       validateInput: value => value.trim() ? undefined : 'Enter a title.'
     });
     if (!title) return;
-    const ahead = await Promise.all(plans.map(plan => this.worktrees.ahead(plan.tree, plan.remote.name, target.trim())));
+    const ahead = await Promise.all(plans.map(plan => this.worktrees.ahead(plan.tree, plan.remote.name, plan.target)));
     const push = mergeRequests ? 'Push and open merge request' : 'Push';
-    const lines = plans.map((plan, index) => `${multiple ? `${plan.tree.target}: ` : ''}${plan.tree.branch} → ${plan.remote.name} (${plan.remote.url})${ahead[index] !== undefined ? ` · ${ahead[index]} commit${ahead[index] === 1 ? '' : 's'} not on ${target.trim()}` : ''}`);
+    const lines = plans.map((plan, index) => `${multiple ? `${plan.tree.target}: ` : ''}${plan.tree.branch} → ${plan.remote.name} (${plan.remote.url})${differ ? ` · into ${plan.target}` : ''}${ahead[index] !== undefined ? ` · ${ahead[index]} commit${ahead[index] === 1 ? '' : 's'} not on ${plan.target}` : ''}`);
     if (await vscode.window.showWarningMessage(`Push ${plans[0].tree.branch}${multiple ? ` in ${plans.length} repositories` : ''}?`, {
       modal: true,
-      detail: `${lines.join('\n')}\n${mergeRequests ? `GitLab opens a merge request into ${target.trim()} (or updates the open one).` : 'The remote may print a link to open a pull request.'} Teammates can see the branch once it is pushed.`
+      detail: `${lines.join('\n')}\n${mergeRequests ? `GitLab opens a merge request into ${differ ? 'each repository\'s target' : target.trim()} (or updates the open one).` : 'The remote may print a link to open a pull request.'} Teammates can see the branch once it is pushed.`
     }, push) !== push) return;
     for (const plan of plans) {
-      const result = await this.worktrees.push(plan.tree, { target: target.trim(), title: title.trim(), mode });
+      const result = await this.worktrees.push(plan.tree, { target: plan.target, title: title.trim(), mode });
       await this.teamChat.recordPush(run.id, plan.tree.target, result);
     }
     const links = this.teamChat.run(run.id)?.trees?.flatMap(tree => tree.pushed?.url ? [tree.pushed.url] : []) ?? [];
@@ -1092,6 +1176,91 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
     } else {
       void vscode.window.showInformationMessage(`Pushed ${plans[0].tree.branch}.`);
     }
+  }
+
+  /**
+   * Asks for a deploy of the repositories this run pushed: for each with a deploy target, fetches the branches,
+   * shows what would be deployed, and after you confirm opens a GitLab merge request from → to. Merging stays with you.
+   */
+  private async deployRun(id: unknown): Promise<void> {
+    const run = this.requireRun(id);
+    const items = (run.trees ?? []).flatMap(tree => {
+      const target = deployFor(tree.target);
+      return target && tree.pushed ? [{ tree, target }] : [];
+    });
+    if (!items.length) throw new Error('Push the run first, and set a deploy target for its repository in xdevAi.squad.deployTargets.');
+    const plans = [];
+    for (const { tree, target } of items) {
+      const remote = await this.worktrees.remote(tree);
+      const fetched = await this.worktrees.fetchBranch(tree.repo, remote.name, target.from);
+      if (!fetched) throw new Error(`${remote.name}/${target.from} was not found for ${tree.target}.`);
+      if (target.to && !(await this.worktrees.fetchBranch(tree.repo, remote.name, target.to))) {
+        throw new Error(`${remote.name}/${target.to} was not found for ${tree.target}.`);
+      }
+      const merged = tree.commit ? await this.worktrees.contains(tree.repo, remote.name, target.from, tree.commit) : false;
+      const behind = target.to ? await this.worktrees.behind(tree.repo, remote.name, target.from, target.to) : undefined;
+      plans.push({ tree, target, remote, merged, behind });
+    }
+    const multiple = plans.length > 1;
+    const lines = plans.map(plan => `${multiple || plan.tree.target !== '.' ? `${plan.tree.target}: ` : ''}${plan.target.to
+      ? `${plan.remote.name}/${plan.target.from} → ${plan.target.to} · ${plan.behind === undefined ? 'unknown number of' : plan.behind} commit${plan.behind === 1 ? '' : 's'} to deploy`
+      : `deploys when ${plan.target.from} changes; only the health check runs`}${plan.merged ? '' : `\n  This run's commit is not on ${plan.target.from} yet: its merge request is not merged (or was squashed).`}`);
+    const requests = plans.filter(plan => plan.target.to && plan.behind !== 0);
+    if (!requests.length && !plans.some(plan => plan.target.health || (!plan.target.to && plan.merged))) {
+      void vscode.window.showInformationMessage(`Nothing to deploy yet. ${lines.join(' ').replace(/\s+/g, ' ')}`);
+      return;
+    }
+    const confirm = requests.length ? (requests.length > 1 ? 'Open deploy merge requests' : 'Open deploy merge request') : 'Check health';
+    if (await vscode.window.showWarningMessage(requests.length ? 'Ask for a deploy?' : 'Nothing to merge for a deploy.', {
+      modal: true,
+      detail: `${lines.join('\n')}\n${requests.length ? 'GitLab opens a merge request for each; merging it starts the deploy pipeline. Teammates can see it.' : ''}`
+    }, confirm) !== confirm) return;
+    const mode = squadSetting<MergeRequestMode>('mergeRequests', 'auto');
+    for (const plan of plans) {
+      if (plan.target.to && plan.behind !== 0) {
+        const result = await this.worktrees.deploy(plan.tree.repo, {
+          from: plan.target.from, to: plan.target.to, branch: `xdev/deploy/${run.id.slice(0, 8)}`,
+          title: `Deploy ${plan.target.from} → ${plan.target.to}: ${runTitle(run.request)}`, mode
+        });
+        await this.teamChat.recordDeploy(run.id, plan.tree.target, { from: plan.target.from, to: plan.target.to, url: result.url });
+      } else if (!plan.target.to && plan.merged) {
+        // Merging into `from` is the deploy; until the run's merge request is merged there is nothing to record.
+        await this.teamChat.recordDeploy(run.id, plan.tree.target, { from: plan.target.from });
+      }
+    }
+    await this.checkHealth(run.id, false);
+    const links = this.teamChat.run(run.id)?.trees?.flatMap(tree => tree.deploy?.url ? [tree.deploy.url] : []) ?? [];
+    if (links.length) {
+      const open = links.length > 1 ? 'Open merge requests' : 'Open merge request';
+      if (await vscode.window.showInformationMessage('Deploy merge request ready. Merge it in GitLab to deploy.', open) === open) {
+        for (const link of links) await vscode.env.openExternal(vscode.Uri.parse(link));
+      }
+    }
+  }
+
+  /** Calls each deployed repository's health address and records the HTTP status (0 when it does not answer). */
+  private async checkHealth(id: unknown, report: boolean): Promise<void> {
+    const run = this.requireRun(id);
+    const checks = (run.trees ?? []).flatMap(tree => {
+      const health = deployFor(tree.target)?.health;
+      return health ? [{ tree, health }] : [];
+    });
+    if (!checks.length) {
+      if (report) throw new Error('Set a "health" address for this repository in xdevAi.squad.deployTargets.');
+      return;
+    }
+    const results: string[] = [];
+    for (const { tree, health } of checks) {
+      let status = 0;
+      try {
+        status = (await fetch(health, { signal: AbortSignal.timeout(15_000), redirect: 'manual' })).status;
+      } catch {
+        status = 0;
+      }
+      await this.teamChat.recordHealth(run.id, tree.target, { url: health, status });
+      results.push(`${tree.target}: ${status || 'no answer'}`);
+    }
+    if (report) void vscode.window.showInformationMessage(`Health: ${results.join(' · ')}`);
   }
 
   private async resumeSession(id: unknown, sessionId: unknown): Promise<void> {
