@@ -21,7 +21,7 @@ function report(output, extra = {}) {
   return JSON.stringify({ type: 'result', subtype: 'success', is_error: false, total_cost_usd: 0.1, num_turns: 2, structured_output: output, ...extra });
 }
 
-async function setup(t, respond) {
+async function setup(t, respond, extraHost = {}) {
   const storage = memento();
   const secrets = new Map();
   const accounts = new Accounts({ get: async key => secrets.get(key), store: async (key, value) => secrets.set(key, value) });
@@ -41,7 +41,11 @@ async function setup(t, respond) {
       return tree;
     },
     async commit(tree, message) { this.committed.push({ tree, message }); return { commit: 'c0ffee', stat: ' a.ts | 2 +-', files: 1 }; },
-    async remove(tree) { this.removed.push(tree.branch); }
+    async remove(tree) { this.removed.push(tree.branch); },
+    discarded: [],
+    async changedFiles() { return ['src/a.ts', 'src/a.test.ts']; },
+    async changes() { return [{ path: 'src/a.ts', status: 'modified', added: 2, removed: 1, binary: false, patch: '@@ -1 +1,2 @@\n-a\n+b\n+c' }]; },
+    async discard(tree, file) { this.discarded.push(file); }
   };
   let prepared = 0;
   const host = {
@@ -54,7 +58,8 @@ async function setup(t, respond) {
       return respond(request);
     },
     worktrees,
-    prepare: async () => { prepared++; }
+    prepare: async () => { prepared++; },
+    ...extraHost
   };
   const open = () => new SquadChat(storage, accounts, squad, () => {}, host);
   return { open, runs, worktrees, squad, prepared: () => prepared };
@@ -278,4 +283,140 @@ test('worktrees branch from HEAD and commit only inside the worktree', async t =
   await worktrees.remove(tree);
   assert.doesNotMatch(run('branch', '--list'), /12345678/);
   await assert.rejects(worktrees.create(root, 'ffffffff-0000-0000-0000-000000000000'), /git repository/);
+});
+
+test('Lead gets the code map and repositories, the plan suggests a repository, and workers stream activity', async t => {
+  let chat;
+  const live = [];
+  const repos = ['his/backend/his-service', 'his/frontend/his-portal'];
+  const { open, runs, worktrees } = await setup(t, request => {
+    if (request.mode === 'plan') {
+      return report({ reply: 'Làm trong his/frontend/his-portal', tasks: [
+        { role: 'Implement', brief: 'Thêm bil40 giống src/domains/bil/pages/bil32 trong his/frontend/his-portal' },
+        { role: 'Tests', brief: 'Test mapper' }
+      ] });
+    }
+    request.onActivity?.({ kind: 'edit', text: 'src/a.ts' });
+    request.onActivity?.({ kind: 'run', text: 'npx vitest run src/a.test.ts' });
+    live.push(structuredClone(chat.snapshot().live));
+    return report({ status: 'done', summary: 'ok', files_changed: ['src/a.ts'], tests: '', memory: [] });
+  }, {
+    repositories: async () => repos,
+    codeContext: async request => `bil32Rules.ts · buildNoiDung (for: ${request})`,
+    codegraphRoot: async () => '/repo'
+  });
+  chat = open();
+  await chat.send('Thêm màn bil40 giống bil32');
+  await settle(chat);
+  const lead = JSON.parse(runs[0].prompt);
+  assert.match(lead.code, /^bil32Rules\.ts · buildNoiDung/);
+  assert.deepEqual(lead.repositories, repos);
+  assert.match(runs[0].system, /file paths relative to that repository/);
+  assert.deepEqual(lead.allowed_commands, ['npm test']);
+  assert.match(runs[0].system, /may only run "allowed_commands"/);
+  assert.match(runs[0].system, /CodeGraph excerpt/);
+  const { plan } = chat.snapshot();
+  assert.equal(plan.repo, 'his/frontend/his-portal');
+  assert.deepEqual(plan.repos, repos);
+
+  await (await chat.approve(plan.id, undefined, 'human', 'his/backend/his-service')).finished;
+  assert.equal(worktrees.created[0].repo, '/repo/his/backend/his-service', 'the user can override the suggestion');
+  const runId = chat.snapshot().runs[0].id;
+  assert.equal(chat.snapshot().runs[0].target, 'his/backend/his-service');
+  await (await chat.runStep(runId)).finished;
+  assert.equal(live[0].role, 'Implement');
+  assert.deepEqual(live[0].items.map(item => [item.kind, item.text]), [['edit', 'src/a.ts'], ['run', 'npx vitest run src/a.test.ts']]);
+  assert.deepEqual([live[0].edits, live[0].commands], [1, 1]);
+  assert.equal(chat.snapshot().live, undefined, 'activity clears when the step ends');
+  assert.match(runs[1].system, /codegraph explore -p \/repo/);
+  assert.match(runs[1].system, /root of the repository "his\/backend\/his-service"/);
+  assert.equal(JSON.parse(runs[1].prompt).repository, 'his/backend/his-service');
+  assert.equal(runs[1].settings.codegraph, true);
+  assert.equal(JSON.parse(runs[1].prompt).changed_files, undefined, 'Implement starts from the task');
+
+  await (await chat.runStep(runId)).finished;
+  assert.deepEqual(JSON.parse(runs[2].prompt).changed_files, ['src/a.ts', 'src/a.test.ts']);
+  assert.match(runs[2].system, /Run only the tests that cover changed_files/);
+  assert.equal(chat.snapshot().runs[0].status, 'done');
+
+  assert.equal((await chat.changes(runId))[0].path, 'src/a.ts');
+  await chat.discardFile(runId, 'src/a.ts');
+  assert.deepEqual(worktrees.discarded, ['src/a.ts']);
+  assert.match(worktrees.committed.at(-1).message, /discard src\/a\.ts/, 'a finished run records the discard in a commit');
+  assert.match(chat.snapshot().entries.at(-1).text, /Discarded the changes to src\/a\.ts and committed/);
+});
+
+test('approving needs a repository when the workspace has several and the plan names none', async t => {
+  const { open, worktrees } = await setup(t, request => request.mode === 'plan'
+    ? report({ reply: 'Go', tasks: [{ role: 'Implement', brief: 'Do it' }] })
+    : report({ status: 'done', summary: 'ok', files_changed: [], tests: '', memory: [] }), {
+    repositories: async () => ['a', 'b']
+  });
+  const chat = open();
+  await chat.send('Do it');
+  await settle(chat);
+  const { plan } = chat.snapshot();
+  assert.equal(plan.repo, undefined);
+  await assert.rejects(chat.approve(plan.id), /Choose the repository/);
+  await assert.rejects(chat.approve(plan.id, undefined, 'human', '../etc'), /Choose the repository/);
+  await (await chat.approve(plan.id, undefined, 'human', 'b')).finished;
+  assert.equal(worktrees.created[0].repo, '/repo/b');
+});
+
+test('worktree changes list staged and new files, and discard restores or deletes them', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'xdev-changes-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const repo = join(root, 'repo');
+  const run = (...args) => execFileSync('git', args, { cwd: repo, encoding: 'utf8' });
+  execFileSync('git', ['init', '-q', '-b', 'main', repo]);
+  run('config', 'user.email', 'dev@example.com');
+  run('config', 'user.name', 'Dev');
+  await writeFile(join(repo, 'a.txt'), 'one\ntwo\n');
+  run('add', '.');
+  run('commit', '-q', '-m', 'init');
+  const worktrees = new Worktrees(join(root, 'trees'));
+  const tree = await worktrees.create(repo, 'abcdef12-aaaa-bbbb-cccc-dddddddddddd');
+  await writeFile(join(tree.path, 'a.txt'), 'one\nTWO\nthree\n');
+  await writeFile(join(tree.path, 'b.txt'), 'new\n');
+  const changes = await worktrees.changes(tree);
+  assert.deepEqual(changes.map(file => [file.path, file.status, file.added, file.removed]), [['a.txt', 'modified', 2, 1], ['b.txt', 'added', 1, 0]]);
+  assert.match(changes[0].patch, /^@@ .* @@\n one\n-two\n\+TWO\n\+three$/);
+  await assert.rejects(worktrees.discard(tree, '../a.txt'), /no changes/);
+  await worktrees.discard(tree, 'a.txt');
+  await worktrees.discard(tree, 'b.txt');
+  assert.equal(await readFile(join(tree.path, 'a.txt'), 'utf8'), 'one\ntwo\n');
+  await assert.rejects(readFile(join(tree.path, 'b.txt')));
+  assert.deepEqual(await worktrees.changes(tree), []);
+});
+
+test('leftover Squad worktrees are found and cleaned, keeping unmerged branches', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'xdev-leftover-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const repo = join(root, 'repo');
+  const run = (...args) => execFileSync('git', args, { cwd: repo, encoding: 'utf8' });
+  execFileSync('git', ['init', '-q', '-b', 'main', repo]);
+  run('config', 'user.email', 'dev@example.com');
+  run('config', 'user.name', 'Dev');
+  await writeFile(join(repo, 'a.txt'), 'one\n');
+  run('add', '.');
+  run('commit', '-q', '-m', 'init');
+  const worktrees = new Worktrees(join(root, 'trees'));
+  const merged = await worktrees.create(repo, 'aaaaaaaa-0000-0000-0000-000000000000');
+  const unmerged = await worktrees.create(repo, 'bbbbbbbb-0000-0000-0000-000000000000');
+  const tracked = await worktrees.create(repo, 'cccccccc-0000-0000-0000-000000000000');
+  await writeFile(join(unmerged.path, 'b.txt'), 'new\n');
+  await worktrees.commit(unmerged, 'work');
+  run('worktree', 'add', '-q', '-b', 'feature/other', join(root, 'other'));
+
+  const found = await worktrees.leftovers(repo, new Set([tracked.path]));
+  assert.deepEqual(found.map(item => [item.branch, item.merged]).sort(), [['xdev/squad/aaaaaaaa', true], ['xdev/squad/bbbbbbbb', false]]);
+  assert.ok(found.every(item => item.changed > 0));
+  for (const item of found) await worktrees.clean(item);
+  const branches = run('branch', '--list');
+  assert.doesNotMatch(branches, /aaaaaaaa/, 'merged branch deleted');
+  assert.match(branches, /bbbbbbbb/, 'unmerged branch kept');
+  assert.match(branches, /cccccccc/, 'tracked run untouched');
+  assert.match(branches, /feature\/other/, 'other worktrees untouched');
+  assert.deepEqual((await worktrees.leftovers(repo, new Set([tracked.path]))).length, 0);
+  void merged;
 });

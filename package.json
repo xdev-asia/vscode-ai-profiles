@@ -2,7 +2,7 @@
   "name": "xdev-ai",
   "displayName": "xDev AI",
   "description": "Manage AI accounts, open Claude Code, Codex, and Gemini terminals, and coordinate AI tasks in VS Code.",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "publisher": "xdev-asia",
   "icon": "media/icon.png",
   "private": true,
@@ -42,6 +42,7 @@
       { "command": "xdevAi.squad.customizations", "title": "Manage Skills and Tools", "category": "xDev AI" },
       { "command": "xdevAi.squad.memory", "title": "Open Squad Memory", "category": "xDev AI" },
       { "command": "xdevAi.squad.syncSkills", "title": "Sync Squad Skills and Memory", "category": "xDev AI" },
+      { "command": "xdevAi.squad.cleanWorktrees", "title": "Clean Up Squad Worktrees", "category": "xDev AI", "icon": "$(trash)" },
       { "command": "xdevAi.manageMcp", "title": "Manage MCP", "category": "xDev AI", "icon": "$(plug)" },
       { "command": "xdevAi.manageTerminalAccounts", "title": "Open AI Accounts Sidebar", "category": "xDev AI", "icon": "$(account)" },
       { "command": "xdevAi.addAiAccount", "title": "Add AI Account", "category": "xDev AI", "icon": "$(add)" },
@@ -81,6 +82,7 @@
         { "command": "xdevAi.openTerminal", "when": "view == terminal", "group": "navigation@21" },
         { "command": "xdevAi.squad.open", "when": "view == terminal", "group": "navigation@22" },
         { "command": "xdevAi.addAiAccount", "when": "view == xdevAi.claude.accounts || view == xdevAi.squad", "group": "navigation@1" },
+        { "command": "xdevAi.squad.cleanWorktrees", "when": "view == xdevAi.squad", "group": "1_workspace@9" },
         { "command": "xdevAi.checkUsage", "when": "view == xdevAi.claude.accounts", "group": "navigation@2" },
         { "command": "xdevAi.squad.open", "when": "view == xdevAi.claude.accounts", "group": "navigation@3" },
         { "command": "xdevAi.squad.workflow", "when": "view == xdevAi.claude.accounts", "group": "1_workspace@1" },
@@ -239,6 +241,11 @@
           "type": "boolean",
           "default": true,
           "markdownDescription": "Copy enabled Squad skills into each Claude Code account as `xdev-*` user skills, so workers load them on demand. Skills you installed yourself are never changed."
+        },
+        "xdevAi.squad.codegraph": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "When the workspace folder has a CodeGraph index (`.codegraph/`), give Lead an excerpt of the relevant code before planning and let workers query it with `codegraph explore`. The lookup stops after 20 seconds."
         },
         "xdevAi.squad.syncFolder": {
           "type": "string",

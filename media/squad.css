@@ -246,3 +246,121 @@ body { background: var(--vscode-sideBar-background, var(--vscode-editor-backgrou
   .memory-form { flex-direction: column; align-items: stretch; }
   .approver select { margin: 4px 0 0; }
 }
+
+/* Team board: one card per role, connected left to right. */
+.squad-board {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px;
+  position: sticky; top: var(--board-top, 0px); z-index: 1; padding-block: 2px 6px;
+  background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+}
+.member {
+  --role: var(--accent);
+  position: relative; display: grid; justify-items: center; gap: 2px; min-width: 0; padding: 8px 4px 6px;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--surface); text-align: center;
+  transition: border-color .2s, background-color .2s, opacity .2s;
+}
+.member[data-role="lead"] { --role: var(--vscode-charts-purple, #b180d7); }
+.member[data-role="implement"] { --role: var(--vscode-charts-blue, #3794ff); }
+.member[data-role="review"] { --role: var(--vscode-charts-orange, #d18616); }
+.member[data-role="tests"] { --role: var(--vscode-charts-green, #89d185); }
+.member:not(:last-child)::after {
+  content: ""; position: absolute; top: 22px; inset-inline-end: -6px; width: 6px; border-top: 1px dashed var(--muted); opacity: .6;
+}
+.member .avatar {
+  display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; font-weight: 700; font-size: 13px;
+  color: var(--vscode-editor-background); background: var(--role);
+}
+.member .name { font-weight: 600; font-size: .88em; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.member .state { font-size: .76em; color: var(--muted); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.member[data-state="vacant"], .member[data-state="skipped"] { opacity: .5; }
+.member[data-state="vacant"] .avatar { background: transparent; color: var(--muted); border: 1px dashed var(--muted); }
+.member[data-state="done"] { border-color: color-mix(in srgb, var(--vscode-testing-iconPassed, var(--role)) 60%, transparent); }
+.member[data-state="done"] .state { color: var(--vscode-testing-iconPassed, var(--muted)); }
+.member[data-state="blocked"], .member[data-state="failed"] { border-color: var(--warning); }
+.member[data-state="blocked"] .state, .member[data-state="failed"] .state { color: var(--warning); }
+.member[data-state="pending"], .member[data-state="proposed"] { border-color: var(--role); }
+.member[data-state="working"], .member[data-state="planning"], .member[data-state="reviewing"] {
+  border-color: var(--role); background: color-mix(in srgb, var(--role) 12%, var(--surface));
+}
+.member[data-state="working"] .state, .member[data-state="planning"] .state, .member[data-state="reviewing"] .state { color: var(--vscode-foreground); }
+.member[data-state="working"] .avatar, .member[data-state="planning"] .avatar, .member[data-state="reviewing"] .avatar { animation: squad-pulse 1.4s ease-out infinite; }
+@keyframes squad-pulse {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--role) 70%, transparent); }
+  100% { box-shadow: 0 0 0 9px transparent; }
+}
+
+/* Live activity of the running worker. */
+.live { border: 1px solid var(--accent); border-radius: 6px; padding: 8px 10px; background: var(--surface); display: grid; gap: 4px; }
+.live-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.live-head .live-time { margin-inline-start: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
+.live .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); --role: var(--accent); animation: squad-pulse 1.4s ease-out infinite; }
+.live-counts { font-size: .88em; }
+.live-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.live-list li { display: flex; gap: 6px; align-items: baseline; min-width: 0; opacity: .75; }
+.live-list li.latest { opacity: 1; animation: squad-in .25s ease-out; }
+.live-list code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--vscode-editor-font-family, monospace); font-size: .9em; }
+.kind { flex: none; font-size: .78em; padding: 0 5px; border-radius: 6px; border: 1px solid var(--border); color: var(--muted); }
+.kind.edit { color: var(--vscode-charts-blue, var(--accent)); border-color: currentColor; }
+.kind.run { color: var(--vscode-charts-green, var(--accent)); border-color: currentColor; }
+.kind.search, .kind.read { color: var(--vscode-charts-purple, var(--muted)); }
+#chat-messages article.fresh { animation: squad-in .3s ease-out; }
+@keyframes squad-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+/* Changes of a run, inline. */
+button.accent { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+button.accent:hover:not(:disabled) { background: var(--vscode-button-hoverBackground); }
+.changes { display: grid; gap: 4px; margin-top: 6px; }
+.changes:empty { display: none; }
+.changes-head { display: flex; align-items: center; gap: 8px; }
+.changes-head button { margin-inline-start: auto; }
+.plus, .delta { color: var(--vscode-gitDecoration-addedResourceForeground, #81b88b); }
+.minus { color: var(--vscode-gitDecoration-deletedResourceForeground, #c74e39); }
+.changes details.file { border: 1px solid var(--border); border-radius: 4px; background: var(--vscode-editor-background); }
+.changes details.file > summary { display: flex; align-items: center; gap: 6px; padding: 3px 6px; font-weight: 400; min-width: 0; }
+.changes details.file > .actions { padding: 4px 6px 6px; }
+.fstatus { flex: none; width: 16px; text-align: center; font-weight: 700; font-size: .85em; border-radius: 3px; }
+.fstatus.added { color: var(--vscode-gitDecoration-addedResourceForeground, #81b88b); }
+.fstatus.modified { color: var(--vscode-gitDecoration-modifiedResourceForeground, #e2c08d); }
+.fstatus.deleted { color: var(--vscode-gitDecoration-deletedResourceForeground, #c74e39); }
+.fpath { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: start; }
+.delta { flex: none; font-size: .85em; font-variant-numeric: tabular-nums; }
+.bar {
+  flex: none; width: 34px; height: 5px; border-radius: 3px;
+  background: linear-gradient(90deg, var(--vscode-gitDecoration-addedResourceForeground, #81b88b) var(--add, 50%), var(--vscode-gitDecoration-deletedResourceForeground, #c74e39) var(--add, 50%));
+}
+.patch { margin: 0; padding: 4px 0; max-height: 280px; overflow: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: .86em; border-top: 1px solid var(--border); }
+.patch span { display: block; padding-inline: 6px; white-space: pre; }
+.patch .add { background: var(--vscode-diffEditor-insertedLineBackground, rgba(155, 185, 85, .2)); }
+.patch .del { background: var(--vscode-diffEditor-removedLineBackground, rgba(255, 0, 0, .2)); }
+.patch .hunk { color: var(--muted); background: var(--vscode-editorGroupHeader-tabsBackground, transparent); }
+
+/* Toast after a step ends. */
+.toast {
+  position: fixed; inset-inline: 12px; bottom: 96px; z-index: 5; margin: 0 auto; max-width: 420px; padding: 8px 12px; border-radius: 6px;
+  background: var(--vscode-notifications-background, var(--surface)); color: var(--vscode-notifications-foreground, var(--vscode-foreground));
+  border: 1px solid var(--vscode-notifications-border, var(--border)); border-inline-start: 3px solid var(--accent);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, .3);
+}
+.toast[data-tone="good"] { border-inline-start-color: var(--vscode-testing-iconPassed, var(--accent)); }
+.toast[data-tone="warn"] { border-inline-start-color: var(--warning); }
+.toast.show { animation: squad-toast 4s ease forwards; }
+@keyframes squad-toast { 0% { opacity: 0; transform: translateY(8px); } 8%, 85% { opacity: 1; transform: none; } 100% { opacity: 0; } }
+#plan-repo-field select { max-width: 100%; }
+@media (max-width: 340px) {
+  .squad-board { gap: 4px; }
+  .member { padding: 6px 2px 4px; }
+  .member .avatar { width: 24px; height: 24px; font-size: 12px; }
+  .member .name { font-size: .8em; }
+  .member .state { font-size: .7em; }
+}
+@media (max-width: 230px) {
+  .member .state { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .member .avatar, .live .pulse, .live-list li.latest, #chat-messages article.fresh, .toast.show { animation: none !important; }
+}
+
+/* Plan briefs stay short so Approve stays in view; click one to read it all. */
+#chat-jobs p.brief { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; cursor: pointer; }
+#chat-jobs p.brief.open { display: block; }
+.kind.denied, .kind.failed { color: var(--warning); border-color: currentColor; }

@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { isAbsolute, join } from 'node:path';
+import { isAbsolute, join, relative } from 'node:path';
 import * as vscode from 'vscode';
 import { Accounts, accountStorageKey } from './accounts';
 import {
@@ -11,6 +11,7 @@ import { chatPromptLimit, SquadChat, type WorkerHost } from './squad-chat';
 import { registerSquadTools } from './squad-tools';
 import { skillDescriptionLimit, skillInstructionsLimit, skillNameLimit, squadTools } from './squad-customizations';
 import { memoryTextLimit } from './squad-memory';
+import { exploreCode, findRepositories, hasCodegraph } from './squad-codegraph';
 import { runClaude, validCommand, type WorkerSettings } from './squad-worker';
 import { git, Worktrees } from './squad-worktree';
 import { mergeSkills, readSyncFolder, syncProfileSkills, writeSyncFolder } from './skill-sync';
@@ -53,6 +54,13 @@ export function registerSquad(
     vscode.commands.registerCommand('xdevAi.squad.customizations', () => view.open('customizations')),
     vscode.commands.registerCommand('xdevAi.squad.memory', () => view.open('memory')),
     vscode.commands.registerCommand('xdevAi.squad.syncSkills', () => view.syncFolder()),
+    vscode.commands.registerCommand('xdevAi.squad.cleanWorktrees', async () => {
+      try {
+        await view.cleanWorktrees();
+      } catch (error) {
+        void vscode.window.showErrorMessage(error instanceof Error ? error.message : 'Could not clean up Squad worktrees.');
+      }
+    }),
     vscode.workspace.onDidChangeConfiguration(event => {
       if (event.affectsConfiguration('xdevAi.squad')) void view.refresh();
     }),
@@ -97,10 +105,75 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
       folder: workspaceFolder,
       settings: workerSettings,
       run: request => runClaude(request),
-      worktrees: new Worktrees(join(storage.fsPath, 'squad-worktrees')),
-      prepare: async () => { await this.syncProfiles(); }
+      worktrees: this.worktrees = new Worktrees(join(storage.fsPath, 'squad-worktrees')),
+      prepare: async () => { await this.syncProfiles(); },
+      repositories: () => this.repositories(),
+      codeContext: async (request, signal) => {
+        const folder = workspaceFolder();
+        if (!folder || !squadSetting('codegraph', true) || Date.now() < this.codegraphPausedUntil) return undefined;
+        const started = Date.now();
+        const text = await exploreCode(folder, request, { signal });
+        if (!text && !signal.aborted && Date.now() - started > 15_000) {
+          // A busy or locked index would otherwise delay every message by the full timeout.
+          this.codegraphPausedUntil = Date.now() + 10 * 60_000;
+          void vscode.window.showWarningMessage('CodeGraph did not answer within 20 seconds. Squad plans without it for the next 10 minutes. Check the index with "codegraph status".');
+        }
+        return text;
+      },
+      codegraphRoot: async () => {
+        const folder = workspaceFolder();
+        return folder && squadSetting('codegraph', true) && await hasCodegraph(folder) ? folder : undefined;
+      }
     };
     this.teamChat = new SquadChat(context.workspaceState, accounts, this.store, () => void this.refresh(), host);
+  }
+
+  private repositoryCache?: { folder: string; time: number; list: Promise<string[]> };
+  private codegraphPausedUntil = 0;
+  private readonly worktrees: Worktrees;
+
+  /**
+   * Lists Squad worktrees in the workspace's repositories that no run in this window tracks, lets the user
+   * pick which to remove, and deletes a branch only when it is merged.
+   */
+  async cleanWorktrees(): Promise<void> {
+    const folder = workspaceFolder();
+    if (!folder) throw new Error('Open a workspace folder first.');
+    const known = new Set(this.teamChat.snapshot().runs.flatMap(run => run.path ? [run.path] : []));
+    const repos = [...new Set(await Promise.all((await this.repositories()).map(repo => git(['rev-parse', '--show-toplevel'], repo === '.' ? folder : join(folder, repo)).then(top => top.trim(), () => ''))))].filter(Boolean);
+    const leftovers = (await Promise.all(repos.map(repo => this.worktrees.leftovers(repo, known)))).flat();
+    if (!leftovers.length) {
+      void vscode.window.showInformationMessage('No leftover Squad worktrees in this workspace.');
+      return;
+    }
+    const day = 86_400_000;
+    const picked = await vscode.window.showQuickPick(leftovers.map(item => ({
+      label: item.branch,
+      description: relative(folder, item.repo) || '.',
+      detail: `${item.merged ? 'Merged' : 'Not merged: the branch is kept'} · last commit ${item.changed ? `${Math.max(0, Math.round((Date.now() - item.changed) / day))} days ago` : 'unknown'} · ${item.path}`,
+      picked: item.merged || Date.now() - item.changed > day,
+      item
+    })), {
+      canPickMany: true, title: 'Remove leftover Squad worktrees',
+      placeHolder: 'Uncommitted files in a removed worktree are deleted. Another window may still use a recent one.'
+    });
+    if (!picked?.length) return;
+    const kept: string[] = [];
+    for (const { item } of picked) if ((await this.worktrees.clean(item)).branchKept) kept.push(item.branch);
+    void vscode.window.showInformationMessage(`Removed ${picked.length} worktree${picked.length === 1 ? '' : 's'}.${kept.length ? ` Kept unmerged branch${kept.length === 1 ? '' : 'es'}: ${kept.join(', ')}.` : ''}`);
+  }
+
+  /** Git repositories in the workspace folder, cached for a minute because a large workspace is slow to scan. */
+  repositories(): Promise<string[]> {
+    const folder = workspaceFolder();
+    if (!folder) return Promise.resolve([]);
+    const cached = this.repositoryCache;
+    if (cached?.folder === folder && Date.now() - cached.time < 60_000) return cached.list;
+    // The folder counts when it sits anywhere inside a repository; nested folders only when they are a repository root.
+    const list = findRepositories(folder, path => git(['rev-parse', '--show-toplevel'], path)
+      .then(top => path === folder || relative(top.trim(), path) === '', () => false));
+    this.repositoryCache = { folder, time: Date.now(), list };
+    return list;
   }
 
   /** Copies enabled skills into every Claude Code account so headless workers load them on demand. */
@@ -196,9 +269,9 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
         const type = message?.type === 'squadChat' ? 'chatSettled' :
           message?.type === 'workspace' ? 'workspaceSettled' : 'settled';
         try {
-          await this.receive(message);
+          const data = await this.receive(message);
           await this.refresh();
-          void view.webview.postMessage({ type });
+          void view.webview.postMessage({ type, action: message?.action, data });
         } catch (error) {
           void view.webview.postMessage({
             type,
@@ -279,7 +352,7 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
     ];
   }
 
-  private async receive(input: unknown): Promise<void> {
+  private async receive(input: unknown): Promise<unknown> {
     if (!input || typeof input !== 'object') return;
     const message = input as Record<string, unknown>;
     if (message.type === 'workspace') return this.updateWorkflowOrCustomizations(message);
@@ -289,11 +362,23 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
           await this.teamChat.send(message.text);
           return;
         case 'approve':
-          await this.teamChat.approve(message.id, undefined, message.approver ?? squadSetting('approver', 'human'));
+          await this.teamChat.approve(message.id, undefined, message.approver ?? squadSetting('approver', 'human'), message.repo);
           return;
         case 'discard': return this.teamChat.discard(message.id);
         case 'stop': return this.teamChat.cancel();
         case 'runDiff': return this.showRunDiff(message.id);
+        case 'runChanges': return { id: message.id, files: await this.teamChat.changes(message.id) };
+        case 'runOpenFile': return this.openRunFile(message.id, message.file);
+        case 'runDiscard': {
+          const run = this.requireWorktree(message.id);
+          if (typeof message.file !== 'string') return;
+          const discard = 'Discard changes';
+          if (await vscode.window.showWarningMessage(`Discard the changes to ${message.file}?`, {
+            modal: true, detail: `The file goes back to how it was before the run on ${run.branch}.${run.status === 'active' ? '' : ' A new local commit records this.'}`
+          }, discard) !== discard) return;
+          await this.teamChat.discardFile(run.id, message.file);
+          return { id: run.id, files: await this.teamChat.changes(run.id) };
+        }
         case 'runOpen': {
           const run = this.requireWorktree(message.id);
           await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(run.path), { forceNewWindow: true });
@@ -476,6 +561,20 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
     await this.openClaudeTerminal(`${step.role} · ${step.name}`, step.profile, step.cwd, ['--append-system-prompt', step.system, step.prompt]);
   }
 
+  /** Opens VS Code's diff editor for one file: the base commit on the left, the worktree on the right. */
+  private async openRunFile(id: unknown, file: unknown): Promise<void> {
+    const run = this.requireWorktree(id);
+    if (typeof file !== 'string' || !(await this.teamChat.changes(run.id)).some(change => change.path === file)) {
+      throw new Error('That file has no changes in this run.');
+    }
+    const before = await git(['show', `${run.base}:${file}`], run.path).catch(() => '');
+    const left = await vscode.workspace.openTextDocument({ content: before });
+    const right = vscode.Uri.file(join(run.path, file));
+    const exists = await vscode.workspace.fs.stat(right).then(() => true, () => false);
+    const target = exists ? right : (await vscode.workspace.openTextDocument({ content: '' })).uri;
+    await vscode.commands.executeCommand('vscode.diff', left.uri, target, `${file} (${run.branch})`, { preview: true });
+  }
+
   private async showRunDiff(id: unknown): Promise<void> {
     const run = this.requireWorktree(id);
     const diff = await git(['diff', `${run.base}..${run.branch}`], run.repo);
@@ -556,6 +655,7 @@ function squadHtml(webview: vscode.Webview, media: vscode.Uri): string {
     </nav>
   </header>
   <main id="chat-panel">
+    <section id="squad-board" class="squad-board" aria-label="Squad team"></section>
     <div id="chat-messages" role="log" aria-label="Squad conversation"></div>
     <section id="chat-plan" aria-labelledby="plan-title" hidden>
       <h2 id="plan-title">Lead's proposed tasks</h2>
@@ -565,6 +665,8 @@ function squadHtml(webview: vscode.Webview, media: vscode.Uri): string {
         <option value="ai+human">AI reviews each step, you start the next</option>
         <option value="ai">AI: a passing review starts the next step</option>
       </select></label>
+      <label class="approver" id="plan-repo-field" hidden>Repository <select id="plan-repo"></select>
+        <small id="plan-repo-hint" class="subtle"></small></label>
       <p id="plan-cost" class="subtle"></p>
       <div class="actions">
         <button type="button" id="approve-plan">Approve plan</button>
@@ -575,6 +677,7 @@ function squadHtml(webview: vscode.Webview, media: vscode.Uri): string {
       <h2 id="runs-title">Worker runs</h2>
       <ol id="run-list" class="run-list"></ol>
     </section>
+    <section id="chat-live" class="live" aria-label="Worker activity" hidden></section>
     <p id="chat-status" role="status">Loading squad…</p>
     <p id="chat-error" role="alert"></p>
     <div class="actions">
@@ -722,6 +825,7 @@ function squadHtml(webview: vscode.Webview, media: vscode.Uri): string {
     </section>
     <p id="memory-notice" class="workspace-notice" role="status"></p>
   </main>
+  <div id="squad-toast" class="toast" role="status" hidden></div>
   <script nonce="${nonce}" src="${chatScript}"></script>
   <script nonce="${nonce}" src="${workspaceScript}"></script>
   <script nonce="${nonce}" src="${script}"></script>
