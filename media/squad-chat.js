@@ -403,7 +403,9 @@ function mountSquadChat(vscode, roles) {
     renderMetrics(snapshot.metrics);
     const busy = Boolean(pending) || snapshot.busy;
     for (const id of diffs.keys()) if (!runs.some(run => run.id === id)) diffs.delete(id);
-    const key = JSON.stringify(runs) + String(busy) + JSON.stringify([...diffs]);
+    const deployTargets = lastState?.sync?.deploy ?? {};
+    const deployFor = target => deployTargets[target] ?? deployTargets[target.split('/').at(-1)];
+    const key = JSON.stringify(runs) + String(busy) + JSON.stringify([...diffs]) + JSON.stringify(deployTargets);
     if (key === runsKey) return;
     runsKey = key;
     byId('run-list').replaceChildren(...runs.map(run => {
@@ -463,6 +465,27 @@ function mountSquadChat(vscode, roles) {
         }
         item.append(links);
       }
+      const deployed = trees.filter(tree => tree.deploy);
+      if (deployed.length) {
+        const list = element('ul', undefined, 'pushed deployed');
+        for (const tree of deployed) {
+          const row = element('li');
+          const { deploy } = tree;
+          const health = deploy.health
+            ? ` · health ${deploy.health.status || 'no answer'} at ${new Date(deploy.health.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : '';
+          row.append(element('span', `${multiple ? `${tree.target}: ` : ''}${deploy.to ? `deploy MR ${deploy.from} → ${deploy.to}` : `deploys from ${deploy.from}`}${health}`));
+          if (deploy.health) row.classList.add(deploy.health.status >= 200 && deploy.health.status < 400 ? 'healthy' : 'unhealthy');
+          if (deploy.url) {
+            const link = element('button', 'Open deploy MR', 'link');
+            link.type = 'button';
+            link.title = deploy.url;
+            link.addEventListener('click', () => send('runDeployLink', { id: run.id, repo: tree.target }));
+            row.append(link);
+          }
+          list.append(row);
+        }
+        item.append(list);
+      }
       const actions = element('div', undefined, 'actions');
       const button = (text, action, args, disabled, className) => {
         const control = element('button', text, className);
@@ -487,6 +510,19 @@ function mountSquadChat(vscode, roles) {
         button(trees.every(tree => !tree.commit || tree.merged) && trees.some(tree => tree.merged) ? 'Merged' : 'Merge', 'runMerge', {},
           active || busy || !trees.some(tree => tree.commit && !tree.merged));
         button(trees.some(tree => tree.pushed) ? 'Push again' : 'Push & MR', 'runPush', {}, active || busy || !committed, committed && !active && !pushed.length ? 'accent' : undefined);
+        const deployable = trees.filter(tree => tree.pushed && deployFor(tree.target));
+        if (deployable.length) {
+          const control = element('button', deployed.length ? 'Deploy again' : 'Deploy', !deployed.length ? 'accent' : undefined);
+          control.type = 'button';
+          control.disabled = active || busy;
+          control.title = deployable.map(tree => {
+            const target = deployFor(tree.target);
+            return `${tree.target}: ${target.to ? `${target.from} → ${target.to}` : `deploys from ${target.from}`}`;
+          }).join('\n');
+          control.addEventListener('click', () => send('runDeploy', { id: run.id }));
+          actions.append(control);
+          if (deployable.some(tree => deployFor(tree.target).health)) button('Check health', 'runHealth', {}, busy);
+        }
         button('Open folder', 'runOpen', {}, false);
         for (const session of run.sessions) {
           button(`Resume ${session.role}${multiple && session.repo ? ` (${session.repo})` : ''}`, 'runResume', { session: session.sessionId }, busy);

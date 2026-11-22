@@ -392,3 +392,6 @@ button.link:hover { color: var(--vscode-textLink-activeForeground, var(--accent)
 #project-panel .problem { color: var(--vscode-errorForeground); }
 #project-panel .workspace-list li { min-width: 0; overflow-wrap: anywhere; }
 @media (max-width: 300px) { .project-settings { grid-template-columns: 1fr; } .project-settings dd { margin-bottom: 4px; } }
+
+.deployed .healthy span { color: var(--vscode-testing-iconPassed, var(--vscode-charts-green)); }
+.deployed .unhealthy span { color: var(--vscode-errorForeground); }

@@ -207,6 +207,7 @@ function mountSquadWorkspace(vscode) {
     const rows = [
       ['Repositories', repoText, ''],
       ['Worktrees start from', settings.baseBranch || 'the branch your checkout is on', 'baseBranch'],
+      ...Object.entries(settings.repositoryBases ?? {}).map(([repo, branch]) => [`  ${repo}`, branch, 'repositoryBaseBranches']),
       ['Merge requests', `${settings.mergeRequests} → ${settings.mergeRequestTarget || 'remote default branch'}`, settings.mergeRequestTarget ? 'mergeRequestTarget' : 'mergeRequests'],
       ['Worker budget', `$${settings.budgetUsd} per step · ${settings.timeoutMinutes} min`, 'workerBudgetUsd'],
       ['Allowed commands', settings.allowedCommands.length ? settings.allowedCommands.join(', ') : 'read-only git only', 'workerAllowedCommands'],
@@ -214,11 +215,19 @@ function mountSquadWorkspace(vscode) {
       ['Linked into worktrees', settings.worktreeLinks.join(', ') || 'nothing', 'worktreeLinks'],
       ['CodeGraph', settings.codegraph ? 'on' : 'off', 'codegraph'],
       ['Clean up merged or pushed runs', settings.cleanupAfterDays ? `after ${settings.cleanupAfterDays} days` : 'off', 'cleanupAfterDays'],
-      ['Minimum free disk', settings.minFreeDiskGb ? `${settings.minFreeDiskGb} GB` : 'not checked', 'minFreeDiskGb']
+      ['Minimum free disk', settings.minFreeDiskGb ? `${settings.minFreeDiskGb} GB` : 'not checked', 'minFreeDiskGb'],
+      ...(project.envFiles ?? []).map(file => [`Env · ${file.repo}`, file.problem
+        ? `${file.file}: ${file.problem}`
+        : `${file.file}: ${file.names.length} variable${file.names.length === 1 ? '' : 's'}${file.skipped.length ? `, ${file.skipped.length} skipped` : ''}`, 'workerEnvFiles', file]),
+      ...Object.entries(project.deploy ?? {}).map(([repo, target]) => [`Deploy · ${repo}`,
+        `${target.to ? `${target.from} → ${target.to}` : `on ${target.from}`}${target.health ? ` · health ${target.health}` : ''}`, 'deployTargets'])
     ];
-    byId('project-settings').replaceChildren(...rows.flatMap(([label, value, setting]) => {
+    byId('project-settings').replaceChildren(...rows.flatMap(([label, value, setting, file]) => {
       const term = element('dt', label);
       const detail = element('dd', value);
+      if (file?.problem) detail.classList.add('problem');
+      // Names only: values stay on the extension host.
+      if (file && !file.problem) detail.title = [...file.names, ...file.skipped.map(name => `${name} (skipped: would change the worker)`)].join('\n');
       if (label === 'Repositories' && repos.length > 6) detail.title = repos.join('\n');
       const scope = setting && scopes[setting];
       if (scope && scope !== 'default') detail.append(' ', element('small', scope, `scope ${scope}`));

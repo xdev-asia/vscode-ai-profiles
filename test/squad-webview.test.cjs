@@ -201,3 +201,58 @@ test('the Project tab shows where settings come from, the workers\' MCP servers,
   assert.equal(ui.$('#project-add-mcp').disabled, true);
   assert.equal(ui.$('#project-storage').textContent, 'Measuring…');
 });
+
+test('a pushed run offers Deploy for repositories with a deploy target, and shows deploy MRs and health', () => {
+  const ui = mount();
+  const tree = (target, extra) => ({ target, repo: `/w/${target}`, path: `/t/${target}`, branch: 'xdev/squad/abcd1234', base: 'b', commit: 'c', files: 1, ...extra });
+  const pushed = { remote: 'origin', target: 'dev', mergeRequest: true, url: 'https://gitlab.example.com/a/-/merge_requests/3', time: 1 };
+  const run = {
+    id: 'r1', prompt: 'p', request: 'p', time: 0, finished: 1, status: 'done', approver: 'human', costUsd: 0, sessions: [],
+    steps: [{ ...job('Implement', 'services/api'), status: 'done' }],
+    trees: [tree('services/api', { pushed }), tree('docs', { pushed })]
+  };
+  const deploy = { 'services/api': { from: 'dev', to: 'build-dev', health: 'https://api.example.com/healthz' } };
+  const base = state({ runs: [run] });
+  ui.post({ ...base, sync: { ...base.sync, deploy } });
+  const deployButton = ui.$$('#run-list li.run .actions button').find(node => node.textContent === 'Deploy');
+  assert.ok(deployButton, 'Deploy shows for a pushed repository with a target');
+  assert.equal(deployButton.title, 'services/api: dev → build-dev');
+  assert.ok(ui.$$('#run-list li.run .actions button').some(node => node.textContent === 'Check health'));
+  ui.click(deployButton);
+  assert.deepEqual(ui.last('runDeploy'), { type: 'squadChat', action: 'runDeploy', id: 'r1' });
+  ui.post({ type: 'chatSettled' });
+
+  run.trees[0].deploy = { from: 'dev', to: 'build-dev', url: 'https://gitlab.example.com/a/-/merge_requests/4', time: 2, health: { url: 'https://api.example.com/healthz', status: 503, time: 3 } };
+  ui.post({ ...base, teamChat: { ...base.teamChat, runs: [run] }, sync: { ...base.sync, deploy } });
+  const row = ui.$('#run-list .deployed li');
+  assert.match(row.textContent, /^services\/api: deploy MR dev → build-dev · health 503 at .+Open deploy MR$/);
+  assert.ok(row.classList.contains('unhealthy'));
+  ui.click(row.querySelector('button'));
+  assert.deepEqual(ui.last('runDeployLink'), { type: 'squadChat', action: 'runDeployLink', id: 'r1', repo: 'services/api' });
+  assert.ok(ui.$$('#run-list li.run .actions button').some(node => node.textContent === 'Deploy again'));
+
+  ui.post({ ...base, sync: { ...base.sync, deploy: {} } });
+  assert.ok(!ui.$$('#run-list li.run .actions button').some(node => /Deploy/.test(node.textContent)), 'no target, no Deploy');
+});
+
+test('the Project tab lists worker .env files by variable name only, and deploy targets', () => {
+  const ui = mount();
+  const project = {
+    name: 'p', folder: '/w', trusted: true, repositories: ['services/api'],
+    settings: { baseBranch: '', mergeRequests: 'auto', mergeRequestTarget: '', budgetUsd: 1, timeoutMinutes: 20, allowedCommands: [], repositoryCommands: {}, worktreeLinks: [], codegraph: true, cleanupAfterDays: 7, minFreeDiskGb: 2 },
+    scopes: { workerEnvFiles: 'project', deployTargets: 'project' }, mcp: [], mcpFile: false, mcpAvailable: [],
+    envFiles: [
+      { repo: 'services/api', file: '.env', names: ['DB_URL', 'REDIS_URL'], skipped: ['ANTHROPIC_API_KEY'] },
+      { repo: 'web', file: '.env', names: [], skipped: [], problem: 'File not found in your checkout.' }
+    ],
+    deploy: { 'services/api': { from: 'dev', to: 'build-dev', health: 'https://api.example.com/healthz' }, studio: { from: 'main' } },
+    disk: { free: 10 * 1024 ** 3, minimum: 2 * 1024 ** 3 }, runs: { count: 0, limit: 10 }, memory: { notes: 0, limit: 200 }, storageBusy: false
+  };
+  ui.post(state({}, { project }));
+  const rows = Object.fromEntries(ui.$$('#project-settings dt').map((term, index) => [term.textContent, ui.$$('#project-settings dd')[index]]));
+  assert.equal(rows['Env · services/api'].textContent, '.env: 2 variables, 1 skipped project');
+  assert.equal(rows['Env · services/api'].title, 'DB_URL\nREDIS_URL\nANTHROPIC_API_KEY (skipped: would change the worker)');
+  assert.ok(rows['Env · web'].classList.contains('problem'));
+  assert.equal(rows['Deploy · services/api'].textContent, 'dev → build-dev · health https://api.example.com/healthz project');
+  assert.equal(rows['Deploy · studio'].textContent, 'on main project');
+});

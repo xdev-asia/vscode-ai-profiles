@@ -95,6 +95,8 @@ export interface RunTree extends RunWorktree {
   files?: number;
   pushed?: PushResult & { time: number };
   merged?: number;
+  /** The deploy merge request opened for this repository, and the last health check. */
+  deploy?: { from: string; to?: string; url?: string; time: number; health?: { url: string; status: number; time: number } };
 }
 
 export interface RunRecord {
@@ -189,7 +191,7 @@ export interface WorkerHost {
   /** Paths, such as node_modules, linked from the main checkout into each new worktree. */
   worktreeLinks?(): readonly string[];
   /** The branch new worktrees start from, such as origin/dev; HEAD when undefined. */
-  baseBranch?(): string | undefined;
+  baseBranch?(repo?: string): string | undefined;
   /** Allowed commands per repository that differ from the workspace default. */
   repositoryCommands?(): Record<string, readonly string[]>;
   prepare?(): Promise<void>;
@@ -541,7 +543,10 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
         try {
           for (const [index, target] of targets.entries()) {
             const worktree = await this.host!.worktrees.create(target !== '.' ? join(folder!, target) : folder!, runId,
-              targets.length > 1 ? `${index + 1}-${target.split('/').at(-1)}` : undefined, this.host!.baseBranch?.());
+              targets.length > 1 ? `${index + 1}-${target.split('/').at(-1)}` : undefined, this.host!.baseBranch?.(target));
+            if (worktree.fallbackFrom) {
+              setupNotes.push(`${targets.length > 1 ? `${repoName(target)}: ` : ''}${worktree.fallbackFrom} does not exist; started from ${worktree.source ?? 'the remote default branch'}`);
+            }
             const prepared = await this.host!.worktrees.setup?.(worktree, this.host!.worktreeLinks?.() ?? [])
               .catch((error: Error) => ({ notes: [error.message], linked: [] as string[] }));
             trees.push({ ...worktree, target, ...(prepared?.linked.length ? { linked: prepared.linked } : {}) });
@@ -683,6 +688,10 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
           prompt: JSON.stringify({
             request: record.request, task: brief, repository: target, other_repositories: others.length ? others : undefined,
             allowed_commands: step.role === 'Review' ? undefined : settings.allowedCommands,
+            // Names only: the values reach the worker's commands as environment variables, never the prompt.
+            environment_variables: settings.env && Object.keys(settings.env).length
+              ? { note: 'Already set for your commands from the project\'s .env files. Do not look for, read, or print .env files.', names: Object.keys(settings.env).slice(0, 100) }
+              : undefined,
             previous: context.previous.length ? context.previous : undefined, changed_files: changed.length ? changed : undefined, memory: context.memory
           }),
           system: `${headless} You are ${step.role}. ${workerInstructions[step.role]}${target ? ` Your working directory is the root of the repository "${target}"; read a leading "${target}/" in a path as this directory.` : ''}${others.length ? ' Other steps of this run work in the other repositories; change only this one, and read "previous" for what they did.' : ''}${graph ? ` A CodeGraph index of the workspace is at ${graph}: run \`codegraph explore -p ${graph} "<symbols or question>"\` to locate code before searching files. Its paths point to the main checkout; edit the matching files in this worktree.` : ''} Reply in the user's language.`,
@@ -970,6 +979,28 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
         author: 'Squad', run: id,
         text: `Pushed ${tree.branch}${(saved.trees?.length ?? 0) > 1 ? ` (${repoName(repo)})` : ''} to ${result.remote}${result.mergeRequest ? `, merge request into ${result.target}` : ''}${result.url ? `: ${result.url}` : '.'}`
       });
+    });
+  }
+
+  recordDeploy(id: string, repo: string, deploy: { from: string; to?: string; url?: string }): Promise<void> {
+    return this.updateRun(id, (saved, state) => {
+      const tree = saved.trees?.find(candidate => candidate.target === repo);
+      if (!tree) throw new Error('This run has no such repository.');
+      tree.deploy = { ...deploy, time: Date.now(), health: tree.deploy?.health };
+      state.entries.push({
+        author: 'Squad', run: id,
+        text: deploy.to
+          ? `Opened a deploy merge request ${deploy.from} → ${deploy.to}${(saved.trees?.length ?? 0) > 1 ? ` (${repoName(repo)})` : ''}${deploy.url ? `: ${deploy.url}` : '.'} Merging it starts the deploy.`
+          : `${repoName(repo)} deploys when ${deploy.from} changes; no merge request needed.`
+      });
+    });
+  }
+
+  recordHealth(id: string, repo: string, health: { url: string; status: number }): Promise<void> {
+    return this.updateRun(id, saved => {
+      const tree = saved.trees?.find(candidate => candidate.target === repo);
+      if (!tree) return;
+      tree.deploy = { ...(tree.deploy ?? { from: '', time: Date.now() }), health: { ...health, time: Date.now() } };
     });
   }
 

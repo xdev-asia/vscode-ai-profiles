@@ -2,7 +2,7 @@
   "name": "xdev-ai",
   "displayName": "xDev AI",
   "description": "Manage AI accounts, open Claude Code, Codex, and Gemini terminals, and coordinate AI tasks in VS Code.",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "publisher": "xdev-asia",
   "icon": "media/icon.png",
   "private": true,
@@ -277,6 +277,12 @@
           "default": "",
           "markdownDescription": "Branch new Squad worktrees start from, for example `origin/dev` (fetched first). Empty starts from the branch your checkout is on, which puts that branch's unmerged commits into every merge request."
         },
+        "xdevAi.squad.repositoryBaseBranches": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": { "type": "string" },
+          "markdownDescription": "Base branch per repository, overriding `xdevAi.squad.baseBranch`, for example `{ \"services/ops\": \"origin/main\" }`. Merge requests from such a repository target this branch. A repository without the configured base branch starts from its remote's default branch, and the run says so."
+        },
         "xdevAi.squad.worktreeLinks": {
           "type": "array",
           "items": { "type": "string" },
@@ -307,6 +313,28 @@
             "required": ["tools"]
           },
           "markdownDescription": "MCP servers Squad workers may use in this project, keyed by server name, for example `{ \"postgres-dev\": { \"tools\": [\"query\"], \"roles\": [\"Lead\", \"Implement\"] } }`. Without `command` or `url`, the server of the same name in the project's `.mcp.json` is used. Workers still never load your other MCP servers, they can call only the listed tools, and AI reviews never get MCP servers. Ignored in untrusted workspaces. Manage it under **Squad → Project**."
+        },
+        "xdevAi.squad.workerEnvFiles": {
+          "type": "object",
+          "default": {},
+          "scope": "resource",
+          "additionalProperties": { "type": "array", "items": { "type": "string" } },
+          "markdownDescription": "Project `.env` files whose variables Implement and Tests get when they run commands, per repository, for example `{ \"services/api\": [\".env\"] }`. Paths are relative to the repository and read from your checkout when a step starts; values are never copied into the worktree, put in a prompt, or shown. No role may read these files. Variables that would change the worker itself (`ANTHROPIC_*`, `CLAUDE_*`, `PATH`, …) are skipped. Ignored in untrusted workspaces."
+        },
+        "xdevAi.squad.deployTargets": {
+          "type": "object",
+          "default": {},
+          "scope": "resource",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "from": { "type": "string", "description": "Branch your merge requests land on, for example dev." },
+              "to": { "type": "string", "description": "Branch whose changes start the deploy pipeline, for example build-dev. Omit when merging into \"from\" deploys." },
+              "health": { "type": "string", "description": "An http(s) address that answers when the deployed app is up." }
+            },
+            "required": ["from"]
+          },
+          "markdownDescription": "How each repository deploys, for **Deploy** on a pushed Squad run, for example `{ \"services/api\": { \"from\": \"dev\", \"to\": \"build-dev\", \"health\": \"https://api.dev.example.com/healthz\" } }`. Deploy opens a GitLab merge request from → to after you confirm; merging it is up to you. **Check health** calls the health address."
         },
         "xdevAi.squad.cleanupAfterDays": {
           "type": "number",
