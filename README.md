@@ -132,7 +132,7 @@ Assign a **Claude Code** terminal account (instead of an API profile) to a role 
   }
   ```
 
-**Several windows.** Roles, runs, memory, and skills are shared by every window that opens the workspace. While one window runs a step, the others show it and wait; if that window closes, the run is reported as interrupted.
+**Several windows.** Roles, runs, memory, and skills are shared by every window that opens the workspace, also across browsers in code-server (a file in the extension's global storage). While one window runs a step, the others show it and wait; if that window closes, the run is reported as interrupted.
 
 **Clean up.** Worktrees from older versions or from removed runs can stay behind. Run **xDev AI: Clean Up Squad Worktrees** from the Squad view menu to list leftover `xdev/squad/*` worktrees, pick the ones to remove, and delete their branches when merged. Unmerged branches are kept.
 

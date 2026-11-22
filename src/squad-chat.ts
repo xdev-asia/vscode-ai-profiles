@@ -80,7 +80,7 @@ export interface RunStep extends Job {
   ms?: number;
   attempts?: number;
   costUsd?: number;
-  /** Commands the worker was not allowed to run or that failed, over all attempts. */
+  /** Commands the allowed list blocked, over all attempts. */
   problems?: number;
   /** The step was added from review feedback on the changes. */
   feedback?: boolean;
@@ -157,6 +157,8 @@ export interface LiveActivity {
   edits: number;
   commands: number;
   problems?: number;
+  /** Commands the allowed list blocked; counted against the step's first-pass rate. */
+  denied?: number;
 }
 
 interface ActiveRun {
@@ -207,7 +209,7 @@ const workerInstructions: Record<WorkerRole, string> = {
   Tests: 'Add or update tests for the change in this worktree. Run only the tests that cover changed_files (the same module, screen, or domain) plus a type check scoped to them when available; run the whole suite only when shared code changed. Report what passed and failed.'
 };
 const textOnly = 'You are using a text API. You cannot access the workspace, edit files, or run commands. Do not claim that you did.';
-const headless = 'You are a headless Claude Code worker in xDev Squad. Nobody can answer questions during the run: decide reasonably, or report status "blocked" with what you need. Do not commit, push, or change git remotes; xDev commits the worktree for the user. Use available skills when they apply. Report through the required JSON fields and keep the summary short, because other agents read it.';
+const headless = 'You are a headless Claude Code worker in xDev Squad. Nobody can answer questions during the run: decide reasonably, or report status "blocked" with what you need. Do not commit, push, or change git remotes; xDev commits the worktree for the user. Shell commands are checked against an allowed list ("allowed_commands" when given, plus read-only git), and a command with pipes, redirects, ";", "&&", or "cd" is denied even when each part is allowed: run each allowed command on its own from the working directory, and create or edit files with the Write and Edit tools, not the shell. Use available skills when they apply. Report through the required JSON fields and keep the summary short, because other agents read it.';
 
 function shorten(text: string, limit: number): string {
   return text.length <= limit ? text : text.slice(0, limit) + '\n[Truncated]';
@@ -388,8 +390,8 @@ export class SquadChat {
       const capabilities = [...workers].map(([worker, candidate]) => candidate.kind === 'claude'
         ? `${worker} (Claude Code worker: reads the repository, ${worker === 'Review' ? 'reviews the diff' : 'edits files and runs allowed commands'} in a git worktree)`
         : `${worker} (text API: proposes text only)`);
-      const leadSystem = `${roleInstructions.Lead} ${agent.kind === 'api' ? textOnly : 'Plan only; do not change files.'} Available worker roles: ${capabilities.join(', ') || 'none'}.
-Return only a JSON object with a "reply" string and a "tasks" array. Each task has a "role" from the available worker roles and a "brief" string${multiple ? ' and a "repo"' : ''}. Use each role at most once${multiple ? ' per repository' : ''}. Use an empty tasks array for questions, summaries, or when no workers are available. Write briefs that a worker can act on without the chat history. Reply in the user's language. The user reviews proposed tasks in the xDev Squad panel and approves them with a button, then starts each step there, so keep the reply to a short summary of the plan (at most 80 words) and do not ask the user to reply to start it.${multiple ? ' Each Claude Code task runs in one git repository from "repositories": set its "repo" to that entry exactly. A change that spans repositories, such as a backend API and the frontend screen that calls it, gets one Implement task per repository, listed so that dependencies come first. Write file paths relative to the task\'s repository root.' : ''}${allowedCommands ? ` Claude Code workers may only run "allowed_commands"${perRepository ? ' (or, for a repository listed in "repository_commands", that list)' : ''} and read-only git; do not ask them to run anything else.` : ''}${code ? ' "code" is a CodeGraph excerpt of the relevant symbols and call paths: name concrete files and symbols in each brief so workers do not have to search.' : ''}`;
+      const leadSystem = `${roleInstructions.Lead} ${agent.kind === 'api' ? textOnly : 'You may read the repository (read-only) to answer or to make briefs concrete; do not change files. Start from "code" when given, and keep reading short.'} Available worker roles: ${capabilities.join(', ') || 'none'}.
+Return only a JSON object with a "reply" string and a "tasks" array. Each task has a "role" from the available worker roles and a "brief" string${multiple ? ' and a "repo"' : ''}. Use each role at most once${multiple ? ' per repository' : ''}. Use an empty tasks array for questions, summaries, or when no workers are available. Write briefs that a worker can act on without the chat history. Reply in the user's language. The user reviews proposed tasks in the xDev Squad panel and approves them with a button, then starts each step there, so keep the reply to a short summary of the plan (at most 80 words) and do not ask the user to reply to start it.${multiple ? ' Each Claude Code task runs in one git repository from "repositories": set its "repo" to that entry exactly. A change that spans repositories, such as a backend API and the frontend screen that calls it, gets one Implement task per repository, listed so that dependencies come first. Write file paths relative to the task\'s repository root.' : ''}${allowedCommands ? ` Claude Code workers may only run "allowed_commands"${perRepository ? ' plus, in a repository listed in "repository_commands", the commands listed for it' : ''} and read-only git; do not ask them to run anything else, and do not tell them a command is not allowed.` : ''}${code ? ' "code" is a CodeGraph excerpt of the relevant symbols and call paths: name concrete files and symbols in each brief so workers do not have to search.' : ''}`;
       const content = JSON.stringify({
         history, request: prompt, memory: memory.length ? memory : undefined, code, allowed_commands: allowedCommands,
         repository_commands: perRepository ? repositoryCommands : undefined,
@@ -399,11 +401,13 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
 
       if (agent.kind === 'claude') {
         await this.host?.prepare?.();
+        const graph = await this.host!.codegraphRoot?.().catch(() => undefined);
+        const settings = this.host!.settings(role);
         const stdout = await this.host!.run({
           executable: await this.host!.executable(), profile: agent.profile, cwd: this.host!.folder()!, role,
           mode: role === 'Lead' ? 'plan' : 'ask', prompt: content,
           system: role === 'Lead' ? leadSystem : `You are ${role} in xDev Squad. Answer the question using the repository. Do not edit files. Reply in the user's language.`,
-          settings: this.host!.settings(role), signal: run.signal, onActivity: this.track(run, role, agent.name)
+          settings: graph ? { ...settings, codegraph: true } : settings, signal: run.signal, onActivity: this.track(run, role, agent.name)
         });
         run.signal.throwIfAborted();
         if (role === 'Lead') {
@@ -636,13 +640,14 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
           executable: await this.host!.executable(), profile: agent.profile, cwd: tree.path, role: step.role, mode: 'work',
           prompt: JSON.stringify({
             request: record.request, task: brief, repository: target, other_repositories: others.length ? others : undefined,
+            allowed_commands: step.role === 'Review' ? undefined : settings.allowedCommands,
             previous: context.previous.length ? context.previous : undefined, changed_files: changed.length ? changed : undefined, memory: context.memory
           }),
           system: `${headless} You are ${step.role}. ${workerInstructions[step.role]}${target ? ` Your working directory is the root of the repository "${target}"; read a leading "${target}/" in a path as this directory.` : ''}${others.length ? ' Other steps of this run work in the other repositories; change only this one, and read "previous" for what they did.' : ''}${graph ? ` A CodeGraph index of the workspace is at ${graph}: run \`codegraph explore -p ${graph} "<symbols or question>"\` to locate code before searching files. Its paths point to the main checkout; edit the matching files in this worktree.` : ''} Reply in the user's language.`,
           settings: graph ? { ...settings, codegraph: true } : settings, signal: run.signal, onActivity: this.track(run, step.role, agent.name)
         });
         run.signal.throwIfAborted();
-        const problems = run.live?.problems ?? 0;
+        const problems = run.live?.denied ?? 0;
         run.live = undefined;
         const result = parseWorkerOutput(stdout);
         await this.memory.add(result.memory, step.role);
@@ -1125,6 +1130,7 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
       else if (activity.kind === 'edit') live.edits++;
       else if (activity.kind === 'run') live.commands++;
       else if (activity.kind === 'denied' || activity.kind === 'failed') live.problems = (live.problems ?? 0) + 1;
+      if (activity.kind === 'denied') live.denied = (live.denied ?? 0) + 1;
       this.notifySoon();
     };
   }

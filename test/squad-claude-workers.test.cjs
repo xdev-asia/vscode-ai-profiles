@@ -110,6 +110,7 @@ test('a Claude Code Lead plans and workers run headless in one worktree with sha
   assert.equal(implement.cwd, worktrees.created[0].path);
   assert.equal(review.cwd, worktrees.created[0].path, 'Review sees the uncommitted Implement changes');
   assert.equal(implement.mode, 'work');
+  assert.match(implement.system, /run each allowed command on its own/);
   assert.equal(implement.profile.name, 'Implement account');
   assert.deepEqual(JSON.parse(review.prompt).previous, [{ role: 'Implement', status: 'done', summary: 'Added GET /health', files: ['src/health.ts'] }]);
   assert.deepEqual(JSON.parse(review.prompt).memory, ['Health checks live in src/health.ts', 'Use Fastify, not Express']);
@@ -437,6 +438,10 @@ test('one run spans repositories: a worktree per repository, steps in their own,
         { role: 'Review', brief: 'Review the screen', repo: 'nope' }
       ] });
     }
+    if (JSON.parse(request.prompt).repository === 'api') {
+      request.onActivity?.({ kind: 'failed', text: 'node --test' });
+      if (request.role === 'Implement') request.onActivity?.({ kind: 'denied', text: 'npm run build' });
+    }
     return report({ status: 'done', summary: `${request.role} in ${JSON.parse(request.prompt).repository}`, files_changed: ['x.ts'], tests: '', memory: [] });
   }, { repositories: async () => repos });
   const chat = open();
@@ -458,12 +463,15 @@ test('one run spans repositories: a worktree per repository, steps in their own,
   assert.equal(web.cwd, run.trees[1].path);
   assert.equal(review.cwd, run.trees[0].path, 'the user moved Review to api');
   assert.deepEqual(web.settings.allowedCommands, ['npm test', 'npm run lint'], 'per-repository commands');
+  assert.deepEqual(JSON.parse(web.prompt).allowed_commands, ['npm test', 'npm run lint'], 'the worker knows what it may run');
   assert.deepEqual(JSON.parse(web.prompt).other_repositories, ['api']);
   assert.deepEqual(JSON.parse(web.prompt).previous[0], { role: 'Implement', status: 'done', summary: 'Implement in api', files: ['x.ts'], repository: 'api' });
   assert.match(web.system, /change only this one/);
 
   let done = chat.snapshot().runs[0];
   assert.equal(done.status, 'done');
+  assert.deepEqual(done.steps.map(step => step.problems), [1, 0, 0], 'only blocked commands count, not failing ones');
+  assert.equal(chat.snapshot().metrics.firstPass, 2 / 3);
   assert.deepEqual(worktrees.committed.map(item => item.tree.path), done.trees.map(tree => tree.path));
   assert.deepEqual(done.trees.map(tree => tree.commit), ['c0ffee', 'c0ffee']);
   assert.match(chat.snapshot().entries.at(-1).text, /Committed 2 changed files to xdev\/squad\/\w+ in api, web/);
@@ -589,19 +597,32 @@ test('one profile can be given to every role at once, keeping each task', async 
   assert.equal(squad.seat('Review').brief, 'Check it');
 });
 
-test('shared state reads values saved per window until the first write', async () => {
-  const { SharedMemento, workspaceKey } = require('../dist/squad-state.js');
-  const global = memento();
-  global.keys = () => [...global.values.keys()];
-  const legacy = memento();
-  await legacy.update('squad.v1', { seats: { Lead: 'old' } });
+test('shared state lives in one file that every window reads, falling back to values saved per window', async t => {
+  const { FileMemento, workspaceKey } = require('../dist/squad-state.js');
+  const root = await mkdtemp(join(tmpdir(), 'xdev-state-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
   const key = workspaceKey('file:///home/u/ehospital');
   assert.match(key, /^[0-9a-f]{16}$/);
   assert.notEqual(key, workspaceKey('file:///home/u/other'));
-  const shared = new SharedMemento(global, key, legacy);
-  assert.deepEqual(shared.get('squad.v1'), { seats: { Lead: 'old' } });
-  assert.equal(shared.get('missing', 5), 5);
-  await shared.update('squad.v1', { seats: { Lead: 'new' } });
-  assert.deepEqual(new SharedMemento(global, key).get('squad.v1'), { seats: { Lead: 'new' } }, 'another window sees the write');
-  assert.equal(new SharedMemento(global, workspaceKey('file:///other')).get('squad.v1'), undefined);
+  const file = join(root, 'squad-state', `${key}.json`);
+  const legacy = memento();
+  legacy.keys = () => [...legacy.values.keys()];
+  await legacy.update('squad.v1', { seats: { Lead: 'old' } });
+  const first = new FileMemento(file, legacy);
+  const second = new FileMemento(file);
+  assert.deepEqual(first.get('squad.v1'), { seats: { Lead: 'old' } });
+  assert.equal(first.get('missing', 5), 5);
+  let notified = 0;
+  const watching = second.watch(() => { notified++; });
+  t.after(() => watching.dispose());
+  await first.update('squad.v1', { seats: { Lead: 'new' } });
+  assert.deepEqual(second.get('squad.v1'), { seats: { Lead: 'new' } }, 'another window reads the write at once');
+  const end = Date.now() + 3_000;
+  while (!notified && Date.now() < end) await new Promise(resolve => setTimeout(resolve, 50));
+  assert.ok(notified >= 1, 'the other window is told about the change');
+  await second.update('other', 1);
+  assert.deepEqual(first.get('squad.v1'), { seats: { Lead: 'new' } }, 'writes keep other keys');
+  assert.equal(first.get('other'), 1);
+  await writeFile(file, '{"broken');
+  assert.equal(first.get('other'), 1, 'a damaged file keeps the last good state');
 });

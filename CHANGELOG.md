@@ -14,10 +14,14 @@
 
 ### Changed
 
-- Squad roles, runs, memory, and skills are shared by every VS Code window that opens the workspace. A window sees another window's running step, waits for it, and recovers if that window closes. State saved per window by older versions is read until the first change.
+- Squad roles, runs, memory, and skills are shared by every VS Code window that opens the workspace, including code-server windows in different browsers: they live in a file in the extension's global storage. A window sees another window's running step within a second, waits for it, and recovers if that window closes. State saved per window by older versions is read until the first change.
+- A Claude Code Lead may read the repository (read-only) to answer questions and make briefs concrete.
+- Workers receive their allowed commands and are told to run each one on its own. Claude Code denies compound commands such as `node --test 2>&1; echo $?` even when each part is allowed.
 - New worktrees live in the extension's global storage, so any window can open or remove them.
 - Lead keeps its reply to a short summary.
 - Notices appear near the top of the panel and no longer cover buttons.
+- A long line in a patch scrolls inside the patch instead of widening the panel.
+- A step's first-pass count only includes commands the allowed list blocked, not commands that ran and failed.
 - A webview test renders the real panel in jsdom.
 
 ## 0.9.0 - 2026-11-22

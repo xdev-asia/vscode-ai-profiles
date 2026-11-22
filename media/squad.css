@@ -380,3 +380,6 @@ button.link { padding: 0 2px; border: 0; background: none; color: var(--vscode-t
 button.link:hover { color: var(--vscode-textLink-activeForeground, var(--accent)); }
 .profile-field { display: grid; gap: 2px; min-width: 0; }
 .profile-field #assign-all { justify-self: start; font-size: .88em; }
+/* Long patch lines scroll inside the patch instead of widening the run card and the panel. */
+.run-list > li, .changes, .changes details.file { min-width: 0; max-width: 100%; }
+.changes .patch { max-width: 100%; box-sizing: border-box; }

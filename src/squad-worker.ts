@@ -120,9 +120,9 @@ const codegraphRead = ['Bash(codegraph explore:*)', 'Bash(codegraph node:*)', 'B
 export function workerTools(
   role: Role, mode: WorkerMode, allowedCommands: readonly string[], codegraph = false
 ): { tools: string[]; allowed: string[] } {
-  if (mode === 'plan') return { tools: [], allowed: [] };
   const reads = [...readTools, ...gitRead, ...(codegraph ? codegraphRead : [])];
-  if (mode === 'ask' || mode === 'gate' || role === 'Lead' || role === 'Review') {
+  // Lead plans and answers questions with read-only access, so it can check files instead of guessing.
+  if (mode === 'plan' || mode === 'ask' || mode === 'gate' || role === 'Lead' || role === 'Review') {
     return { tools: [...readTools, 'Bash'], allowed: reads };
   }
   const commands = allowedCommands.map(command => `Bash(${command}:*)`);

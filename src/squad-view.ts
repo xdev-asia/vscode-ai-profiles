@@ -8,7 +8,7 @@ import {
 import { chat, providers } from './core';
 import { isRole, noteLimit, readTask, roles, SquadStore, type Role } from './squad';
 import { SquadChat, type RunTree, type WorkerHost } from './squad-chat';
-import { SharedMemento, workspaceKey } from './squad-state';
+import { FileMemento, workspaceKey } from './squad-state';
 import { registerSquadTools } from './squad-tools';
 import { squadPage } from './squad-html';
 import { memoryTextLimit } from './squad-memory';
@@ -122,8 +122,11 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
   ) {
     const identity = workspaceIdentity();
     const key = identity ? workspaceKey(identity) : undefined;
-    // Shared by every window that opens this workspace; per-window state from older versions is read until replaced.
-    const state = key ? new SharedMemento(context.globalState, key, context.workspaceState) : context.workspaceState;
+    // A file on the extension host shared by every window that opens this workspace; per-window state from older
+    // versions is read until replaced. Extension global state is not used because each window caches its own copy.
+    const shared = key ? new FileMemento(join(context.globalStorageUri.fsPath, 'squad-state', `${key}.json`), context.workspaceState) : undefined;
+    const state = shared ?? context.workspaceState;
+    this.stateWatch = shared?.watch(() => void this.refresh());
     this.store = new SquadStore(state);
     const worktreeRoot = key ? join(context.globalStorageUri.fsPath, 'squad-worktrees', key)
       : join((context.storageUri ?? context.globalStorageUri).fsPath, 'squad-worktrees');
@@ -164,6 +167,7 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
 
   private repositoryCache?: { folder: string; time: number; list: Promise<string[]> };
   private remotePoll?: ReturnType<typeof setTimeout>;
+  private readonly stateWatch?: { dispose(): void };
   private codegraphPausedUntil = 0;
   private readonly worktrees: Worktrees;
 
@@ -340,6 +344,7 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
 
   dispose(): void {
     clearTimeout(this.remotePoll);
+    this.stateWatch?.dispose();
     this.view = undefined;
     this.teamChat.cancel();
     for (const controller of this.running.values()) controller.abort();
