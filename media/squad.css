@@ -239,7 +239,6 @@ body { background: var(--vscode-sideBar-background, var(--vscode-editor-backgrou
   .top h1 { display: none; }
   .top nav button { padding: 3px 6px; }
   #chat-panel:not([hidden]) { min-height: calc(100vh - 60px); }
-  #chat-messages { max-height: none; }
   #chat-composer { margin-bottom: -8px; }
   .roles { grid-template-columns: minmax(0, 1fr); gap: 6px; }
   .roles .seat-card { grid-column: auto !important; }
