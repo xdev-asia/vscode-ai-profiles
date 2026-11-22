@@ -18,15 +18,9 @@
     "vscode": "^1.95.0",
     "node": ">=20.3"
   },
-  "categories": [
-    "AI"
-  ],
-  "extensionKind": [
-    "workspace"
-  ],
-  "activationEvents": [
-    "onStartupFinished"
-  ],
+  "categories": ["AI"],
+  "extensionKind": ["workspace"],
+  "activationEvents": ["onStartupFinished"],
   "main": "./dist/extension.js",
   "exports": {
     ".": {
@@ -35,333 +29,94 @@
     }
   },
   "types": "./dist/core.d.ts",
-  "files": [
-    "dist",
-    "media",
-    "CHANGELOG.md",
-    "LICENSE"
-  ],
+  "files": ["dist", "media", "CHANGELOG.md", "LICENSE"],
   "contributes": {
     "commands": [
-      {
-        "command": "xdevAi.chat",
-        "title": "Open Chat",
-        "category": "xDev AI",
-        "icon": "$(comment-discussion)"
-      },
-      {
-        "command": "xdevAi.addAccount",
-        "title": "Add API Profile",
-        "category": "xDev AI",
-        "icon": "$(add)"
-      },
-      {
-        "command": "xdevAi.switchAccount",
-        "title": "Switch API Profile",
-        "category": "xDev AI",
-        "icon": "$(check)"
-      },
-      {
-        "command": "xdevAi.manageAccounts",
-        "title": "Manage API Profiles",
-        "category": "xDev AI"
-      },
-      {
-        "command": "xdevAi.openAccountChat",
-        "title": "Open API Chat with this Profile",
-        "category": "xDev AI",
-        "icon": "$(comment-discussion)"
-      },
-      {
-        "command": "xdevAi.squad.open",
-        "title": "Open Squad",
-        "category": "xDev AI",
-        "icon": "$(organization)"
-      },
-      {
-        "command": "xdevAi.squad.workflow",
-        "title": "Open SDLC Workflow",
-        "category": "xDev AI"
-      },
-      {
-        "command": "xdevAi.squad.customizations",
-        "title": "Manage Skills and Tools",
-        "category": "xDev AI"
-      },
-      {
-        "command": "xdevAi.squad.memory",
-        "title": "Open Squad Memory",
-        "category": "xDev AI"
-      },
-      {
-        "command": "xdevAi.squad.syncSkills",
-        "title": "Sync Squad Skills and Memory",
-        "category": "xDev AI"
-      },
-      {
-        "command": "xdevAi.manageMcp",
-        "title": "Manage MCP",
-        "category": "xDev AI",
-        "icon": "$(plug)"
-      },
-      {
-        "command": "xdevAi.manageTerminalAccounts",
-        "title": "Open AI Accounts Sidebar",
-        "category": "xDev AI",
-        "icon": "$(account)"
-      },
-      {
-        "command": "xdevAi.addAiAccount",
-        "title": "Add AI Account",
-        "category": "xDev AI",
-        "icon": "$(add)"
-      },
-      {
-        "command": "xdevAi.openTerminal",
-        "title": "Open AI Terminal",
-        "category": "xDev AI",
-        "icon": "$(terminal)"
-      },
-      {
-        "command": "xdevAi.openTerminalBypass",
-        "title": "Open AI Terminal with Bypass Permissions",
-        "category": "xDev AI"
-      },
-      {
-        "command": "xdevAi.checkUsage",
-        "title": "Check AI Usage",
-        "category": "xDev AI",
-        "icon": "$(graph)"
-      },
-      {
-        "command": "xdevAi.refreshUsage",
-        "title": "Refresh Account Quota",
-        "category": "xDev AI"
-      },
-      {
-        "command": "xdevAi.signInTerminal",
-        "title": "Sign In to Terminal Account",
-        "category": "xDev AI"
-      },
-      {
-        "command": "xdevAi.renameTerminalAccount",
-        "title": "Rename Terminal Account",
-        "category": "xDev AI"
-      },
-      {
-        "command": "xdevAi.removeTerminalAccount",
-        "title": "Delete Terminal Account",
-        "category": "xDev AI",
-        "icon": "$(trash)"
-      },
-      {
-        "command": "xdevAi.removeAccount",
-        "title": "Delete API Profile",
-        "category": "xDev AI",
-        "icon": "$(trash)"
-      }
+      { "command": "xdevAi.chat", "title": "Open Chat", "category": "xDev AI", "icon": "$(comment-discussion)" },
+      { "command": "xdevAi.addAccount", "title": "Add API Profile", "category": "xDev AI", "icon": "$(add)" },
+      { "command": "xdevAi.switchAccount", "title": "Switch API Profile", "category": "xDev AI", "icon": "$(check)" },
+      { "command": "xdevAi.manageAccounts", "title": "Manage API Profiles", "category": "xDev AI" },
+      { "command": "xdevAi.openAccountChat", "title": "Open API Chat with this Profile", "category": "xDev AI", "icon": "$(comment-discussion)" },
+      { "command": "xdevAi.squad.open", "title": "Open Squad", "category": "xDev AI", "icon": "$(organization)" },
+      { "command": "xdevAi.squad.workflow", "title": "Open SDLC Workflow", "category": "xDev AI" },
+      { "command": "xdevAi.squad.customizations", "title": "Manage Skills and Tools", "category": "xDev AI" },
+      { "command": "xdevAi.squad.memory", "title": "Open Squad Memory", "category": "xDev AI" },
+      { "command": "xdevAi.squad.syncSkills", "title": "Sync Squad Skills and Memory", "category": "xDev AI" },
+      { "command": "xdevAi.manageMcp", "title": "Manage MCP", "category": "xDev AI", "icon": "$(plug)" },
+      { "command": "xdevAi.manageTerminalAccounts", "title": "Open AI Accounts Sidebar", "category": "xDev AI", "icon": "$(account)" },
+      { "command": "xdevAi.addAiAccount", "title": "Add AI Account", "category": "xDev AI", "icon": "$(add)" },
+      { "command": "xdevAi.openTerminal", "title": "Open AI Terminal", "category": "xDev AI", "icon": "$(terminal)" },
+      { "command": "xdevAi.openTerminalBypass", "title": "Open AI Terminal with Bypass Permissions", "category": "xDev AI" },
+      { "command": "xdevAi.checkUsage", "title": "Check AI Usage", "category": "xDev AI", "icon": "$(graph)" },
+      { "command": "xdevAi.refreshUsage", "title": "Refresh Account Quota", "category": "xDev AI" },
+      { "command": "xdevAi.signInTerminal", "title": "Sign In to Terminal Account", "category": "xDev AI" },
+      { "command": "xdevAi.renameTerminalAccount", "title": "Rename Terminal Account", "category": "xDev AI" },
+      { "command": "xdevAi.removeTerminalAccount", "title": "Delete Terminal Account", "category": "xDev AI", "icon": "$(trash)" },
+      { "command": "xdevAi.removeAccount", "title": "Delete API Profile", "category": "xDev AI", "icon": "$(trash)" }
     ],
     "viewsContainers": {
       "activitybar": [
-        {
-          "id": "xdev-ai",
-          "title": "xDev AI",
-          "icon": "$(account)"
-        }
+        { "id": "xdev-ai", "title": "xDev AI", "icon": "$(account)" }
       ],
       "secondarySidebar": [
-        {
-          "id": "xdev-ai-squad",
-          "title": "xDev Squad",
-          "icon": "$(organization)"
-        }
+        { "id": "xdev-ai-squad", "title": "xDev Squad", "icon": "$(organization)" }
       ]
     },
     "views": {
       "xdev-ai": [
-        {
-          "id": "xdevAi.claude.accounts",
-          "name": "Terminal Accounts"
-        },
-        {
-          "id": "xdevAi.apiAccounts",
-          "name": "API Profiles"
-        }
+        { "id": "xdevAi.claude.accounts", "name": "Terminal Accounts" },
+        { "id": "xdevAi.apiAccounts", "name": "API Profiles" }
       ],
       "xdev-ai-squad": [
-        {
-          "id": "xdevAi.squad",
-          "name": "Squad",
-          "type": "webview"
-        }
+        { "id": "xdevAi.squad", "name": "Squad", "type": "webview" }
       ]
     },
     "viewsWelcome": [
-      {
-        "view": "xdevAi.claude.accounts",
-        "contents": "Sign in to Claude Code, Codex, or Gemini CLI. Each account opens in its own terminal.\n[Add AI Account](command:xdevAi.addAiAccount)"
-      },
-      {
-        "view": "xdevAi.apiAccounts",
-        "contents": "Add a provider API profile for xDev Chat and Squad.\n[Add API Profile](command:xdevAi.addAccount)"
-      }
+      { "view": "xdevAi.claude.accounts", "contents": "Sign in to Claude Code, Codex, or Gemini CLI. Each account opens in its own terminal.\n[Add AI Account](command:xdevAi.addAiAccount)" },
+      { "view": "xdevAi.apiAccounts", "contents": "Add a provider API profile for xDev Chat and Squad.\n[Add API Profile](command:xdevAi.addAccount)" }
     ],
     "menus": {
       "view/title": [
-        {
-          "command": "xdevAi.manageTerminalAccounts",
-          "when": "view == terminal",
-          "group": "navigation@20"
-        },
-        {
-          "command": "xdevAi.openTerminal",
-          "when": "view == terminal",
-          "group": "navigation@21"
-        },
-        {
-          "command": "xdevAi.squad.open",
-          "when": "view == terminal",
-          "group": "navigation@22"
-        },
-        {
-          "command": "xdevAi.addAiAccount",
-          "when": "view == xdevAi.claude.accounts || view == xdevAi.squad",
-          "group": "navigation@1"
-        },
-        {
-          "command": "xdevAi.checkUsage",
-          "when": "view == xdevAi.claude.accounts",
-          "group": "navigation@2"
-        },
-        {
-          "command": "xdevAi.squad.open",
-          "when": "view == xdevAi.claude.accounts",
-          "group": "navigation@3"
-        },
-        {
-          "command": "xdevAi.squad.workflow",
-          "when": "view == xdevAi.claude.accounts",
-          "group": "1_workspace@1"
-        },
-        {
-          "command": "xdevAi.squad.customizations",
-          "when": "view == xdevAi.claude.accounts",
-          "group": "1_workspace@2"
-        },
-        {
-          "command": "xdevAi.manageMcp",
-          "when": "view == xdevAi.claude.accounts || view == xdevAi.squad",
-          "group": "1_workspace@3"
-        },
-        {
-          "command": "xdevAi.addAccount",
-          "when": "view == xdevAi.apiAccounts",
-          "group": "navigation@1"
-        },
-        {
-          "command": "xdevAi.chat",
-          "when": "view == xdevAi.apiAccounts",
-          "group": "navigation@2"
-        },
-        {
-          "command": "xdevAi.manageTerminalAccounts",
-          "when": "view == xdevAi.squad",
-          "group": "navigation@2"
-        }
+        { "command": "xdevAi.manageTerminalAccounts", "when": "view == terminal", "group": "navigation@20" },
+        { "command": "xdevAi.openTerminal", "when": "view == terminal", "group": "navigation@21" },
+        { "command": "xdevAi.squad.open", "when": "view == terminal", "group": "navigation@22" },
+        { "command": "xdevAi.addAiAccount", "when": "view == xdevAi.claude.accounts || view == xdevAi.squad", "group": "navigation@1" },
+        { "command": "xdevAi.checkUsage", "when": "view == xdevAi.claude.accounts", "group": "navigation@2" },
+        { "command": "xdevAi.squad.open", "when": "view == xdevAi.claude.accounts", "group": "navigation@3" },
+        { "command": "xdevAi.squad.workflow", "when": "view == xdevAi.claude.accounts", "group": "1_workspace@1" },
+        { "command": "xdevAi.squad.customizations", "when": "view == xdevAi.claude.accounts", "group": "1_workspace@2" },
+        { "command": "xdevAi.manageMcp", "when": "view == xdevAi.claude.accounts || view == xdevAi.squad", "group": "1_workspace@3" },
+        { "command": "xdevAi.addAccount", "when": "view == xdevAi.apiAccounts", "group": "navigation@1" },
+        { "command": "xdevAi.chat", "when": "view == xdevAi.apiAccounts", "group": "navigation@2" },
+        { "command": "xdevAi.manageTerminalAccounts", "when": "view == xdevAi.squad", "group": "navigation@2" }
       ],
       "view/item/context": [
-        {
-          "command": "xdevAi.openTerminal",
-          "when": "view == xdevAi.claude.accounts && viewItem == aiTerminalAccount",
-          "group": "inline@1"
-        },
-        {
-          "command": "xdevAi.checkUsage",
-          "when": "view == xdevAi.claude.accounts && viewItem == aiTerminalAccount",
-          "group": "inline@2"
-        },
-        {
-          "command": "xdevAi.removeTerminalAccount",
-          "when": "view == xdevAi.claude.accounts && viewItem == aiTerminalAccount",
-          "group": "inline@3"
-        },
-        {
-          "command": "xdevAi.signInTerminal",
-          "when": "view == xdevAi.claude.accounts && viewItem == aiTerminalAccount",
-          "group": "1_account@1"
-        },
-        {
-          "command": "xdevAi.renameTerminalAccount",
-          "when": "view == xdevAi.claude.accounts && viewItem == aiTerminalAccount",
-          "group": "1_account@2"
-        },
-        {
-          "command": "xdevAi.removeTerminalAccount",
-          "when": "view == xdevAi.claude.accounts && viewItem == aiTerminalAccount",
-          "group": "1_account@3"
-        },
-        {
-          "command": "xdevAi.openTerminalBypass",
-          "when": "view == xdevAi.claude.accounts && viewItem == aiTerminalAccount && isWorkspaceTrusted",
-          "group": "1_account@4"
-        },
-        {
-          "command": "xdevAi.openAccountChat",
-          "when": "view == xdevAi.apiAccounts && viewItem == aiApiAccount",
-          "group": "inline@1"
-        },
-        {
-          "command": "xdevAi.removeAccount",
-          "when": "view == xdevAi.apiAccounts && viewItem == aiApiAccount",
-          "group": "inline@2"
-        },
-        {
-          "command": "xdevAi.switchAccount",
-          "when": "view == xdevAi.apiAccounts && viewItem == aiApiAccount",
-          "group": "1_account@1"
-        },
-        {
-          "command": "xdevAi.manageAccounts",
-          "when": "view == xdevAi.apiAccounts && viewItem == aiApiAccount",
-          "group": "1_account@2"
-        },
-        {
-          "command": "xdevAi.removeAccount",
-          "when": "view == xdevAi.apiAccounts && viewItem == aiApiAccount",
-          "group": "1_account@3"
-        }
+        { "command": "xdevAi.openTerminal", "when": "view == xdevAi.claude.accounts && viewItem == aiTerminalAccount", "group": "inline@1" },
+        { "command": "xdevAi.checkUsage", "when": "view == xdevAi.claude.accounts && viewItem == aiTerminalAccount", "group": "inline@2" },
+        { "command": "xdevAi.removeTerminalAccount", "when": "view == xdevAi.claude.accounts && viewItem == aiTerminalAccount", "group": "inline@3" },
+        { "command": "xdevAi.signInTerminal", "when": "view == xdevAi.claude.accounts && viewItem == aiTerminalAccount", "group": "1_account@1" },
+        { "command": "xdevAi.renameTerminalAccount", "when": "view == xdevAi.claude.accounts && viewItem == aiTerminalAccount", "group": "1_account@2" },
+        { "command": "xdevAi.removeTerminalAccount", "when": "view == xdevAi.claude.accounts && viewItem == aiTerminalAccount", "group": "1_account@3" },
+        { "command": "xdevAi.openTerminalBypass", "when": "view == xdevAi.claude.accounts && viewItem == aiTerminalAccount && isWorkspaceTrusted", "group": "1_account@4" },
+        { "command": "xdevAi.openAccountChat", "when": "view == xdevAi.apiAccounts && viewItem == aiApiAccount", "group": "inline@1" },
+        { "command": "xdevAi.removeAccount", "when": "view == xdevAi.apiAccounts && viewItem == aiApiAccount", "group": "inline@2" },
+        { "command": "xdevAi.switchAccount", "when": "view == xdevAi.apiAccounts && viewItem == aiApiAccount", "group": "1_account@1" },
+        { "command": "xdevAi.manageAccounts", "when": "view == xdevAi.apiAccounts && viewItem == aiApiAccount", "group": "1_account@2" },
+        { "command": "xdevAi.removeAccount", "when": "view == xdevAi.apiAccounts && viewItem == aiApiAccount", "group": "1_account@3" }
       ],
       "commandPalette": [
-        {
-          "command": "xdevAi.openAccountChat",
-          "when": "false"
-        }
+        { "command": "xdevAi.openAccountChat", "when": "false" }
       ]
     },
     "terminal": {
       "profiles": [
-        {
-          "id": "xdevAi.terminal",
-          "title": "xDev AI: Choose Account",
-          "icon": "terminal"
-        },
-        {
-          "id": "xdevAi.terminal.bypass",
-          "title": "xDev AI: Bypass Permissions",
-          "icon": "warning"
-        },
-        {
-          "id": "xdevAi.claude.terminal",
-          "title": "xDev AI: Claude Code",
-          "icon": "terminal"
-        }
+        { "id": "xdevAi.terminal", "title": "xDev AI: Choose Account", "icon": "terminal" },
+        { "id": "xdevAi.terminal.bypass", "title": "xDev AI: Bypass Permissions", "icon": "warning" },
+        { "id": "xdevAi.claude.terminal", "title": "xDev AI: Claude Code", "icon": "terminal" }
       ]
     },
     "mcpServerDefinitionProviders": [
-      {
-        "id": "xdevAi.mcp",
-        "label": "xDev AI"
-      }
+      { "id": "xdevAi.mcp", "label": "xDev AI" }
     ],
     "languageModelTools": [
       {
@@ -374,16 +129,9 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "message": {
-              "type": "string",
-              "description": "The request for the role, with an optional @Role prefix.",
-              "minLength": 1,
-              "maxLength": 8000
-            }
+            "message": { "type": "string", "description": "The request for the role, with an optional @Role prefix.", "minLength": 1, "maxLength": 8000 }
           },
-          "required": [
-            "message"
-          ],
+          "required": ["message"],
           "additionalProperties": false
         }
       },
@@ -397,22 +145,10 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "action": {
-              "type": "string",
-              "enum": [
-                "view",
-                "run",
-                "discard"
-              ]
-            },
-            "planId": {
-              "type": "string",
-              "description": "The exact ID from the pending plan. Required for run and discard."
-            }
+            "action": { "type": "string", "enum": ["view", "run", "discard"] },
+            "planId": { "type": "string", "description": "The exact ID from the pending plan. Required for run and discard." }
           },
-          "required": [
-            "action"
-          ],
+          "required": ["action"],
           "additionalProperties": false
         }
       },
@@ -426,27 +162,11 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "action": {
-              "type": "string",
-              "enum": [
-                "view",
-                "draft"
-              ]
-            },
-            "workflowId": {
-              "type": "string",
-              "description": "The exact workflow ID from view. Required for draft."
-            },
-            "step": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 4,
-              "description": "The current zero-based step from view. Required for draft."
-            }
+            "action": { "type": "string", "enum": ["view", "draft"] },
+            "workflowId": { "type": "string", "description": "The exact workflow ID from view. Required for draft." },
+            "step": { "type": "integer", "minimum": 0, "maximum": 4, "description": "The current zero-based step from view. Required for draft." }
           },
-          "required": [
-            "action"
-          ],
+          "required": ["action"],
           "additionalProperties": false
         }
       }
@@ -474,11 +194,7 @@
         },
         "xdevAi.squad.approver": {
           "type": "string",
-          "enum": [
-            "human",
-            "ai+human",
-            "ai"
-          ],
+          "enum": ["human", "ai+human", "ai"],
           "default": "human",
           "enumDescriptions": [
             "You start every step yourself.",
@@ -489,14 +205,8 @@
         },
         "xdevAi.squad.workerAllowedCommands": {
           "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [
-            "npm test",
-            "npm run build",
-            "npm run lint"
-          ],
+          "items": { "type": "string" },
+          "default": ["npm test", "npm run build", "npm run lint"],
           "markdownDescription": "Command prefixes that headless Claude Code workers (Implement and Tests) may run without asking, for example `npm test` or `dotnet test`. Other shell commands are denied and reported in the chat. Read-only git commands are always allowed."
         },
         "xdevAi.squad.workerBudgetUsd": {
@@ -510,18 +220,10 @@
           "type": "object",
           "default": {},
           "properties": {
-            "Lead": {
-              "type": "string"
-            },
-            "Implement": {
-              "type": "string"
-            },
-            "Review": {
-              "type": "string"
-            },
-            "Tests": {
-              "type": "string"
-            }
+            "Lead": { "type": "string" },
+            "Implement": { "type": "string" },
+            "Review": { "type": "string" },
+            "Tests": { "type": "string" }
           },
           "additionalProperties": false,
           "markdownDescription": "Claude Code model per Squad role, for example `{ \"Implement\": \"sonnet\", \"Review\": \"haiku\" }`. Empty uses the account default. A cheaper model for Review and Tests saves usage."
