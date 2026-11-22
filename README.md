@@ -127,14 +127,38 @@ Assign a **Claude Code** terminal account (instead of an API profile) to a role 
 
   ```json
   "xdevAi.squad.repositoryAllowedCommands": {
-    "his/backend/his-service": ["dotnet build", "dotnet test"],
-    "his-portal": ["npx vitest run", "npx tsc --noEmit"]
+    "services/billing-api": ["dotnet build", "dotnet test"],
+    "web-portal": ["npx vitest run", "npx tsc --noEmit"]
   }
   ```
 
 **Several windows.** Roles, runs, memory, and skills are shared by every window that opens the workspace, also across browsers in code-server (a file in the extension's global storage). While one window runs a step, the others show it and wait; if that window closes, the run is reported as interrupted.
 
-**Clean up.** Worktrees from older versions or from removed runs can stay behind. Run **xDev AI: Clean Up Squad Worktrees** from the Squad view menu to list leftover `xdev/squad/*` worktrees, pick the ones to remove, and delete their branches when merged. Unmerged branches are kept.
+**Manage each project.** Open **xDev Squad → Project** (or **xDev AI: Open Squad Project Settings and Storage**). It lists this project's repositories and Squad settings, marks the ones set in the project's `.vscode/settings.json`, and opens that file with **Edit project settings**. Roles, runs, memory, skills, and settings are kept per project.
+
+**Give workers MCP servers.** Workers never load your own MCP servers. To let them use one, such as a read-only database or documentation server, click **Add server** on the Project tab, pick a server from the project's `.mcp.json`, list the tools workers may call, and pick the roles. It is saved in the project settings:
+
+```json
+"xdevAi.squad.mcpServers": {
+  "postgres-dev": { "tools": ["query", "list_tables"], "roles": ["Lead", "Implement"] },
+  "docs": { "type": "http", "url": "https://mcp.example.com/mcp", "tools": ["*"] }
+}
+```
+
+Without `command` or `url`, the server of the same name in `.mcp.json` is used. Workers can call only the listed tools (`"*"` allows all tools of a server, so keep it for read-only servers); any other tool call is denied and shown in the run. Roles default to Lead, Implement, and Tests. AI reviews never get MCP servers. Server definitions, which can hold tokens, reach Claude Code in a private temporary file, not on the command line. The setting is ignored in untrusted workspaces.
+
+A stdio server starts in the worker's worktree. If it reads data folders or writes logs relative to its working directory, set those paths as absolute paths in `env`; otherwise it cannot find its data, and its log files show up in the run's changes. For a server that also has data tools, list only the tools workers need, for example its schema tools, and keep tools that return personal data out of the list.
+
+**Keep the disk from filling up.** The Project tab shows free disk and, after **Check storage**, the size of each run's worktrees, unused worktree folders, worker transcripts, and Squad state. **Clean up…** lists what can go: runs whose work is merged or pushed, unused worktree folders (unmerged branches are kept), and transcripts of removed runs. Squad also:
+
+- removes a run whose work is merged or pushed, with nothing committed since, after `xdevAi.squad.cleanupAfterDays` (7 by default; pushed branches stay on the remote);
+- keeps 10 runs per project; the oldest run makes room only when its work is merged or pushed;
+- refuses to create worktrees or start a step when less than `xdevAi.squad.minFreeDiskGb` (2 GB) is free;
+- deletes a run's worker transcripts when the run is removed.
+
+Linked folders such as `node_modules` are shared with your checkout, not copied. Memory is capped at 200 notes and about 3,000 characters per prompt.
+
+**Clean up worktrees outside Squad's storage.** Worktrees from older versions can stay in your repositories. Run **xDev AI: Clean Up Squad Worktrees** from the Squad view menu to list leftover `xdev/squad/*` worktrees, pick the ones to remove, and delete their branches when merged. Unmerged branches are kept.
 
 A step that reports **blocked** or fails waits for you. You can run it again with a new brief, open it in a terminal, or skip it. Headless steps deny commands outside the allowed list without prompting and list them in the chat. Each role always uses the account you assigned; xDev never switches accounts by itself.
 
@@ -155,8 +179,11 @@ The reviewer is the account assigned to Lead and must differ from the account th
 | `xdevAi.squad.workerModels` | `{}` | Model per role, for example `{ "Review": "haiku" }`. |
 | `xdevAi.squad.workerTimeoutMinutes` | `20` | Stops a worker that runs too long. |
 | `xdevAi.squad.codegraph` | `true` | Use the workspace's CodeGraph index for planning and let workers query it. |
+| `xdevAi.squad.mcpServers` | `{}` | MCP servers workers may use in this project, with their allowed tools and roles. |
+| `xdevAi.squad.cleanupAfterDays` | `7` | Remove runs whose work is merged or pushed after this many days. `0` turns it off. |
+| `xdevAi.squad.minFreeDiskGb` | `2` | Free disk Squad needs before creating worktrees or starting a step. `0` turns the check off. |
 
-Workers do not use `--dangerously-skip-permissions` or `--bare` (bare mode ignores claude.ai sign-in). Built-in tools a role does not need are not loaded, and MCP servers are skipped (`--strict-mcp-config`), which keeps each request small. [Claude Code headless mode](https://code.claude.com/docs/en/headless) · [CLI reference](https://code.claude.com/docs/en/cli-reference)
+Workers do not use `--dangerously-skip-permissions` or `--bare` (bare mode ignores claude.ai sign-in). Built-in tools a role does not need are not loaded, and only the MCP servers granted in `xdevAi.squad.mcpServers` start (`--strict-mcp-config` with `--mcp-config`), which keeps each request small. [Claude Code headless mode](https://code.claude.com/docs/en/headless) · [CLI reference](https://code.claude.com/docs/en/cli-reference)
 
 Each account's own plan and usage limits apply. Squad runs one step at a time, only when you start it.
 

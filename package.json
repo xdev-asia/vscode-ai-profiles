@@ -2,7 +2,7 @@
   "name": "xdev-ai",
   "displayName": "xDev AI",
   "description": "Manage AI accounts, open Claude Code, Codex, and Gemini terminals, and coordinate AI tasks in VS Code.",
-  "version": "0.10.1",
+  "version": "0.11.0",
   "publisher": "xdev-asia",
   "icon": "media/icon.png",
   "private": true,
@@ -42,6 +42,7 @@
       { "command": "xdevAi.squad.customizations", "title": "Manage Skills and Tools", "category": "xDev AI" },
       { "command": "xdevAi.squad.memory", "title": "Open Squad Memory", "category": "xDev AI" },
       { "command": "xdevAi.squad.syncSkills", "title": "Sync Squad Skills and Memory", "category": "xDev AI" },
+      { "command": "xdevAi.squad.project", "title": "Open Squad Project Settings and Storage", "category": "xDev AI" },
       { "command": "xdevAi.squad.cleanWorktrees", "title": "Clean Up Squad Worktrees", "category": "xDev AI", "icon": "$(trash)" },
       { "command": "xdevAi.manageMcp", "title": "Manage MCP", "category": "xDev AI", "icon": "$(plug)" },
       { "command": "xdevAi.manageTerminalAccounts", "title": "Open AI Accounts Sidebar", "category": "xDev AI", "icon": "$(account)" },
@@ -258,7 +259,7 @@
           "type": "object",
           "additionalProperties": { "type": "array", "items": { "type": "string" } },
           "default": {},
-          "markdownDescription": "Extra command prefixes per repository, added to `xdevAi.squad.workerAllowedCommands` for steps in that repository. Key by the repository's path in the workspace or by its folder name, for example `{ \"his/backend/his-service\": [\"dotnet build\", \"dotnet test\"], \"his-portal\": [\"npx vitest run\", \"npx tsc\"] }`."
+          "markdownDescription": "Extra command prefixes per repository, added to `xdevAi.squad.workerAllowedCommands` for steps in that repository. Key by the repository's path in the workspace or by its folder name, for example `{ \"services/billing-api\": [\"dotnet build\", \"dotnet test\"], \"web-portal\": [\"npx vitest run\", \"npx tsc\"] }`."
         },
         "xdevAi.squad.mergeRequests": {
           "type": "string",
@@ -286,6 +287,39 @@
           "type": "string",
           "default": "",
           "markdownDescription": "Default target branch for **Push & MR**, for example `dev`. Empty uses the remote's default branch, then the branch the run started from. You can change it in the dialog."
+        },
+        "xdevAi.squad.mcpServers": {
+          "type": "object",
+          "default": {},
+          "scope": "resource",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "tools": { "type": "array", "items": { "type": "string" }, "description": "Tool names workers may call, as the server lists them. \"*\" allows every tool of the server." },
+              "roles": { "type": "array", "items": { "type": "string", "enum": ["Lead", "Implement", "Review", "Tests"] }, "description": "Roles that get the server. Default: Lead, Implement, Tests." },
+              "command": { "type": "string", "description": "Start a stdio server with this command instead of using the one in .mcp.json." },
+              "args": { "type": "array", "items": { "type": "string" } },
+              "env": { "type": "object", "additionalProperties": { "type": "string" } },
+              "type": { "type": "string", "enum": ["stdio", "http", "sse"] },
+              "url": { "type": "string", "description": "Use a remote http or sse server at this address." },
+              "headers": { "type": "object", "additionalProperties": { "type": "string" } }
+            },
+            "required": ["tools"]
+          },
+          "markdownDescription": "MCP servers Squad workers may use in this project, keyed by server name, for example `{ \"postgres-dev\": { \"tools\": [\"query\"], \"roles\": [\"Lead\", \"Implement\"] } }`. Without `command` or `url`, the server of the same name in the project's `.mcp.json` is used. Workers still never load your other MCP servers, they can call only the listed tools, and AI reviews never get MCP servers. Ignored in untrusted workspaces. Manage it under **Squad → Project**."
+        },
+        "xdevAi.squad.cleanupAfterDays": {
+          "type": "number",
+          "default": 7,
+          "minimum": 0,
+          "maximum": 365,
+          "markdownDescription": "Days after which a Squad run whose work is merged or pushed (with nothing committed since) is cleaned up: its worktrees, local branches, and worker transcripts are deleted; pushed branches stay on the remote. `0` turns automatic cleanup off. Squad keeps at most 10 runs per project either way."
+        },
+        "xdevAi.squad.minFreeDiskGb": {
+          "type": "number",
+          "default": 2,
+          "minimum": 0,
+          "markdownDescription": "Free disk space, in GB, Squad needs before it creates worktrees or starts a worker step. `0` turns the check off."
         },
         "xdevAi.squad.syncFolder": {
           "type": "string",

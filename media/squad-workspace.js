@@ -175,19 +175,124 @@ function mountSquadWorkspace(vscode) {
     }));
   }
 
+  function bytes(value) {
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let size = value ?? 0;
+    let unit = 0;
+    while (size >= 1024 && unit < units.length - 1) { size /= 1024; unit++; }
+    return `${size >= 10 || unit === 0 ? Math.round(size) : size.toFixed(1)} ${units[unit]}`;
+  }
+
+  function element(tag, text, className) {
+    const node = document.createElement(tag);
+    if (text !== undefined) node.textContent = text;
+    if (className) node.className = className;
+    return node;
+  }
+
+  function renderProject() {
+    const project = state.project;
+    if (!project) return;
+    const key = JSON.stringify(project) + String(Boolean(pending));
+    const panel = byId('project-panel');
+    if (key === panel.dataset.key) return;
+    panel.dataset.key = key;
+    const { settings, scopes } = project;
+    byId('project-name').textContent = project.name || 'Project';
+    const commands = Object.entries(settings.repositoryCommands ?? {});
+    const repos = project.repositories;
+    // A large workspace can hold dozens of repositories; show a few and keep the full list in the tooltip.
+    const repoText = !repos.length ? 'none found'
+      : repos.length <= 6 ? repos.join(', ') : `${repos.length}: ${repos.slice(0, 4).join(', ')}, and ${repos.length - 4} more`;
+    const rows = [
+      ['Repositories', repoText, ''],
+      ['Worktrees start from', settings.baseBranch || 'the branch your checkout is on', 'baseBranch'],
+      ['Merge requests', `${settings.mergeRequests} → ${settings.mergeRequestTarget || 'remote default branch'}`, settings.mergeRequestTarget ? 'mergeRequestTarget' : 'mergeRequests'],
+      ['Worker budget', `$${settings.budgetUsd} per step · ${settings.timeoutMinutes} min`, 'workerBudgetUsd'],
+      ['Allowed commands', settings.allowedCommands.length ? settings.allowedCommands.join(', ') : 'read-only git only', 'workerAllowedCommands'],
+      ...commands.map(([repo, list]) => [`  ${repo}`, list.join(', ') || '—', 'repositoryAllowedCommands']),
+      ['Linked into worktrees', settings.worktreeLinks.join(', ') || 'nothing', 'worktreeLinks'],
+      ['CodeGraph', settings.codegraph ? 'on' : 'off', 'codegraph'],
+      ['Clean up merged or pushed runs', settings.cleanupAfterDays ? `after ${settings.cleanupAfterDays} days` : 'off', 'cleanupAfterDays'],
+      ['Minimum free disk', settings.minFreeDiskGb ? `${settings.minFreeDiskGb} GB` : 'not checked', 'minFreeDiskGb']
+    ];
+    byId('project-settings').replaceChildren(...rows.flatMap(([label, value, setting]) => {
+      const term = element('dt', label);
+      const detail = element('dd', value);
+      if (label === 'Repositories' && repos.length > 6) detail.title = repos.join('\n');
+      const scope = setting && scopes[setting];
+      if (scope && scope !== 'default') detail.append(' ', element('small', scope, `scope ${scope}`));
+      return [term, detail];
+    }));
+
+    const list = byId('project-mcp');
+    if (!project.trusted) list.replaceChildren(element('li', 'Trust this workspace to give workers MCP servers.', 'subtle'));
+    else if (!project.mcp.length) {
+      list.replaceChildren(element('li', project.mcpAvailable.length
+        ? `None yet. Servers in .mcp.json you can add: ${project.mcpAvailable.join(', ')}.`
+        : 'None yet. Add a server from .mcp.json or define one in the project settings.', 'subtle'));
+    } else {
+      list.replaceChildren(...project.mcp.map(server => {
+        const row = element('li');
+        const title = element('span');
+        title.append(element('strong', server.name), ` ${server.server ? `· ${server.server}` : ''}`);
+        const detail = element('small', server.problem
+          ? server.problem
+          : `${server.tools.includes('*') ? 'all tools' : server.tools.join(', ')} · ${server.roles.join(', ')} · from ${server.source}`, server.problem ? 'problem' : '');
+        const remove = element('button', 'Remove');
+        remove.type = 'button';
+        remove.disabled = Boolean(pending);
+        remove.setAttribute('aria-label', `Remove MCP server ${server.name}`);
+        remove.addEventListener('click', () => send('removeMcp', { name: server.name }, 'project', 'project'));
+        const actions = element('div', undefined, 'actions');
+        actions.append(remove);
+        row.append(title, detail, actions);
+        return row;
+      }));
+    }
+    byId('project-mcp-file').hidden = !project.mcpFile;
+    byId('project-add-mcp').disabled = Boolean(pending) || !project.trusted;
+
+    const { disk, storage, runs, memory } = project;
+    const low = disk.free !== undefined && disk.minimum && disk.free < disk.minimum;
+    byId('project-disk').textContent = `${disk.free === undefined ? 'Free disk unknown' : `${bytes(disk.free)} free`}${low ? ` — below the ${bytes(disk.minimum)} Squad needs; new runs and steps are refused` : ''} · ${runs.count}/${runs.limit} runs · ${memory.notes}/${memory.limit} memory notes`;
+    byId('project-disk').classList.toggle('problem', Boolean(low));
+    const items = [];
+    if (project.storageBusy) items.push(element('li', 'Measuring…', 'subtle'));
+    else if (!storage) items.push(element('li', 'Check storage to see what Squad keeps on disk for this project.', 'subtle'));
+    else {
+      const total = storage.runs.reduce((sum, run) => sum + run.bytes, 0) + storage.leftovers.reduce((sum, item) => sum + item.bytes, 0)
+        + storage.transcripts.bytes + storage.transcripts.keptBytes + storage.stateBytes;
+      items.push(element('li', `Total ${bytes(total)}${storage.partial ? ' or more (measuring stopped after a minute)' : ''} · checked ${new Date(storage.time).toLocaleTimeString()}`));
+      for (const run of storage.runs) {
+        const row = element('li');
+        row.append(element('span', run.title), element('small', `${bytes(run.bytes)}${run.disposable ? ' · merged or pushed, can be cleaned up' : ''}`));
+        items.push(row);
+      }
+      if (storage.leftovers.length) items.push(element('li', `Unused worktree folders: ${storage.leftovers.length} · ${bytes(storage.leftovers.reduce((sum, item) => sum + item.bytes, 0))}`, 'problem'));
+      items.push(element('li', `Worker transcripts: ${bytes(storage.transcripts.keptBytes)} for current runs${storage.transcripts.paths.length ? `, ${bytes(storage.transcripts.bytes)} from removed runs` : ''}`));
+      items.push(element('li', `Squad state: ${bytes(storage.stateBytes)}`));
+    }
+    byId('project-storage').replaceChildren(...items);
+    byId('project-check').disabled = Boolean(pending) || project.storageBusy;
+    byId('project-clean').disabled = Boolean(pending) || project.storageBusy;
+    byId('project-edit').disabled = Boolean(pending);
+  }
+
   function render(data) {
     if (!state && !pending) byId('workflow-notice').textContent = '';
     state = data;
     renderWorkflow();
     renderCustomizations();
     renderMemory();
+    renderProject();
   }
 
-  function send(action, args, notice = 'customizations') {
+  function send(action, args, notice = 'customizations', type = 'workspace') {
     if (!state || pending) return;
     pending = { action, notice };
     byId(`${notice}-notice`).textContent = '';
-    vscode.postMessage({ type: 'workspace', action, ...args });
+    vscode.postMessage({ type, action, ...args });
     render(state);
   }
 
@@ -245,9 +350,14 @@ function mountSquadWorkspace(vscode) {
   byId('native-tools').addEventListener('click', () => send('nativeTools'));
   byId('manage-mcp').addEventListener('click', () => send('manageMcp'));
   byId('native-skills').addEventListener('click', () => send('nativeSkills'));
+  for (const [id, action] of [['project-edit', 'editSettings'], ['project-add-mcp', 'addMcp'], ['project-mcp-file', 'openMcpFile'],
+    ['project-check', 'checkStorage'], ['project-clean', 'cleanStorage']]) {
+    byId(id).addEventListener('click', () => send(action, {}, 'project', 'project'));
+  }
   return { render, settle, loadError(error) {
     byId('workflow-notice').textContent = error;
     byId('customizations-notice').textContent = error;
     byId('memory-notice').textContent = error;
+    byId('project-notice').textContent = error;
   } };
 }

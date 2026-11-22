@@ -1,6 +1,9 @@
 import { spawn as spawnProcess, type ChildProcess, type SpawnOptions } from 'node:child_process';
-import { isAbsolute, relative } from 'node:path';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { isAbsolute, join, relative } from 'node:path';
 import type { Role } from './squad';
+import type { WorkerMcp } from './squad-mcp';
 import { terminalProfileEnv, type TerminalProfile } from './terminal-profiles';
 
 export const workerStatuses = ['done', 'blocked'] as const;
@@ -34,6 +37,8 @@ export interface WorkerSettings {
   timeoutMs: number;
   /** Lets workers query a CodeGraph index with `codegraph explore|node|query`. */
   codegraph?: boolean;
+  /** MCP servers this project grants the role, and the rules for the tools it may call. Never used by AI gates. */
+  mcp?: WorkerMcp;
 }
 
 export type ActivityKind = 'read' | 'search' | 'edit' | 'run' | 'tool' | 'denied' | 'failed';
@@ -136,9 +141,20 @@ export function validCommand(command: unknown): command is string {
   return typeof command === 'string' && /^[\w./@:+=-]+(?: [\w./@:+=-]+)*$/.test(command) && command.length <= 120;
 }
 
-export function workerArguments(request: Omit<WorkerRequest, 'executable' | 'profile' | 'cwd' | 'signal'>): string[] {
+/** The MCP servers a run starts: none for AI gates, which judge the work only from what they are given. */
+export function runMcp(mode: WorkerMode, settings: WorkerSettings): WorkerMcp | undefined {
+  return mode !== 'gate' && settings.mcp && Object.keys(settings.mcp.servers).length ? settings.mcp : undefined;
+}
+
+/**
+ * Claude Code arguments for one run. `--strict-mcp-config` always applies, so the user's and the project's own
+ * MCP servers are not loaded; only the servers in `mcpConfig` (a file path) start, and only their listed tools are allowed.
+ */
+export function workerArguments(request: Omit<WorkerRequest, 'executable' | 'profile' | 'cwd' | 'signal'>, mcpConfig?: string): string[] {
   const { role, mode, prompt, system, settings } = request;
   const { tools, allowed } = workerTools(role, mode, settings.allowedCommands.filter(validCommand), settings.codegraph);
+  const mcp = mcpConfig ? runMcp(mode, settings) : undefined;
+  if (mcp) allowed.push(...mcp.allowed);
   const args = [
     '-p', prompt,
     '--output-format', 'stream-json', '--verbose',
@@ -148,6 +164,7 @@ export function workerArguments(request: Omit<WorkerRequest, 'executable' | 'pro
     '--permission-mode', 'default',
     '--strict-mcp-config'
   ];
+  if (mcp) args.push('--mcp-config', mcpConfig!);
   if (allowed.length) args.push('--allowedTools', allowed.join(','));
   if (settings.budgetUsd > 0) args.push('--max-budget-usd', String(settings.budgetUsd));
   if (settings.model) args.push('--model', settings.model);
@@ -210,7 +227,10 @@ export function describeTool(name: unknown, input: unknown, cwd: string): Worker
       const command = typeof args.command === 'string' ? args.command.replace(/\s+/g, ' ').trim() : '';
       return { kind: 'run', text: command.slice(0, activityText) };
     }
-    default: return { kind: 'tool', text: name.slice(0, 60) };
+    default: {
+      const mcp = /^mcp__([^_].*?)__(.+)$/.exec(name);
+      return { kind: 'tool', text: (mcp ? `${mcp[1]} · ${mcp[2]}` : name).slice(0, 80) };
+    }
   }
 }
 
@@ -331,8 +351,14 @@ export function runClaude(request: WorkerRequest, spawn: Spawn = spawnProcess): 
   const { executable, profile, cwd, settings, signal } = request;
   if (profile.provider !== 'claude') return Promise.reject(new Error('Headless workers need a Claude Code terminal account.'));
   signal?.throwIfAborted();
-  const args = workerArguments(request);
-  return new Promise((resolve, reject) => {
+  // The server definitions may hold tokens, so they go in a private file rather than on the command line.
+  const mcp = runMcp(request.mode, settings);
+  const mcpFolder = mcp ? mkdtempSync(join(tmpdir(), 'xdev-squad-mcp-')) : undefined;
+  const mcpConfig = mcpFolder ? join(mcpFolder, 'mcp.json') : undefined;
+  if (mcpConfig) writeFileSync(mcpConfig, JSON.stringify({ mcpServers: mcp!.servers }), { mode: 0o600 });
+  const cleanup = () => { if (mcpFolder) rmSync(mcpFolder, { recursive: true, force: true }); };
+  const args = workerArguments(request, mcpConfig);
+  return new Promise<string>((resolve, reject) => {
     const windowsScript = process.platform === 'win32' && /\.cmd$/i.test(executable);
     const child = spawn(windowsScript ? process.env.ComSpec ?? 'cmd.exe' : executable,
       windowsScript ? ['/d', '/s', '/c', executable, ...args] : args, {
@@ -404,5 +430,5 @@ export function runClaude(request: WorkerRequest, spawn: Spawn = spawnProcess): 
       const detail = stderr.trim().split('\n').at(-1)?.slice(0, 300);
       finish(new Error(`Claude Code exited with code ${code}${detail ? `: ${detail}` : ''}. Sign in to the terminal account again if its session expired.`));
     });
-  });
+  }).finally(cleanup);
 }
