@@ -8,7 +8,8 @@ import {
 } from './terminal-profiles';
 import { chat, providers } from './core';
 import { isRole, noteLimit, readTask, roles, SquadStore, type Role } from './squad';
-import { disposableRun, runTitle, settledAt, SquadChat, type RunTree, type WorkerHost } from './squad-chat';
+import { approvers, disposableRun, poolModes, runTitle, settledAt, SquadChat, type RunTree, type SquadOptions, type WorkerHost } from './squad-chat';
+import { readClaudeQuota } from './account-usage';
 import { allEnvFiles, envFilesFor, loadEnv } from './squad-env';
 import { readMcpGrants, readProjectMcp, workerMcp, type McpGrant } from './squad-mcp';
 import { folderSize, formatBytes, freeBytes, removeFolders, sessionFolder, sessionFolders } from './squad-storage';
@@ -26,6 +27,19 @@ type SquadTab = 'workflow' | 'customizations' | 'memory' | 'project';
 
 function squadSetting<T>(key: string, fallback: T): T {
   return vscode.workspace.getConfiguration('xdevAi.squad').get<T>(key) ?? fallback;
+}
+
+function squadOptions(): SquadOptions {
+  const approver = squadSetting<string>('approver', 'ai');
+  const pool = squadSetting<string>('accountPool', 'role');
+  return {
+    leadSessionTurns: Number(squadSetting<number>('leadSessionTurns', 20)),
+    planApproval: squadSetting<string>('planApproval', 'auto') === 'manual' ? 'manual' : 'auto',
+    approver: approvers.find(candidate => candidate === approver) ?? 'ai',
+    accountPool: poolModes.find(candidate => candidate === pool) ?? 'role',
+    poolAccounts: squadSetting<unknown[]>('poolAccounts', []).filter((item): item is string => typeof item === 'string'),
+    resumeFeedback: squadSetting('resumeFeedback', true)
+  };
 }
 
 function workspaceFolder(): string | undefined {
@@ -290,6 +304,11 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
         if (free !== undefined && free < minimum) {
           throw new Error(`Only ${formatBytes(free)} is free on the disk that holds Squad worktrees; Squad needs ${formatBytes(minimum)} (xdevAi.squad.minFreeDiskGb). Clean up under Squad → Project, or free disk space.`);
         }
+      },
+      options: squadOptions,
+      quota: async profile => {
+        const usage = await readClaudeQuota(profile.configDir);
+        return usage.windows.length ? Math.max(...usage.windows.map(window => window.used)) : undefined;
       },
       forgetSessions: async paths => {
         const accounts = await profiles.list('claude');
@@ -777,7 +796,7 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
         sync: {
           folder: this.syncFolderPath() ?? '',
           profiles: squadSetting('syncSkillsToProfiles', true),
-          approver: squadSetting('approver', 'human'),
+          approver: squadSetting('approver', 'ai'),
           workers: {
             ...workerSettings('Implement'), models: squadSetting('workerModels', {}), repositoryCommands: repositoryCommands(),
             baseBranch: squadSetting<string>('baseBranch', '').trim()
@@ -837,10 +856,16 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
           await this.teamChat.send(message.text);
           return;
         case 'approve':
-          await this.teamChat.approve(message.id, undefined, message.approver ?? squadSetting('approver', 'human'), message.repos ?? message.repo);
+          await this.teamChat.approve(message.id, undefined, message.approver ?? squadSetting('approver', 'ai'), message.repos ?? message.repo);
           return;
         case 'discard': return this.teamChat.discard(message.id);
         case 'stop': return this.teamChat.cancel();
+        case 'newChat': return this.teamChat.newChat();
+        case 'openChat': return this.teamChat.openChat(message.id);
+        case 'deleteChat': {
+          const choice = await vscode.window.showWarningMessage('Delete this chat? Its worker runs are kept.', { modal: true }, 'Delete');
+          return choice === 'Delete' ? this.teamChat.deleteChat(message.id) : undefined;
+        }
         case 'runDiff': return this.showRunDiff(message.id);
         case 'runChanges': return { id: message.id, files: await this.teamChat.changes(message.id) };
         case 'runOpenFile': return this.openRunFile(message.id, message.file, message.repo);

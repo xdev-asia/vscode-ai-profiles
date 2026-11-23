@@ -30,6 +30,12 @@ export function squadPage({ cspSource, nonce, script, chatScript, workspaceScrip
     </nav>
   </header>
   <main id="chat-panel">
+    <div id="chat-sessions" class="chat-sessions">
+      <select id="chat-session" aria-label="Chat session"></select>
+      <button type="button" id="new-chat" title="Start a new chat with a fresh Lead session">New chat</button>
+      <button type="button" id="delete-chat" title="Delete this chat; its worker runs are kept">Delete</button>
+      <small id="chat-mode" class="subtle"></small>
+    </div>
     <section id="squad-board" class="squad-board" aria-label="Squad team"></section>
     <div id="chat-messages" role="log" aria-label="Squad conversation"></div>
     <section id="chat-plan" aria-labelledby="plan-title" hidden>

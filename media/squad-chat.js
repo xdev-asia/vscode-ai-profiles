@@ -41,6 +41,7 @@ function mountSquadChat(vscode, roles) {
       transcript = entries;
     }
 
+    renderSessions(snapshot);
     const { plan, status, busy } = snapshot;
     byId('chat-plan').hidden = !plan;
     if (!plan) openBriefs.clear();
@@ -589,6 +590,28 @@ function mountSquadChat(vscode, roles) {
     if (!node.hidden) node.textContent = `Use ${candidate.name} for all roles`;
   }
 
+  function renderSessions(state) {
+    const select = byId('chat-session');
+    const chats = state.chats ?? [];
+    const key = JSON.stringify(chats.map(chat => [chat.id, chat.title]));
+    if (select.dataset.key !== key) {
+      select.replaceChildren(...chats.map(chat => {
+        const option = document.createElement('option');
+        option.value = chat.id;
+        option.textContent = chat.title;
+        option.selected = chat.active;
+        return option;
+      }));
+      select.dataset.key = key;
+    }
+    const mode = [
+      state.leadSession ? `Lead session ${state.leadSession.turns}/${state.leadSession.max}` : '',
+      state.planApproval === 'auto' ? 'auto start' : '',
+      state.accountPool && state.accountPool !== 'role' ? `pool: ${state.accountPool === 'quota' ? 'most quota left' : 'round robin'}` : ''
+    ].filter(Boolean).join(' · ');
+    byId('chat-mode').textContent = mode;
+  }
+
   function updateControls() {
     message.disabled = !snapshot;
     byId('send-chat').disabled = !snapshot || snapshot.busy || Boolean(snapshot.plan || pending) || !message.value.trim();
@@ -597,6 +620,10 @@ function mountSquadChat(vscode, roles) {
     }
     byId('approve-plan').disabled = Boolean(pending || snapshot?.busy) || repoMissing();
     byId('discard-plan').disabled = Boolean(pending || snapshot?.busy);
+    const locked = !snapshot || Boolean(pending || snapshot.busy || snapshot.plan);
+    byId('chat-session').disabled = locked || (snapshot.chats ?? []).length < 2;
+    byId('new-chat').disabled = locked || !snapshot.entries.length;
+    byId('delete-chat').disabled = locked || (!snapshot.entries.length && (snapshot.chats ?? []).length < 2);
   }
 
   function send(action, args = {}) {
@@ -641,6 +668,12 @@ function mountSquadChat(vscode, roles) {
   byId('plan-approver').addEventListener('change', () => { byId('plan-approver').dataset.touched = '1'; render(lastState); });
   byId('discard-plan').addEventListener('click', () => send('discard', { id: snapshot.plan.id }));
   byId('stop-chat').addEventListener('click', () => send('stop'));
+  byId('new-chat').addEventListener('click', () => send('newChat'));
+  byId('chat-session').addEventListener('change', event => send('openChat', { id: event.target.value }));
+  byId('delete-chat').addEventListener('click', () => {
+    const active = (snapshot.chats ?? []).find(chat => chat.active);
+    if (active) send('deleteChat', { id: active.id });
+  });
   byId('chat-add-profile').addEventListener('click', () => send('addProfile'));
   byId('open-chat-terminal').addEventListener('click', () => send('terminal', { role: terminalRole.value }));
   return { render, settle, loadError: text => { byId('chat-status').textContent = text; } };
