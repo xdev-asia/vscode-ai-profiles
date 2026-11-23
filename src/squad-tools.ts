@@ -60,6 +60,11 @@ async function invoke(
   }
 }
 
+/** With automatic plan approval, Squad chat tools run without confirmation dialogs. */
+function autoApprove(): boolean {
+  return vscode.workspace.getConfiguration('xdevAi.squad').get('planApproval', 'auto') === 'auto';
+}
+
 function formatReplies(entries: SquadChatEntry[]): string {
   return entries.map(({ author, profile, text }) => `${author}${profile ? ` (${profile})` : ''}\n${text}`).join('\n\n');
 }
@@ -80,6 +85,7 @@ export function registerSquadTools(context: vscode.ExtensionContext, squad: Squa
   register<AskInput>('xdev_squad_ask', {
     prepareInvocation({ input }) {
       squad.customizations.requireTool('xdev_squad_ask');
+      if (autoApprove()) return { invocationMessage: 'Asking xDev Squad' };
       return {
         invocationMessage: 'Asking xDev Squad',
         confirmationMessages: {
@@ -106,6 +112,7 @@ export function registerSquadTools(context: vscode.ExtensionContext, squad: Squa
       squad.customizations.requireTool('xdev_squad_plan');
       if (input.action === 'view') return { invocationMessage: 'Reading the pending xDev Squad plan' };
       const plan = selectedPlan(squad, input.planId);
+      if (autoApprove()) return { invocationMessage: input.action === 'run' ? 'Running the xDev Squad plan' : 'Discarding the xDev Squad plan' };
       return {
         invocationMessage: input.action === 'run' ? 'Running the xDev Squad plan' : 'Discarding the xDev Squad plan',
         confirmationMessages: {
@@ -133,7 +140,7 @@ export function registerSquadTools(context: vscode.ExtensionContext, squad: Squa
         ).join('\n\n');
         const headless = plan.jobs.some(job => job.kind === 'claude');
         const approve = 'Approve plan';
-        const choice = await vscode.window.showWarningMessage('Approve this xDev Squad plan?', {
+        const choice = autoApprove() ? approve : await vscode.window.showWarningMessage('Approve this xDev Squad plan?', {
           modal: true,
           detail: `Nothing runs yet. You start, edit, or skip each step in xDev Squad → Chat → Worker runs.${headless
             ? ' Claude Code steps work in a new git worktree; nothing is pushed.' : ''}\n\n${preview}`
@@ -141,9 +148,15 @@ export function registerSquadTools(context: vscode.ExtensionContext, squad: Squa
         signal.throwIfAborted();
         if (choice !== approve) return 'The user declined the xDev Squad plan. The plan is still pending.';
         squad.customizations.requireTool('xdev_squad_plan');
+        const started = Date.now();
         const run = await squad.approve(plan.id, signal, vscode.workspace.getConfiguration('xdevAi.squad').get('approver') ?? 'human');
-        const replies = formatReplies(await run.finished);
-        return `${replies}\n\nThe plan is approved but no step has run. The user runs each step from xDev Squad → Chat → Worker runs.`;
+        const approved = await run.finished;
+        const record = autoApprove() ? squad.snapshot().runs?.find(candidate => candidate.status === 'active' && candidate.time >= started) : undefined;
+        if (record) {
+          const step = await squad.runStep(record.id, undefined, signal);
+          return formatReplies([...approved, ...await step.finished]);
+        }
+        return `${formatReplies(approved)}\n\nThe plan is approved but no step has run. The user runs each step from xDev Squad → Chat → Worker runs.`;
       });
     }
   });
