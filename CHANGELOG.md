@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.13.0 - 2026-11-23
+
+### Added
+
+- Chat sessions in Squad Chat: **New chat** starts an empty chat with a fresh Lead session, the list switches between the 20 most recent chats, and **Delete** removes one. Worker runs are shared by all chats and kept when a chat is deleted.
+- `xdevAi.squad.leadSessionTurns` (20): a Claude Code Lead continues one session per chat (`--resume`). Later turns send only the new message, what happened since Lead's last reply, and context that changed, not the history, memory, and CodeGraph excerpt each time. After the set number of turns, or when the session is gone, Lead starts a fresh session with the full context. `0` keeps the earlier behaviour.
+- `xdevAi.squad.planApproval` (`auto`): Lead's plan is approved as soon as it is proposed and its first step runs; later steps follow `xdevAi.squad.approver`. `manual` keeps approving each plan in the panel. A plan that needs a repository choice waits in the panel. Stop run also stops an automatic start.
+- `xdevAi.squad.accountPool` (`role`) and `xdevAi.squad.poolAccounts`: spread Claude Code worker steps over several accounts, in turn (`roundRobin`) or from the account with the most rate-limit quota left (`quota`). Lead's account is used for workers only when the pool has no other, so AI reviews stay independent.
+- `xdevAi.squad.resumeFeedback` (on): **Request changes** continues Implement's earlier session in the same worktree and account and sends only the feedback.
+- The chat shows the Lead session's turns and the active start and pool modes.
+
+### Changed
+
+- One chat message now runs the whole plan by default: `xdevAi.squad.planApproval` defaults to `auto` and `xdevAi.squad.approver` to `ai` (was `human`). A blocked or failed step, requested changes, a missing repository choice, merging, and pushing still wait for you. Set `planApproval` to `manual` and `approver` to `human` for the earlier behaviour.
+
 ## 0.12.0 - 2026-11-22
 
 ### Added

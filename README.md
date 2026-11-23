@@ -132,6 +132,20 @@ Assign a **Claude Code** terminal account (instead of an API profile) to a role 
   }
   ```
 
+**Spend fewer tokens.**
+
+- **Chat sessions.** Click **New chat** for a new topic. Each chat keeps its own entries and its own Lead session; switch chats from the list above the team board. Worker runs are shared by all chats.
+- **Lead keeps its session.** With a Claude Code account on Lead, later turns of a chat continue the same session (`xdevAi.squad.leadSessionTurns`, 20 by default). They send only the new message, what workers reported since Lead's last reply, and context that changed. `0` starts every turn fresh.
+- **One message runs the plan.** By default (`xdevAi.squad.planApproval`: `auto`, `xdevAi.squad.approver`: `ai`) Lead's plan starts at once, and each passing AI review starts the next step. Blocked steps, requested changes, merging, and pushing still wait for you. Set `planApproval` to `manual` and `approver` to `human` to approve plans and start every step yourself.
+- **Spread steps over accounts.** Set `xdevAi.squad.accountPool` to `roundRobin` or `quota`, and list the accounts in `xdevAi.squad.poolAccounts` (empty uses every Claude Code account):
+
+  ```json
+  "xdevAi.squad.accountPool": "quota",
+  "xdevAi.squad.poolAccounts": ["dev-1", "dev-2", "dev-3"]
+  ```
+
+- **Feedback continues the session.** **Request changes** resumes Implement's earlier session and sends only your feedback (`xdevAi.squad.resumeFeedback`).
+
 **Several windows.** Roles, runs, memory, and skills are shared by every window that opens the workspace, also across browsers in code-server (a file in the extension's global storage). While one window runs a step, the others show it and wait; if that window closes, the run is reported as interrupted.
 
 **Manage each project.** Open **xDev Squad → Project** (or **xDev AI: Open Squad Project Settings and Storage**). It lists this project's repositories and Squad settings, marks the ones set in the project's `.vscode/settings.json`, and opens that file with **Edit project settings**. Roles, runs, memory, skills, and settings are kept per project.
@@ -184,7 +198,7 @@ Linked folders such as `node_modules` are shared with your checkout, not copied.
 
 A step that reports **blocked** or fails waits for you. You can run it again with a new brief, open it in a terminal, or skip it. Headless steps deny commands outside the allowed list without prompting and list them in the chat. Each role always uses the account you assigned; xDev never switches accounts by itself.
 
-**Let AI approve steps.** Before approving a plan, choose **Who approves each step** (default from `xdevAi.squad.approver`):
+**Let AI approve steps.** Before approving a plan, choose **Who approves each step** (default from `xdevAi.squad.approver`, `ai` unless you change it):
 
 | Option | After a step finishes |
 | --- | --- |

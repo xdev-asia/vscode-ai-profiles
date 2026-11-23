@@ -2,7 +2,7 @@
   "name": "xdev-ai",
   "displayName": "xDev AI",
   "description": "Manage AI accounts, open Claude Code, Codex, and Gemini terminals, and coordinate AI tasks in VS Code.",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "publisher": "xdev-asia",
   "icon": "media/icon.png",
   "private": true,
@@ -198,13 +198,52 @@
         "xdevAi.squad.approver": {
           "type": "string",
           "enum": ["human", "ai+human", "ai"],
-          "default": "human",
+          "default": "ai",
           "enumDescriptions": [
             "You start every step yourself.",
             "Lead's account reviews each finished step; you still start every step.",
             "A passing review by Lead's account starts the next step. Changes requested, a blocked step, or an error waits for you. Merging always waits for you."
           ],
           "markdownDescription": "Default approver for new Squad runs. You can change it on each plan before approving. The AI reviewer is the account assigned to Lead and must differ from the step's account."
+        },
+        "xdevAi.squad.planApproval": {
+          "type": "string",
+          "enum": ["manual", "auto"],
+          "default": "auto",
+          "enumDescriptions": [
+            "You approve each plan Lead proposes in the Squad panel.",
+            "Lead's plan is approved as soon as it is proposed and its first step runs. Later steps follow `xdevAi.squad.approver`: with `ai`, each passing review starts the next step. Merging and pushing always wait for you."
+          ],
+          "markdownDescription": "How Lead's plans start. With `auto` and `xdevAi.squad.approver` set to `ai`, one chat message runs the whole plan; a step that is blocked, fails, or gets changes requested waits for you."
+        },
+        "xdevAi.squad.leadSessionTurns": {
+          "type": "number",
+          "default": 20,
+          "minimum": 0,
+          "maximum": 100,
+          "markdownDescription": "Lead turns that continue one Claude Code session per chat (`--resume`). Later turns send only the new message, what happened since Lead's last reply, and context that changed, instead of the history, memory, and CodeGraph excerpt each time. After this many turns the next message starts a fresh session. `0` starts every Lead turn fresh. Applies when Lead uses a Claude Code account."
+        },
+        "xdevAi.squad.accountPool": {
+          "type": "string",
+          "enum": ["role", "roundRobin", "quota"],
+          "default": "role",
+          "enumDescriptions": [
+            "Each worker role uses the account assigned to it under Roles.",
+            "Claude Code worker steps take accounts from `xdevAi.squad.poolAccounts` in turn.",
+            "Each Claude Code worker step takes the pool account with the most rate-limit quota left (from the quota status line)."
+          ],
+          "markdownDescription": "How worker steps (Implement, Review, Tests) choose a Claude Code account. With a pool, every worker role runs as Claude Code, Lead keeps its own account, and Lead's account is used for workers only when no other account is in the pool, so AI reviews stay independent."
+        },
+        "xdevAi.squad.poolAccounts": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "markdownDescription": "Claude Code accounts in the worker pool, by name as shown under Roles. Empty uses every Claude Code account. Used when `xdevAi.squad.accountPool` is not `role`."
+        },
+        "xdevAi.squad.resumeFeedback": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "**Request changes** continues Implement's earlier Claude Code session in the same worktree and account, sending only the feedback. If that session is gone, Implement starts a new one with the full context."
         },
         "xdevAi.squad.workerAllowedCommands": {
           "type": "array",

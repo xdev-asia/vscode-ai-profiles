@@ -68,7 +68,7 @@ test('worker output is parsed from the structured result', () => {
   assert.throws(() => parseWorkerOutput(result({ structured_output: { status: 'maybe', summary: 'x' } })), /structured report/);
   assert.throws(() => parseWorkerOutput('not json'), /JSON result/);
   assert.deepEqual(parsePlanOutput(result({ structured_output: { reply: 'Plan', tasks: [{ role: 'Implement', brief: 'Build' }] } })),
-    { reply: 'Plan', tasks: [{ role: 'Implement', brief: 'Build' }], costUsd: 0.25 });
+    { reply: 'Plan', tasks: [{ role: 'Implement', brief: 'Build' }], costUsd: 0.25, sessionId: 'session-1' });
 });
 
 function fakeSpawn(behave) {

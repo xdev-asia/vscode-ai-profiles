@@ -29,6 +29,7 @@ export interface WorkerResult extends WorkerReport {
 export interface PlanReport {
   reply: string;
   tasks: { role: string; brief: string; repo?: string }[];
+  sessionId?: string;
 }
 
 export interface WorkerSettings {
@@ -63,6 +64,10 @@ export interface WorkerRequest {
   system: string;
   settings: WorkerSettings;
   signal?: AbortSignal;
+  /** A Claude Code session to continue (`--resume`); it must belong to `profile` and `cwd`. */
+  resume?: string;
+  /** Keep the session of a plan, ask, or gate run so a later run can resume it. Work runs always keep theirs. */
+  persist?: boolean;
   /** Called for each tool the worker uses, while it runs. */
   onActivity?: (activity: WorkerActivity) => void;
 }
@@ -156,7 +161,7 @@ export function runMcp(mode: WorkerMode, settings: WorkerSettings): WorkerMcp | 
  * MCP servers are not loaded; only the servers in `mcpConfig` (a file path) start, and only their listed tools are allowed.
  */
 export function workerArguments(request: Omit<WorkerRequest, 'executable' | 'profile' | 'cwd' | 'signal'>, mcpConfig?: string): string[] {
-  const { role, mode, prompt, system, settings } = request;
+  const { role, mode, prompt, system, settings, resume, persist } = request;
   const { tools, allowed } = workerTools(role, mode, settings.allowedCommands.filter(validCommand), settings.codegraph);
   const mcp = mcpConfig ? runMcp(mode, settings) : undefined;
   if (mcp) allowed.push(...mcp.allowed);
@@ -174,7 +179,8 @@ export function workerArguments(request: Omit<WorkerRequest, 'executable' | 'pro
   if (settings.denyRead?.length) args.push('--disallowedTools', envDenyRules(settings.denyRead).join(','));
   if (settings.budgetUsd > 0) args.push('--max-budget-usd', String(settings.budgetUsd));
   if (settings.model) args.push('--model', settings.model);
-  if (mode !== 'work') args.push('--no-session-persistence');
+  if (resume) args.push('--resume', resume);
+  if (mode !== 'work' && !persist) args.push('--no-session-persistence');
   return args;
 }
 
@@ -334,7 +340,8 @@ export function parsePlanOutput(stdout: string): PlanReport & { costUsd: number 
       brief: typeof task?.brief === 'string' ? task.brief : '',
       ...(typeof task?.repo === 'string' && task.repo.trim() ? { repo: task.repo.trim() } : {})
     })),
-    costUsd: typeof message.total_cost_usd === 'number' ? message.total_cost_usd : 0
+    costUsd: typeof message.total_cost_usd === 'number' ? message.total_cost_usd : 0,
+    ...(typeof message.session_id === 'string' ? { sessionId: message.session_id } : {})
   };
 }
 
