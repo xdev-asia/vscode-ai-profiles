@@ -528,13 +528,13 @@
             "ai+human",
             "ai"
           ],
-          "default": "ai",
+          "default": "human",
           "enumDescriptions": [
             "You start every step yourself.",
             "Lead's account reviews each finished step; you still start every step.",
             "A passing review by Lead's account starts the next step. Changes requested, a blocked step, or an error waits for you. Merging always waits for you."
           ],
-          "markdownDescription": "Default approver for new Squad runs. You can change it on each plan before approving. The AI reviewer is the account assigned to Lead and must differ from the step's account."
+          "markdownDescription": "Default approver for new Squad runs (`human` unless you change it). You can change it on each plan before approving. The AI reviewer is the account assigned to Lead and must differ from the step's account."
         },
         "xdevAi.squad.planApproval": {
           "type": "string",
@@ -542,12 +542,12 @@
             "manual",
             "auto"
           ],
-          "default": "auto",
+          "default": "manual",
           "enumDescriptions": [
             "You approve each plan Lead proposes in the Squad panel.",
             "Lead's plan is approved as soon as it is proposed and its first step runs. Later steps follow `xdevAi.squad.approver`: with `ai`, each passing review starts the next step. Merging and pushing always wait for you."
           ],
-          "markdownDescription": "How Lead's plans start. With `auto` and `xdevAi.squad.approver` set to `ai`, one chat message runs the whole plan; a step that is blocked, fails, or gets changes requested waits for you."
+          "markdownDescription": "How Lead's plans start. The default, `manual`, waits for you to approve each plan. With `auto` and `xdevAi.squad.approver` set to `ai`, one chat message runs the whole plan up to a local commit without asking you; a step that is blocked, fails, or gets changes requested waits for you."
         },
         "xdevAi.squad.leadSessionTurns": {
           "type": "number",

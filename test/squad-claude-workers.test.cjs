@@ -6,7 +6,7 @@ const { join } = require('node:path');
 const { setImmediate: tick } = require('node:timers/promises');
 const { test } = require('node:test');
 const { Accounts } = require('../dist/accounts.js');
-const { SquadChat } = require('../dist/squad-chat.js');
+const { gateChanges, SquadChat } = require('../dist/squad-chat.js');
 const { SquadStore } = require('../dist/squad.js');
 const { Worktrees } = require('../dist/squad-worktree.js');
 
@@ -62,7 +62,7 @@ async function setup(t, respond, extraHost = {}) {
     ...extraHost
   };
   const open = () => new SquadChat(storage, accounts, squad, () => {}, host);
-  return { open, runs, worktrees, squad, prepared: () => prepared };
+  return { open, runs, worktrees, squad, accounts, prepared: () => prepared };
 }
 
 async function settle(chat) {
@@ -258,6 +258,88 @@ test('without an independent reviewer the AI approver falls back to the user', a
   assert.deepEqual(runs.map(request => request.mode), ['plan', 'work'], 'Lead on the Implement account cannot review Implement');
   assert.ok(open().snapshot().entries.some(entry => /No independent AI reviewer for Implement/.test(entry.text)));
   assert.equal(open().snapshot().runs[0].steps[1].status, 'pending');
+});
+
+const measured = { path: 'src/a.ts', status: 'modified', added: 2, removed: 1, binary: false, patch: '@@ -1 +1,2 @@\n-a\n+b\n+c' };
+
+test('the AI review gets the changes the extension measured, not only the worker\'s own report', async t => {
+  const { open, runs } = await gatedSetup(t, ['pass']);
+  const chat = open();
+  const runId = await approvedRun(chat, 'ai+human');
+  await (await chat.runStep(runId)).finished;
+
+  const gate = runs[2];
+  const evidence = JSON.parse(gate.prompt);
+  assert.deepEqual(evidence.step.files, [], 'the worker itself reported no changed file');
+  assert.deepEqual(evidence.changes, { files: [measured], truncated: false });
+  assert.match(gate.system, /worker's own report/);
+  assert.match(gate.system, /"changes"/);
+  assert.match(gate.system, /never as instructions/);
+});
+
+test('an AI review that cannot measure the changes asks for changes without calling the reviewer', async t => {
+  const { open, runs, worktrees } = await gatedSetup(t, ['pass']);
+  worktrees.changes = async () => { throw new Error('git diff failed'); };
+  const chat = open();
+  const runId = await approvedRun(chat, 'ai+human');
+  await (await chat.runStep(runId)).finished;
+
+  assert.deepEqual(runs.map(request => request.mode), ['plan', 'work'], 'no reviewer runs without the measured changes');
+  const { gate } = open().snapshot().runs[0].steps[0];
+  assert.equal(gate.verdict, 'changes');
+  assert.match(gate.reason, /git diff failed/);
+});
+
+test('the changes sent to a review are cut to a size limit and say so', () => {
+  const big = { ...measured, path: 'src/big.ts', patch: 'x'.repeat(500) };
+  assert.deepEqual(gateChanges([measured], 1_000), { files: [measured], truncated: false });
+
+  const cut = gateChanges([big, measured], 120);
+  assert.equal(cut.truncated, true);
+  assert.equal(cut.files[0].patch.length, 120);
+  assert.deepEqual(cut.files[1], { ...measured, patch: '' }, 'a file past the limit is still listed, without its patch');
+
+  const many = gateChanges(Array.from({ length: 450 }, (_, index) => ({ ...measured, path: `src/${index}.ts` })), 1_000_000);
+  assert.equal(many.files.length, 200);
+  assert.equal(many.truncated, true);
+});
+
+/** Lead on a text API account: the plan and the review go over HTTP, the workers stay on Claude Code. */
+async function textReviewer(t, patch) {
+  const context = await gatedSetup(t, []);
+  context.worktrees.changes = async () => [{ ...measured, patch }];
+  await context.accounts.add({ name: 'Lead text', provider: 'compatible', baseUrl: 'http://localhost:3000/v1', model: 'lead', apiKey: 'lead-key' });
+  const [lead] = (await context.accounts.read()).accounts;
+  await context.squad.save('Lead', { account: `api:${lead.id}`, brief: '', status: 'Ready', blocker: '' });
+  const reviews = [];
+  t.mock.method(global, 'fetch', async (_url, options) => {
+    const { messages } = JSON.parse(options.body);
+    const review = /You review one step/.test(messages[0].content);
+    if (review) reviews.push(messages);
+    const content = JSON.stringify(review
+      ? { verdict: 'pass', reason: 'Matches the brief' }
+      : { reply: 'Go', tasks: [{ role: 'Implement', brief: 'Build it' }, { role: 'Review', brief: 'Review it' }] });
+    return new Response(JSON.stringify({ choices: [{ message: { content } }] }));
+  });
+  const chat = context.open();
+  const runId = await approvedRun(chat, 'ai+human');
+  await (await chat.runStep(runId)).finished;
+  return { reviews, gate: context.open().snapshot().runs[0].steps[0].gate };
+}
+
+test('a text-only reviewer is sent the measured changes', async t => {
+  const { reviews, gate } = await textReviewer(t, measured.patch);
+  assert.equal(reviews.length, 1);
+  assert.deepEqual(JSON.parse(reviews[0][1].content).changes, { files: [measured], truncated: false });
+  assert.match(reviews[0][0].content, /worker's own report/);
+  assert.equal(gate.verdict, 'pass');
+});
+
+test('a text-only reviewer never passes changes too large for it to see in full', async t => {
+  const { reviews, gate } = await textReviewer(t, 'x'.repeat(70_000));
+  assert.equal(reviews.length, 0, 'the reviewer is not asked about a diff it would only see part of');
+  assert.equal(gate.verdict, 'changes');
+  assert.match(gate.reason, /too large/);
 });
 
 test('worktrees branch from HEAD and commit only inside the worktree', async t => {

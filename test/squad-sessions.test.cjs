@@ -213,8 +213,8 @@ test('request changes continues Implement\'s session with only the feedback', as
 
 test('worker arguments resume a session and keep it when asked', () => {
   const base = { role: 'Lead', mode: 'plan', prompt: '{}', system: 's', settings: { budgetUsd: 0, allowedCommands: [], timeoutMs: 1 } };
-  assert.ok(workerArguments(base).includes('--no-session-persistence'));
-  const kept = workerArguments({ ...base, resume: 'lead-1', persist: true });
+  assert.ok(workerArguments(base, { system: '/tmp/x/system.md' }).includes('--no-session-persistence'));
+  const kept = workerArguments({ ...base, resume: 'lead-1', persist: true }, { system: '/tmp/x/system.md' });
   assert.deepEqual(kept.slice(kept.indexOf('--resume'), kept.indexOf('--resume') + 2), ['--resume', 'lead-1']);
   assert.ok(!kept.includes('--no-session-persistence'));
 });

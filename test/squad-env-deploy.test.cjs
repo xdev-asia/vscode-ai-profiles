@@ -34,7 +34,7 @@ test('.env files are parsed, kept inside the repository, and never change the wo
   assert.deepEqual(envDenyRules(['/home/u/app/.env']), ['Read(//home/u/app/.env)']);
 
   const base = { role: 'Tests', mode: 'work', prompt: 'p', system: 's' };
-  const args = workerArguments({ ...base, settings: { budgetUsd: 1, allowedCommands: [], timeoutMs: 1, env: { DB_URL: 'postgres://x' }, denyRead: ['/home/u/app/.env'] } });
+  const args = workerArguments({ ...base, settings: { budgetUsd: 1, allowedCommands: [], timeoutMs: 1, env: { DB_URL: 'postgres://x' }, denyRead: ['/home/u/app/.env'] } }, { system: '/tmp/x/system.md' });
   assert.equal(args[args.indexOf('--disallowedTools') + 1], 'Read(//home/u/app/.env)');
   assert.ok(!args.join(' ').includes('postgres://x'), 'values never reach the command line');
 });

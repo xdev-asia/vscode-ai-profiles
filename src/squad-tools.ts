@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { chatPromptLimit, type SquadChat, type SquadChatEntry } from './squad-chat';
+import { approvalSettings, chatPromptLimit, type SquadChat, type SquadChatEntry } from './squad-chat';
 import type { squadTools } from './squad-customizations';
 import { workflowStage, workflowStages } from './workflow';
 
@@ -62,7 +62,8 @@ async function invoke(
 
 /** With automatic plan approval, Squad chat tools run without confirmation dialogs. */
 function autoApprove(): boolean {
-  return vscode.workspace.getConfiguration('xdevAi.squad').get('planApproval', 'auto') === 'auto';
+  const config = vscode.workspace.getConfiguration('xdevAi.squad');
+  return approvalSettings(key => config.get(key)).planApproval === 'auto';
 }
 
 function formatReplies(entries: SquadChatEntry[]): string {

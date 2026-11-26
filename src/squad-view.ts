@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { basename, isAbsolute, join, relative } from 'node:path';
 import * as vscode from 'vscode';
 import { Accounts, accountStorageKey } from './accounts';
@@ -8,7 +9,7 @@ import {
 } from './terminal-profiles';
 import { chat, providers } from './core';
 import { isRole, noteLimit, readTask, roles, SquadStore, type Role } from './squad';
-import { approvers, disposableRun, poolModes, runTitle, settledAt, SquadChat, type RunTree, type SquadOptions, type WorkerHost } from './squad-chat';
+import { approvalSettings, disposableRun, poolModes, runTitle, settledAt, SquadChat, type RunTree, type SquadOptions, type WorkerHost } from './squad-chat';
 import { readClaudeQuota } from './account-usage';
 import { allEnvFiles, envFilesFor, loadEnv } from './squad-env';
 import { readMcpGrants, readProjectMcp, workerMcp, type McpGrant } from './squad-mcp';
@@ -18,7 +19,7 @@ import { registerSquadTools } from './squad-tools';
 import { squadPage } from './squad-html';
 import { memoryTextLimit } from './squad-memory';
 import { exploreCode, findRepositories, hasCodegraph } from './squad-codegraph';
-import { runClaude, validCommand, type WorkerSettings } from './squad-worker';
+import { launch, runClaude, terminalArguments, validCommand, workerSummary, type WorkerSettings } from './squad-worker';
 import { git, validBranch, Worktrees, type MergeRequestMode } from './squad-worktree';
 import { mergeSkills, readSyncFolder, syncProfileSkills, writeSyncFolder } from './skill-sync';
 
@@ -29,13 +30,17 @@ function squadSetting<T>(key: string, fallback: T): T {
   return vscode.workspace.getConfiguration('xdevAi.squad').get<T>(key) ?? fallback;
 }
 
+/** `xdevAi.squad.planApproval` and `xdevAi.squad.approver`; unset or unknown values leave every decision to the user. */
+function approval(): Pick<SquadOptions, 'planApproval' | 'approver'> {
+  const config = vscode.workspace.getConfiguration('xdevAi.squad');
+  return approvalSettings(key => config.get(key));
+}
+
 function squadOptions(): SquadOptions {
-  const approver = squadSetting<string>('approver', 'ai');
   const pool = squadSetting<string>('accountPool', 'role');
   return {
     leadSessionTurns: Number(squadSetting<number>('leadSessionTurns', 20)),
-    planApproval: squadSetting<string>('planApproval', 'auto') === 'manual' ? 'manual' : 'auto',
-    approver: approvers.find(candidate => candidate === approver) ?? 'ai',
+    ...approval(),
     accountPool: poolModes.find(candidate => candidate === pool) ?? 'role',
     poolAccounts: squadSetting<unknown[]>('poolAccounts', []).filter((item): item is string => typeof item === 'string'),
     resumeFeedback: squadSetting('resumeFeedback', true)
@@ -796,9 +801,9 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
         sync: {
           folder: this.syncFolderPath() ?? '',
           profiles: squadSetting('syncSkillsToProfiles', true),
-          approver: squadSetting('approver', 'ai'),
+          approver: approval().approver,
           workers: {
-            ...workerSettings('Implement'), models: squadSetting('workerModels', {}), repositoryCommands: repositoryCommands(),
+            ...workerSummary(workerSettings('Implement')), models: squadSetting('workerModels', {}), repositoryCommands: repositoryCommands(),
             baseBranch: squadSetting<string>('baseBranch', '').trim()
           },
           deploy: deployTargets()
@@ -856,7 +861,7 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
           await this.teamChat.send(message.text);
           return;
         case 'approve':
-          await this.teamChat.approve(message.id, undefined, message.approver ?? squadSetting('approver', 'ai'), message.repos ?? message.repo);
+          await this.teamChat.approve(message.id, undefined, message.approver ?? approval().approver,message.repos ?? message.repo);
           return;
         case 'discard': return this.teamChat.discard(message.id);
         case 'stop': return this.teamChat.cancel();
@@ -1075,23 +1080,39 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
     return (await vscode.window.showQuickPick(trees.map(tree => ({ label: tree.target, description: tree.path, tree })), { title }))?.tree;
   }
 
-  /** Opens an interactive Claude Code terminal under a profile; the user drives it. */
-  private async openClaudeTerminal(name: string, profile: TerminalProfile, cwd: string, args: string[]): Promise<void> {
+  private async claudeExecutable(): Promise<string> {
     const executable = await findTerminalExecutable('claude', vscode.workspace.getConfiguration('xdevAi').get<string>('claudeExecutable') ?? '');
     if (!executable) throw new Error('Claude Code was not found on the workspace host. Set xdevAi.claudeExecutable.');
-    const script = process.platform === 'win32' && /\.cmd$/i.test(executable);
-    vscode.window.createTerminal({
-      name,
-      shellPath: script ? process.env.ComSpec ?? 'cmd.exe' : executable,
-      shellArgs: script ? ['/d', '/s', '/c', executable, ...args] : args,
-      cwd,
-      env: terminalProfileEnv(profile)
-    }).show();
+    return executable;
+  }
+
+  /** Opens an interactive Claude Code terminal under a profile; the user drives it. */
+  private openClaudeTerminal(name: string, profile: TerminalProfile, cwd: string, executable: string, args: string[]): vscode.Terminal {
+    const start = launch(executable, args);
+    const terminal = vscode.window.createTerminal({ name, shellPath: start.command, shellArgs: start.args, cwd, env: terminalProfileEnv(profile) });
+    terminal.show();
+    return terminal;
   }
 
   private async terminalStep(id: unknown, brief: unknown): Promise<void> {
+    const executable = await this.claudeExecutable();
     const step = await this.teamChat.startTerminalStep(id, brief);
-    await this.openClaudeTerminal(`${step.role} · ${step.name}`, step.profile, step.cwd, ['--append-system-prompt', step.system, step.prompt]);
+    // The system text is read from a private file, removed when the terminal closes.
+    const folder = mkdtempSync(join(tmpdir(), 'xdev-squad-terminal-'));
+    try {
+      const file = join(folder, 'system.md');
+      const { args, system } = terminalArguments(step, file, process.platform === 'win32' && /\.cmd$/i.test(executable));
+      writeFileSync(file, system, { mode: 0o600 });
+      const terminal = this.openClaudeTerminal(`${step.role} · ${step.name}`, step.profile, step.cwd, executable, args);
+      const closed = vscode.window.onDidCloseTerminal(candidate => {
+        if (candidate !== terminal) return;
+        closed.dispose();
+        rmSync(folder, { recursive: true, force: true });
+      });
+    } catch (error) {
+      rmSync(folder, { recursive: true, force: true });
+      throw error;
+    }
   }
 
   /** Opens VS Code's diff editor for one file: the base commit on the left, the worktree on the right. */
@@ -1296,7 +1317,7 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
     if (!tree) throw new Error('This run has no git worktree.');
     const profile: TerminalProfile | undefined = (await this.profiles.list('claude')).find(candidate => terminalProfileId(candidate) === session.profileId);
     if (!profile) throw new Error('The Claude Code account for this session was removed.');
-    await this.openClaudeTerminal(`${session.role} · ${session.profile}`, profile, tree.path, ['--resume', session.sessionId]);
+    this.openClaudeTerminal(`${session.role} · ${session.profile}`, profile, tree.path, await this.claudeExecutable(), ['--resume', session.sessionId]);
   }
 
   private async startRequest(role: Role, profileId: string, brief: string): Promise<void> {
