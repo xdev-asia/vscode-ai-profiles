@@ -2,7 +2,7 @@
   "name": "xdev-ai",
   "displayName": "xDev AI",
   "description": "Manage AI accounts, open Claude Code, Codex, and Gemini terminals, and coordinate AI tasks in VS Code.",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "publisher": "xdev-asia",
   "icon": "media/icon.png",
   "private": true,
@@ -147,7 +147,8 @@
       {
         "command": "xdevAi.refreshUsage",
         "title": "Refresh Account Quota",
-        "category": "xDev AI"
+        "category": "xDev AI",
+        "icon": "$(refresh)"
       },
       {
         "command": "xdevAi.signInTerminal",
@@ -250,6 +251,11 @@
           "command": "xdevAi.addAiAccount",
           "when": "view == xdevAi.claude.accounts || view == xdevAi.squad",
           "group": "navigation@1"
+        },
+        {
+          "command": "xdevAi.refreshUsage",
+          "when": "view == xdevAi.claude.accounts",
+          "group": "navigation@2"
         },
         {
           "command": "xdevAi.squad.cleanWorktrees",

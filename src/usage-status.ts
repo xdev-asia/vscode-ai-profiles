@@ -56,7 +56,8 @@ export function registerUsageStatus(
   }
 
   function publish(snapshots: Map<string, AccountUsage>): void {
-    const key = JSON.stringify([...snapshots].map(([id, usage]) => [id, usage.plan, usage.seat, usage.signedOut]));
+    const key = JSON.stringify([...snapshots].map(([id, usage]) => [id, usage.plan, usage.seat, usage.signedOut,
+      usage.windows.map(window => [window.label, Number(window.used.toFixed(1)), window.resetsAt, (window.resetsAt ?? Infinity) <= Date.now()])]));
     latest = new Map(snapshots);
     if (key === latestKey) return;
     latestKey = key;

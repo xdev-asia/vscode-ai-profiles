@@ -3,7 +3,7 @@ import { homedir } from 'node:os';
 import { extname, join } from 'node:path';
 import * as vscode from 'vscode';
 import { exportAccounts, importAccounts, readAccountFile, validPassphrase } from './account-transfer';
-import { canCaptureClaudeQuota, claudeQuotaFile } from './account-usage';
+import { canCaptureClaudeQuota, claudeQuotaFile, type AccountUsage, type UsageWindow } from './account-usage';
 import { claudeLoginScript } from './claude-login';
 import {
   findTerminalExecutable, terminalArguments, terminalProfileEnv, terminalProfileId, terminalProviderIds, terminalProviders,
@@ -13,6 +13,7 @@ import { planLabel, registerUsageStatus, type UsageStatus } from './usage-status
 
 type Action = 'add' | 'open' | 'bypass' | 'signIn' | 'usage' | 'rename' | 'remove';
 type AccountTarget = TerminalAccountItem | string;
+type AccountTreeItem = TerminalAccountItem | UsageWindowItem;
 const accountsViewId = 'xdevAi.claude.accounts';
 
 class TerminalAccountItem extends vscode.TreeItem {
@@ -27,6 +28,55 @@ class TerminalAccountItem extends vscode.TreeItem {
     this.contextValue = 'aiTerminalAccount';
     this.iconPath = new vscode.ThemeIcon('account');
     this.command = { command: 'xdevAi.openTerminal', title: 'Open AI Terminal', arguments: [this.id] };
+    this.windows = usageRows(profile, usage);
+    this.collapsibleState = this.windows.length ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.None;
+  }
+
+  readonly windows: UsageRow[];
+}
+
+/**
+ * Every Claude and Codex account shows its own 5h and weekly rows. A window missing from the latest sample has
+ * reset (or not started yet), so it shows 0% until the next sample. A Codex Premium seat has no 5h window.
+ */
+type UsageRow = UsageWindow & { idle?: boolean };
+
+function usageRows(profile: TerminalProfile, usage: AccountUsage | undefined): UsageRow[] {
+  if (!usage || usage.signedOut || profile.provider === 'gemini') return [];
+  const windows = usage.windows.filter(window => !window.resetsAt || window.resetsAt > Date.now());
+  if (!windows.length && usage.observedAt === undefined && profile.provider === 'claude') return [];
+  const required = profile.provider === 'codex' && usage.seat === 'premium' ? ['7d'] : ['5h', '7d'];
+  const missing = required.filter(label => !windows.some(window => window.label === label));
+  return [...missing.map(label => ({ label, used: 0, idle: true })), ...windows]
+    .sort((a, b) => rank(a.label) - rank(b.label));
+}
+
+function rank(label: string): number {
+  return label === '5h' ? 0 : label === '7d' ? 1 : 2;
+}
+
+function resetLabel(resetsAt: number): string {
+  const reset = new Date(resetsAt);
+  const time = reset.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  return reset.toDateString() === new Date().toDateString() ? time : `${reset.toLocaleDateString(undefined, { weekday: 'short' })} ${time}`;
+}
+
+class UsageWindowItem extends vscode.TreeItem {
+  constructor(accountId: string, window: UsageRow) {
+    super(window.label === '7d' ? 'Week' : window.label);
+    this.id = `${accountId}:usage:${window.label}`;
+    const used = Math.min(100, Math.max(0, window.used));
+    const filled = Math.round(used / 10);
+    const percent = `${Number(window.used.toFixed(1))}%`;
+    const full = window.used >= 100;
+    const reset = window.resetsAt
+      ? `${full ? 'available again' : 'resets'} ${resetLabel(window.resetsAt)}`
+      : window.idle ? 'reset · starts with next use' : '';
+    this.description = `${'█'.repeat(filled)}${'░'.repeat(10 - filled)} ${full ? 'Full' : percent}${reset ? ` · ${reset}` : ''}`;
+    this.tooltip = `${window.label} · ${percent} used${window.resetsAt ? `\n${full ? 'Available again' : 'Resets'} ${new Date(window.resetsAt).toLocaleString()}` : window.idle ? '\nThis window has reset. The timer starts with the next request.' : ''}`;
+    this.contextValue = 'aiTerminalUsage';
+    this.iconPath = new vscode.ThemeIcon(used >= 90 ? 'error' : used >= 70 ? 'warning' : 'pulse',
+      used >= 90 ? new vscode.ThemeColor('charts.red') : used >= 70 ? new vscode.ThemeColor('charts.yellow') : undefined);
   }
 }
 
@@ -34,11 +84,13 @@ export function registerAiTerminals(context: vscode.ExtensionContext, profiles: 
   const accountsChanged = new vscode.EventEmitter<void>();
   const treeChanged = new vscode.EventEmitter<void>();
   let usageStatus: UsageStatus | undefined;
-  const view = vscode.window.createTreeView<TerminalAccountItem>(accountsViewId, {
+  const view = vscode.window.createTreeView<AccountTreeItem>(accountsViewId, {
     treeDataProvider: {
       onDidChangeTreeData: treeChanged.event,
       getTreeItem: item => item,
-      async getChildren() {
+      async getChildren(element) {
+        if (element instanceof TerminalAccountItem) return element.windows.map(window => new UsageWindowItem(element.id!, window));
+        if (element) return [];
         return (await profiles.list()).map(profile => new TerminalAccountItem(profile, usageStatus));
       }
     }
