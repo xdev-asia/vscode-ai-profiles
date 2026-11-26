@@ -2,6 +2,7 @@ import { unlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { extname, join } from 'node:path';
 import * as vscode from 'vscode';
+import { exportAccounts, importAccounts, readAccountFile, validPassphrase } from './account-transfer';
 import { canCaptureClaudeQuota, claudeQuotaFile } from './account-usage';
 import { claudeLoginScript } from './claude-login';
 import {
@@ -243,6 +244,81 @@ export function registerAiTerminals(context: vscode.ExtensionContext, profiles: 
     }
   }
 
+  async function askPassphrase(title: string, prompt: string, confirm: boolean): Promise<string | undefined> {
+    const passphrase = await vscode.window.showInputBox({
+      title, prompt, password: true, ignoreFocusOut: true,
+      validateInput: input => validPassphrase(input) ? undefined : 'Use at least 8 characters.'
+    });
+    if (passphrase === undefined || !confirm) return passphrase;
+    const again = await vscode.window.showInputBox({
+      title, prompt: 'Enter the passphrase again.', password: true, ignoreFocusOut: true,
+      validateInput: input => input === passphrase ? undefined : 'The passphrases do not match.'
+    });
+    return again === undefined ? undefined : passphrase;
+  }
+
+  async function exportCommand(target?: AccountTarget): Promise<void> {
+    try {
+      const accounts = await profiles.list();
+      if (!accounts.length) {
+        void vscode.window.showInformationMessage('Add an AI terminal account first.');
+        return;
+      }
+      const preselected = target instanceof TerminalAccountItem ? target.id : undefined;
+      const picked = await vscode.window.showQuickPick(accounts.map(profile => ({
+        label: profile.name, description: terminalProviders[profile.provider].name, profile,
+        picked: preselected ? terminalProfileId(profile) === preselected : true
+      })), { title: 'Export AI Accounts', placeHolder: 'Choose the accounts to export', canPickMany: true, matchOnDescription: true });
+      if (!picked?.length) return;
+      const proceed = 'Continue';
+      if (await vscode.window.showWarningMessage('The file holds these accounts’ sign-in tokens.', {
+        modal: true,
+        detail: 'Anyone with the file and its passphrase can use the accounts. Signing in to the same account on two machines can sign one of them out when its token renews.'
+      }, proceed) !== proceed) return;
+      const passphrase = await askPassphrase('Export AI Accounts', 'A passphrase to encrypt the file (at least 8 characters). You need it to import.', true);
+      if (passphrase === undefined) return;
+      const uri = await vscode.window.showSaveDialog({
+        title: 'Export AI Accounts',
+        defaultUri: vscode.Uri.joinPath(vscode.workspace.workspaceFolders?.[0]?.uri ?? vscode.Uri.file(homedir()), 'xdev-ai-accounts.xdevai'),
+        filters: { 'xDev AI accounts': ['xdevai'] }
+      });
+      if (!uri) return;
+      const result = await exportAccounts(picked.map(item => item.profile), passphrase);
+      await vscode.workspace.fs.writeFile(uri, result.content);
+      const missing = result.withoutSignIn.length ? ` No sign-in file for ${result.withoutSignIn.join(', ')}: sign in again after importing.` : '';
+      void vscode.window.showInformationMessage(`Exported ${picked.length} account${picked.length === 1 ? '' : 's'}.${missing}`);
+    } catch (error) {
+      void vscode.window.showErrorMessage(error instanceof Error ? error.message : 'Unable to export the accounts.');
+    }
+  }
+
+  async function importCommand(): Promise<void> {
+    try {
+      const [uri] = await vscode.window.showOpenDialog({
+        title: 'Import AI Accounts', canSelectMany: false, openLabel: 'Import',
+        filters: { 'xDev AI accounts': ['xdevai'], 'All files': ['*'] }
+      }) ?? [];
+      if (!uri) return;
+      const content = await vscode.workspace.fs.readFile(uri);
+      const passphrase = await askPassphrase('Import AI Accounts', 'The passphrase used to export this file.', false);
+      if (passphrase === undefined) return;
+      const accounts = await readAccountFile(content, passphrase);
+      const list = accounts.map(account => `${account.name} (${terminalProviders[account.provider].name})${account.signedIn ? '' : ' – sign in again'}`).join('\n');
+      const add = 'Import';
+      if (await vscode.window.showInformationMessage(`Import ${accounts.length} account${accounts.length === 1 ? '' : 's'}?`, {
+        modal: true, detail: `${list}\n\nEach one is added as a new account; a name already in use gets a number.`
+      }, add) !== add) return;
+      try {
+        await importAccounts(profiles, content, passphrase);
+      } finally {
+        accountsChanged.fire();
+      }
+      void vscode.window.showInformationMessage(`Imported ${accounts.length} account${accounts.length === 1 ? '' : 's'}.`);
+    } catch (error) {
+      void vscode.window.showErrorMessage(error instanceof Error ? error.message : 'Unable to import the accounts.');
+    }
+  }
+
   const command = (id: string, action: Action, provider?: TerminalProvider) =>
     vscode.commands.registerCommand(id, (target?: AccountTarget) => run(action, provider, target));
   const focus = () => vscode.commands.executeCommand(`${accountsViewId}.focus`);
@@ -277,6 +353,8 @@ export function registerAiTerminals(context: vscode.ExtensionContext, profiles: 
     command('xdevAi.checkUsage', 'usage'),
     command('xdevAi.renameTerminalAccount', 'rename'),
     command('xdevAi.removeTerminalAccount', 'remove'),
+    vscode.commands.registerCommand('xdevAi.exportTerminalAccounts', (target?: AccountTarget) => exportCommand(target)),
+    vscode.commands.registerCommand('xdevAi.importTerminalAccounts', () => importCommand()),
     vscode.window.registerTerminalProfileProvider('xdevAi.terminal', terminalProvider()),
     vscode.window.registerTerminalProfileProvider('xdevAi.terminal.bypass', terminalProvider(undefined, 'bypass')),
     // Keep the commands and profile used by older VS Code settings and workflows.

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.14.0 - 2026-11-26
+
+### Added
+
+- **Export Terminal Accounts…** and **Import Terminal Accounts…** move terminal accounts between machines. The `.xdevai` file holds each account's name and sign-in files, encrypted with a passphrase (scrypt, AES-256-GCM); CLI history stays behind. Imported accounts are added as new ones, and a name already in use gets a number.
+
 ## 0.13.1 - 2026-11-26
 
 ### Added

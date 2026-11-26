@@ -27,6 +27,7 @@ Open **xDev AI** in the Activity Bar. The sidebar contains **Terminal Accounts**
 3. Right-click a terminal account to rename it or sign in again. Click **Check AI Usage** next to a terminal account to open its session and see the provider's usage command.
 4. In **API Profiles**, click **+** to add a profile. Select a profile to open xDev Chat with it, or right-click it to make it active or edit it.
 5. Click the trash icon next to a terminal account or API profile, or use its right-click **Delete** command. Deleting a terminal account closes its matching terminals in the current window and removes the profile directory, including saved sign-in data and CLI history. Deleting an API profile removes its saved key from xDev AI.
+6. To move terminal accounts to another machine, open the **...** menu of the Terminal Accounts view and choose **Export Terminal Accounts…**, or right-click one account. Pick the accounts and a passphrase; the `.xdevai` file holds each account's name and sign-in files (not its CLI history), encrypted with AES-256-GCM. On the other machine, choose **Import Terminal Accounts…** and enter the same passphrase. Signing in to one account on two machines can sign one of them out when its token renews. A Claude login kept in the macOS keychain is not in the file; sign in again after importing.
 
 Install each CLI on the workspace host. If xDev AI cannot find one, enter its absolute executable path in User Settings or Remote Settings.
 
