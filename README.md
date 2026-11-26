@@ -137,7 +137,7 @@ Assign a **Claude Code** terminal account (instead of an API profile) to a role 
 
 - **Chat sessions.** Click **New chat** for a new topic. Each chat keeps its own entries and its own Lead session; switch chats from the list above the team board. Worker runs are shared by all chats.
 - **Lead keeps its session.** With a Claude Code account on Lead, later turns of a chat continue the same session (`xdevAi.squad.leadSessionTurns`, 20 by default). They send only the new message, what workers reported since Lead's last reply, and context that changed. `0` starts every turn fresh.
-- **One message runs the plan.** By default (`xdevAi.squad.planApproval`: `auto`, `xdevAi.squad.approver`: `ai`) Lead's plan starts at once, and each passing AI review starts the next step. Blocked steps, requested changes, merging, and pushing still wait for you. Set `planApproval` to `manual` and `approver` to `human` to approve plans and start every step yourself.
+- **One message can run the plan.** By default you approve each plan and start every step (`xdevAi.squad.planApproval`: `manual`, `xdevAi.squad.approver`: `human`). Set `planApproval` to `auto` and `approver` to `ai` in your user settings to have Lead's plan start at once and each passing AI review start the next step, up to a local commit. Blocked steps, requested changes, merging, and pushing still wait for you.
 - **Spread steps over accounts.** Set `xdevAi.squad.accountPool` to `roundRobin` or `quota`, and list the accounts in `xdevAi.squad.poolAccounts` (empty uses every Claude Code account):
 
   ```json
@@ -160,7 +160,7 @@ Assign a **Claude Code** terminal account (instead of an API profile) to a role 
 }
 ```
 
-Without `command` or `url`, the server of the same name in `.mcp.json` is used. Workers can call only the listed tools (`"*"` allows all tools of a server, so keep it for read-only servers); any other tool call is denied and shown in the run. Roles default to Lead, Implement, and Tests. AI reviews never get MCP servers. Server definitions, which can hold tokens, reach Claude Code in a private temporary file, not on the command line. The setting is ignored in untrusted workspaces.
+Without `command` or `url`, the server of the same name in `.mcp.json` is used. Workers can call only the listed tools (`"*"` allows all tools of a server, so keep it for read-only servers); any other tool call is denied and shown in the run. Roles default to Lead, Implement, and Tests. AI reviews never get MCP servers. Server definitions, which can hold tokens, reach Claude Code in a private temporary file, not on the command line. The same holds for every headless run: the prompt goes to Claude Code's standard input and the role instructions in a private temporary file (`--append-system-prompt-file`). On Windows, a Claude Code installed as a `.cmd` script starts through `cmd.exe`; a run whose paths or arguments contain `% & | < > ^` or a line break is refused there, so set `xdevAi.claudeExecutable` to a `claude.exe` in that case. The setting is ignored in untrusted workspaces.
 
 A stdio server starts in the worker's worktree. If it reads data folders or writes logs relative to its working directory, set those paths as absolute paths in `env`; otherwise it cannot find its data, and its log files show up in the run's changes. For a server that also has data tools, list only the tools workers need, for example its schema tools, and keep tools that return personal data out of the list.
 
@@ -199,7 +199,7 @@ Linked folders such as `node_modules` are shared with your checkout, not copied.
 
 A step that reports **blocked** or fails waits for you. You can run it again with a new brief, open it in a terminal, or skip it. Headless steps deny commands outside the allowed list without prompting and list them in the chat. Each role always uses the account you assigned; xDev never switches accounts by itself.
 
-**Let AI approve steps.** Before approving a plan, choose **Who approves each step** (default from `xdevAi.squad.approver`, `ai` unless you change it):
+**Let AI approve steps.** Before approving a plan, choose **Who approves each step** (default from `xdevAi.squad.approver`, `human` unless you change it):
 
 | Option | After a step finishes |
 | --- | --- |
@@ -207,7 +207,7 @@ A step that reports **blocked** or fails waits for you. You can run it again wit
 | **AI reviews, you start the next** (`ai+human`) | Lead's account reviews the step and shows **pass** or **changes requested** with a reason. You start the next step. |
 | **AI** (`ai`) | A passing review starts the next step. A request for changes, a blocked step, or an error stops and waits for you. |
 
-The reviewer is the account assigned to Lead and must differ from the account that did the step; otherwise the step waits for you. A Claude Code reviewer reads the worktree diff with read-only tools; an API reviewer sees the step summary. Each step is reviewed once and never retried automatically. You always start the first step, and merging and pushing always wait for you. The **AI** option runs several steps without anyone watching, so keep the budget cap and allowed commands tight and check your provider's terms for unattended use.
+The reviewer is the account assigned to Lead and must differ from the account that did the step; otherwise the step waits for you. Every reviewer is sent the worktree's uncommitted changes as xDev measured them with git (up to 200 files and 60,000 characters of patch), next to the worker's own summary, and is told to judge the changes. A Claude Code reviewer can also read the worktree with read-only tools; an API reviewer sees only what it is sent, so changes too large to send in full are never passed by it and wait for you. If the changes cannot be read, the review asks for changes. Each step is reviewed once and never retried automatically. You always start the first step, and merging and pushing always wait for you. The **AI** option runs several steps without anyone watching, so keep the budget cap and allowed commands tight and check your provider's terms for unattended use.
 
 | Setting | Default | Purpose |
 | --- | --- | --- |

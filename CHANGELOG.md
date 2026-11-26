@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **Squad waits for you by default.** `xdevAi.squad.planApproval` now defaults to `manual` and `xdevAi.squad.approver` to `human`. Set them to `auto` and `ai` to get one-message runs back.
+- An AI review is sent the worktree's uncommitted changes as xDev measured them with git, next to the worker's own summary, and is told to judge the changes. A text API reviewer no longer passes a step whose changes are too large to send in full, and a review whose changes cannot be read asks for changes.
+
+### Security
+
+- Headless Squad runs no longer put the prompt or the role instructions on the command line: the prompt goes to Claude Code's standard input, the instructions in a private temporary file (`--append-system-prompt-file`). A step opened in a terminal reads its instructions from such a file too.
+- On Windows, a Claude Code installed as a `.cmd` script is started through `cmd.exe` only when no path or argument contains `% & | < > ^` or a line break; otherwise the run stops with a message to set `xdevAi.claudeExecutable` to a `claude.exe`.
+- The Squad view receives only the budget and the allowed commands of the worker settings. MCP server definitions, environment values and `.env` paths stay in the extension host.
+
 ## 0.15.0 - 2026-11-26
 
 ### Added

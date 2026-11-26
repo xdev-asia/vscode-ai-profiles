@@ -1,9 +1,11 @@
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
+const { existsSync, readFileSync } = require('node:fs');
 const { PassThrough } = require('node:stream');
 const { test } = require('node:test');
 const {
-  describeTool, parsePlanOutput, parseWorkerOutput, runClaude, streamActivities, workerArguments, workerEnvironment, workerTools
+  describeTool, launch, parsePlanOutput, parseWorkerOutput, runClaude, streamActivities, terminalArguments, workerArguments, workerEnvironment,
+  workerSummary, workerTools
 } = require('../dist/squad-worker.js');
 
 const settings = { budgetUsd: 1, allowedCommands: ['npm test', 'rm -rf /; echo', 'dotnet test'], timeoutMs: 60_000 };
@@ -18,9 +20,12 @@ function result(extra) {
 }
 
 test('worker arguments restrict tools by role and cap spending', () => {
-  const args = workerArguments({ role: 'Implement', mode: 'work', prompt: 'Do it', system: 'You are Implement', settings: { ...settings, model: 'sonnet' } });
+  const args = workerArguments({ role: 'Implement', mode: 'work', prompt: 'Do it', system: 'You are Implement', settings: { ...settings, model: 'sonnet' } }, { system: '/tmp/x/system.md' });
   const value = flag => args[args.indexOf(flag) + 1];
-  assert.equal(value('-p'), 'Do it');
+  assert.ok(args.includes('-p'));
+  assert.ok(!args.includes('Do it'), 'the prompt goes to stdin, not the command line');
+  assert.ok(!args.includes('You are Implement') && !args.includes('--append-system-prompt'), 'the system text goes in a file');
+  assert.equal(value('--append-system-prompt-file'), '/tmp/x/system.md');
   assert.equal(value('--output-format'), 'stream-json');
   assert.ok(args.includes('--verbose'), 'print mode needs --verbose for stream-json');
   assert.doesNotMatch(value('--allowedTools'), /codegraph/, 'CodeGraph stays off unless enabled');
@@ -46,10 +51,27 @@ test('worker arguments restrict tools by role and cap spending', () => {
   const review = workerTools('Review', 'work', ['npm test']);
   assert.deepEqual(review.tools, ['Read', 'Glob', 'Grep', 'Bash']);
   assert.ok(!review.allowed.some(tool => tool === 'Edit' || tool.includes('npm test')));
-  const plan = workerArguments({ role: 'Lead', mode: 'plan', prompt: 'Plan', system: 'Lead', settings });
+  const plan = workerArguments({ role: 'Lead', mode: 'plan', prompt: 'Plan', system: 'Lead', settings }, { system: '/tmp/x/system.md' });
   assert.equal(plan[plan.indexOf('--tools') + 1], 'Read,Glob,Grep,Bash', 'Lead reads the repository to plan or answer');
   assert.doesNotMatch(plan[plan.indexOf('--allowedTools') + 1], /Edit|Write|npm/);
   assert.ok(plan.includes('--no-session-persistence'));
+});
+
+test('the worker settings shown in the Squad view carry no MCP server, environment, or .env path', () => {
+  const shown = workerSummary({
+    model: 'sonnet', budgetUsd: 2, allowedCommands: ['npm test'], timeoutMs: 60_000, codegraph: true,
+    mcp: {
+      servers: {
+        db: { type: 'stdio', command: 'pg-mcp', env: { PGPASSWORD: 'mcp-env-secret' } },
+        docs: { type: 'http', url: 'https://mcp.example.com/mcp', headers: { Authorization: 'Bearer mcp-header-secret' } }
+      },
+      allowed: ['mcp__db__query']
+    },
+    env: { API_TOKEN: 'dotenv-secret' },
+    denyRead: ['/repo/private/.env']
+  });
+  assert.deepEqual(shown, { budgetUsd: 2, allowedCommands: ['npm test'] });
+  assert.doesNotMatch(JSON.stringify(shown), /secret|pg-mcp|mcp\.example\.com|\.env/);
 });
 
 test('worker environment points at the profile and drops other credentials', () => {
@@ -79,12 +101,17 @@ function fakeSpawn(behave) {
   const calls = [];
   const spawn = (command, args, options) => {
     const child = new EventEmitter();
+    child.stdin = new PassThrough();
     child.stdout = new PassThrough();
     child.stderr = new PassThrough();
     child.exitCode = null;
     child.killed = false;
     child.kill = signal => { child.killed = signal; setImmediate(() => child.emit('close', null)); return true; };
-    calls.push({ command, args, options, child });
+    const at = args.indexOf('--append-system-prompt-file');
+    const call = { command, args, options, child, input: '', systemFile: at >= 0 ? args[at + 1] : undefined };
+    call.system = call.systemFile && readFileSync(call.systemFile, 'utf8');
+    child.stdin.setEncoding('utf8').on('data', chunk => { call.input += chunk; });
+    calls.push(call);
     setImmediate(() => behave(child));
     return child;
   };
@@ -155,4 +182,52 @@ test('stream events become activity, and the result line is returned', async () 
 
   const empty = fakeSpawn(child => { child.stdout.end(JSON.stringify(events[0]) + '\n'); setImmediate(() => child.emit('close', 0)); });
   await assert.rejects(runClaude(request, empty.spawn).then(parseWorkerOutput), /JSON result/);
+});
+
+test('the prompt and the system text reach Claude Code through stdin and a private file, never the command line', async () => {
+  const done = fakeSpawn(child => {
+    child.stdout.end(result({ structured_output: { status: 'done', summary: 'ok', files_changed: [], tests: '', memory: [] } }));
+    child.emit('close', 0);
+  });
+  const prompt = 'Fix "it" & echo PWNED %PATH%\nsecond line';
+  const system = 'You are Tests\n"quoted" & calc';
+  await runClaude({ executable: '/bin/claude', profile, cwd: '/repo/wt', role: 'Tests', mode: 'work', prompt, system, settings }, done.spawn);
+  await new Promise(resolve => setImmediate(resolve));
+  const [call] = done.calls;
+  assert.ok(!call.args.some(arg => /PWNED|calc|second line|You are Tests/.test(arg)), 'no prompt or system text on the command line');
+  assert.equal(call.options.stdio[0], 'pipe');
+  assert.equal(call.input, prompt, 'the whole prompt arrives on stdin, newlines and quotes included');
+  assert.equal(call.system, system, 'the system text is in the file when the CLI starts');
+  assert.equal(existsSync(call.systemFile), false, 'the file is deleted after the run');
+});
+
+test('a .cmd install starts through cmd.exe only with arguments cmd.exe cannot reinterpret', () => {
+  assert.deepEqual(launch('/bin/claude', ['-p', 'a & b'], 'linux'), { command: '/bin/claude', args: ['-p', 'a & b'] });
+  assert.deepEqual(launch('C:/bin/claude.exe', ['-p', 'a & b'], 'win32', 'cmd.exe'), { command: 'C:/bin/claude.exe', args: ['-p', 'a & b'] });
+  const script = 'C:/npm/claude.cmd';
+  assert.deepEqual(launch(script, ['-p', '--model', 'sonnet'], 'win32', 'C:/Windows/cmd.exe'),
+    { command: 'C:/Windows/cmd.exe', args: ['/d', '/s', '/c', script, '-p', '--model', 'sonnet'] });
+  for (const bad of ['a & calc', '%PATH%', 'x | y', 'a > b', 'a < b', 'a ^ b', 'one\ntwo', 'one\rtwo']) {
+    assert.throws(() => launch(script, ['--model', bad], 'win32', 'cmd.exe'), /\.cmd script.*claudeExecutable/s, bad);
+  }
+  assert.throws(() => launch('C:/R&D/claude.cmd', ['-p'], 'win32', 'cmd.exe'), /\.cmd script/);
+  const mcp = { servers: { db: { type: 'stdio', command: 'pg-mcp' } }, allowed: ['mcp__db__query'] };
+  for (const mode of ['work', 'plan', 'gate']) {
+    const args = workerArguments(
+      { role: 'Implement', mode, prompt: 'p & q', system: 's | t', settings: { ...settings, model: 'sonnet', mcp, denyRead: ['C:/repo/.env'] }, resume: 'session-1' },
+      { system: 'C:/Temp/xdev-squad-1/system.md', mcp: 'C:/Temp/xdev-squad-1/mcp.json' });
+    assert.doesNotThrow(() => launch(script, args, 'win32', 'cmd.exe'), `the extension's own ${mode} arguments are safe`);
+  }
+});
+
+test('a terminal step keeps its task off a cmd.exe command line', () => {
+  const step = { system: 'You are Tests', prompt: 'Task for Tests: add "x"\n& echo PWNED %PATH%' };
+  assert.deepEqual(terminalArguments(step, '/tmp/x/system.md', false),
+    { args: ['--append-system-prompt-file', '/tmp/x/system.md', step.prompt], system: step.system });
+  const script = terminalArguments(step, 'C:/Temp/x/system.md', true);
+  assert.deepEqual(script.args.slice(0, 2), ['--append-system-prompt-file', 'C:/Temp/x/system.md']);
+  assert.equal(script.args.length, 3);
+  assert.ok(!script.args[2].includes('PWNED'), 'the task is not an argument');
+  assert.ok(script.system.startsWith(step.system) && script.system.includes(step.prompt), 'the task travels in the file');
+  assert.doesNotThrow(() => launch('C:/npm/claude.cmd', script.args, 'win32', 'cmd.exe'));
 });

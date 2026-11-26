@@ -47,7 +47,15 @@ export interface WorkerSettings {
   denyRead?: readonly string[];
 }
 
-export type ActivityKind = 'read' | 'search' | 'edit' | 'run' | 'tool' | 'denied' | 'failed';
+/**
+ * The worker settings the Squad view displays. Everything else stays in the extension host: MCP server
+ * definitions can hold tokens in `env` or `headers`, and `env`/`denyRead` describe the project's .env files.
+ */
+export function workerSummary(settings: WorkerSettings): Pick<WorkerSettings, 'budgetUsd' | 'allowedCommands'> {
+  return { budgetUsd: settings.budgetUsd, allowedCommands: [...settings.allowedCommands] };
+}
+
+export type ActivityKind ='read' | 'search' | 'edit' | 'run' | 'tool' | 'denied' | 'failed';
 
 export interface WorkerActivity {
   kind: ActivityKind;
@@ -157,25 +165,33 @@ export function runMcp(mode: WorkerMode, settings: WorkerSettings): WorkerMcp | 
   return mode !== 'gate' && settings.mcp && Object.keys(settings.mcp.servers).length ? settings.mcp : undefined;
 }
 
+/** Files a run reads at start: the system text, and the MCP servers when the run has any. */
+export interface WorkerFiles {
+  system: string;
+  mcp?: string;
+}
+
 /**
- * Claude Code arguments for one run. `--strict-mcp-config` always applies, so the user's and the project's own
- * MCP servers are not loaded; only the servers in `mcpConfig` (a file path) start, and only their listed tools are allowed.
+ * Claude Code arguments for one run. The prompt is not among them: it is written to the CLI's standard input, and
+ * the system text is read from `files.system`, so neither is ever parsed by a shell. `--strict-mcp-config` always
+ * applies, so the user's and the project's own MCP servers are not loaded; only the servers in `files.mcp` start,
+ * and only their listed tools are allowed.
  */
-export function workerArguments(request: Omit<WorkerRequest, 'executable' | 'profile' | 'cwd' | 'signal'>, mcpConfig?: string): string[] {
-  const { role, mode, prompt, system, settings, resume, persist } = request;
+export function workerArguments(request: Omit<WorkerRequest, 'executable' | 'profile' | 'cwd' | 'signal'>, files: WorkerFiles): string[] {
+  const { role, mode, settings, resume, persist } = request;
   const { tools, allowed } = workerTools(role, mode, settings.allowedCommands.filter(validCommand), settings.codegraph);
-  const mcp = mcpConfig ? runMcp(mode, settings) : undefined;
+  const mcp = files.mcp ? runMcp(mode, settings) : undefined;
   if (mcp) allowed.push(...mcp.allowed);
   const args = [
-    '-p', prompt,
+    '-p',
     '--output-format', 'stream-json', '--verbose',
     '--json-schema', JSON.stringify(mode === 'plan' ? planSchema : mode === 'gate' ? gateSchema : reportSchema),
-    '--append-system-prompt', system,
+    '--append-system-prompt-file', files.system,
     '--tools', tools.join(','),
     '--permission-mode', 'default',
     '--strict-mcp-config'
   ];
-  if (mcp) args.push('--mcp-config', mcpConfig!);
+  if (mcp) args.push('--mcp-config', files.mcp!);
   if (allowed.length) args.push('--allowedTools', allowed.join(','));
   if (settings.denyRead?.length) args.push('--disallowedTools', envDenyRules(settings.denyRead).join(','));
   if (settings.budgetUsd > 0) args.push('--max-budget-usd', String(settings.budgetUsd));
@@ -183,6 +199,34 @@ export function workerArguments(request: Omit<WorkerRequest, 'executable' | 'pro
   if (resume) args.push('--resume', resume);
   if (mode !== 'work' && !persist) args.push('--no-session-persistence');
   return args;
+}
+
+/**
+ * How to start the CLI. On Windows a `.cmd` install only runs through cmd.exe, which reads the whole command line
+ * again: `&`, `|`, `<`, `>` and `^` start or redirect commands, `%NAME%` expands, and a line break ends the command.
+ * An argument holding any of them is refused rather than handed to cmd.exe.
+ */
+export function launch(
+  executable: string, args: readonly string[], platform: NodeJS.Platform = process.platform, comSpec: string | undefined = process.env.ComSpec
+): { command: string; args: string[] } {
+  if (platform !== 'win32' || !/\.cmd$/i.test(executable)) return { command: executable, args: [...args] };
+  const unsafe = [executable, ...args].find(value => /[%&|<>^\r\n]/.test(value));
+  if (unsafe !== undefined) {
+    throw new Error(`Claude Code is installed as a .cmd script, and Windows cannot pass this value to it safely: ${unsafe.slice(0, 80)}. `
+      + 'Set xdevAi.claudeExecutable to a claude.exe instead.');
+  }
+  return { command: comSpec ?? 'cmd.exe', args: ['/d', '/s', '/c', executable, ...args] };
+}
+
+/**
+ * Arguments for an interactive Claude Code terminal that works on one step. The system text is read from
+ * `systemFile`. Through cmd.exe (`script`) the task cannot be an argument either, so it joins the file and a
+ * fixed sentence starts the session. Returns the arguments and the text to write to `systemFile`.
+ */
+export function terminalArguments(step: { system: string; prompt: string }, systemFile: string, script: boolean): { args: string[]; system: string } {
+  return script
+    ? { args: ['--append-system-prompt-file', systemFile, 'Start the task described in your instructions.'], system: `${step.system}\n\nYour task:\n${step.prompt}` }
+    : { args: ['--append-system-prompt-file', systemFile, step.prompt], system: step.system };
 }
 
 export function workerEnvironment(profile: TerminalProfile, base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
@@ -365,19 +409,22 @@ export function runClaude(request: WorkerRequest, spawn: Spawn = spawnProcess): 
   const { executable, profile, cwd, settings, signal } = request;
   if (profile.provider !== 'claude') return Promise.reject(new Error('Headless workers need a Claude Code terminal account.'));
   signal?.throwIfAborted();
-  // The server definitions may hold tokens, so they go in a private file rather than on the command line.
+  // The system text and the server definitions (which may hold tokens) go in private files, and the prompt goes
+  // to standard input, so none of them is on the command line.
   const mcp = runMcp(request.mode, settings);
-  const mcpFolder = mcp ? mkdtempSync(join(tmpdir(), 'xdev-squad-mcp-')) : undefined;
-  const mcpConfig = mcpFolder ? join(mcpFolder, 'mcp.json') : undefined;
-  if (mcpConfig) writeFileSync(mcpConfig, JSON.stringify({ mcpServers: mcp!.servers }), { mode: 0o600 });
-  const cleanup = () => { if (mcpFolder) rmSync(mcpFolder, { recursive: true, force: true }); };
-  const args = workerArguments(request, mcpConfig);
+  const folder = mkdtempSync(join(tmpdir(), 'xdev-squad-run-'));
+  const cleanup = () => rmSync(folder, { recursive: true, force: true });
   return new Promise<string>((resolve, reject) => {
-    const windowsScript = process.platform === 'win32' && /\.cmd$/i.test(executable);
-    const child = spawn(windowsScript ? process.env.ComSpec ?? 'cmd.exe' : executable,
-      windowsScript ? ['/d', '/s', '/c', executable, ...args] : args, {
-        cwd, env: workerEnvironment(profile, { ...process.env, ...settings.env }), stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true
-      });
+    const files: WorkerFiles = { system: join(folder, 'system.md'), ...(mcp ? { mcp: join(folder, 'mcp.json') } : {}) };
+    writeFileSync(files.system, request.system, { mode: 0o600 });
+    if (files.mcp) writeFileSync(files.mcp, JSON.stringify({ mcpServers: mcp!.servers }), { mode: 0o600 });
+    const start = launch(executable, workerArguments(request, files));
+    const child = spawn(start.command, start.args, {
+      cwd, env: workerEnvironment(profile, { ...process.env, ...settings.env }), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true
+    });
+    // A CLI that exits before reading its input closes the pipe; the close handler reports that failure.
+    child.stdin?.on('error', () => undefined);
+    child.stdin?.end(request.prompt);
     let buffer = '';
     let result = '';
     let stderr = '';

@@ -82,13 +82,13 @@ test('workers start only the granted servers from a private file, and AI gates g
   const settings = { budgetUsd: 1, allowedCommands: ['npm test'], timeoutMs: 60_000, mcp };
   const base = { role: 'Implement', mode: 'work', prompt: 'p', system: 's', settings };
 
-  const args = workerArguments(base, '/tmp/x/mcp.json');
+  const args = workerArguments(base, { system: '/tmp/x/system.md', mcp: '/tmp/x/mcp.json' });
   assert.ok(args.includes('--strict-mcp-config'), 'the user and project servers are never loaded');
   assert.equal(args[args.indexOf('--mcp-config') + 1], '/tmp/x/mcp.json');
   assert.match(args[args.indexOf('--allowedTools') + 1], /,mcp__db__query$/);
-  assert.ok(!workerArguments(base).includes('--mcp-config'), 'no config file, no servers');
-  assert.ok(!workerArguments({ ...base, mode: 'gate' }, '/tmp/x/mcp.json').includes('--mcp-config'));
-  assert.ok(!workerArguments({ ...base, mode: 'gate' }, '/tmp/x/mcp.json').join(' ').includes('mcp__db'));
+  assert.ok(!workerArguments(base, { system: '/tmp/x/system.md' }).includes('--mcp-config'), 'no config file, no servers');
+  assert.ok(!workerArguments({ ...base, mode: 'gate' }, { system: '/tmp/x/system.md', mcp: '/tmp/x/mcp.json' }).includes('--mcp-config'));
+  assert.ok(!workerArguments({ ...base, mode: 'gate' }, { system: '/tmp/x/system.md', mcp: '/tmp/x/mcp.json' }).join(' ').includes('mcp__db'));
 
   const profile = { provider: 'claude', name: 'W', configDir: '/profiles/claude/1' };
   const work = fakeSpawn();
