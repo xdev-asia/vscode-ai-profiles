@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Account tags, notes, and disabled flag.** Right-click a terminal account to edit its tags or note, or to disable it. Tags, the disabled state, and the last-opened time show in the sidebar. A disabled account is left out of the Squad pool and of MCP account picks. The details live in the account's `.xdev-profile.json`, next to its name.
+- **Check Account Health** lists every terminal account by state (sign-in required, nearly out of quota, fine, disabled) after a fresh quota reading.
+- **Quota warning** once per window when an account reaches `xdevAi.quotaAlertPercent` (default 90).
+- **Audit log** (**xDev AI: Show Audit Log**): account deletions, imports, exports, and every MCP change, as JSON Lines in global storage, without keys or sign-in data.
+- **MCP account control** (`xdevAi.mcp.accountControl`: `off`, `read`, `manage`). `read` adds account usage and a best-account pick; `manage` lets clients rename, tag, disable, and open accounts, select or add API profiles, and set the Squad pool. Deleting, signing in, bypass sessions, and adding a key always ask in VS Code.
+- **Stable MCP connection:** the token is kept in SecretStorage, `xdevAi.mcp.port` fixes the port, `xdevAi.mcp.autoStart` starts the server with a trusted workspace, and **xDev AI: Rotate MCP Token** issues a new token. **Copy Client Configuration** can copy a `claude mcp add` command.
+
+### Changed
+
+- `xdev_accounts_list` returns more fields per account (`active` for API profiles; tags, note, disabled, plan, `signedIn`, quota for terminal accounts).
+- `xdevAi.squad.poolAccounts` is documented to take account ids, which survive a rename.
+
 ## 0.16.0 - 2026-11-26
 
 ### Added

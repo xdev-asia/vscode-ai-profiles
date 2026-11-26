@@ -42,9 +42,27 @@ async function readRequest(request: IncomingMessage, response: ServerResponse): 
   }
 }
 
-export async function startMcp(version: string, tools: readonly McpTool[]): Promise<McpConnection> {
+export interface McpOptions {
+  /** A fixed loopback port so client configuration survives restarts. 0 or absent picks a free port. */
+  port?: number;
+  /** A saved 64-character hex token. Absent creates a new token for this session. */
+  token?: string;
+}
+
+export function newMcpToken(): string {
+  return randomBytes(32).toString('hex');
+}
+
+export function validMcpToken(token: unknown): token is string {
+  return typeof token === 'string' && /^[a-f0-9]{64}$/.test(token);
+}
+
+export async function startMcp(version: string, tools: readonly McpTool[], options: McpOptions = {}): Promise<McpConnection> {
+  const port = options.port ?? 0;
+  if (!Number.isSafeInteger(port) || port < 0 || port > 65535) throw new Error('Use an MCP port from 0 to 65535.');
+  if (options.token !== undefined && !validMcpToken(options.token)) throw new Error('The saved MCP token is not valid. Rotate it.');
   const lifecycle = new AbortController();
-  const authorization = `Bearer ${randomBytes(32).toString('hex')}`;
+  const authorization = `Bearer ${options.token ?? newMcpToken()}`;
   const credential = Buffer.from(authorization);
   const definitions = tools.map(({ run, ...definition }) => definition);
   let authority: string;
@@ -107,10 +125,13 @@ export async function startMcp(version: string, tools: readonly McpTool[]): Prom
   }
 
   await new Promise<void>((resolve, reject) => {
-    listener.once('error', reject);
-    listener.listen(0, host, () => {
+    const failed = (error: NodeJS.ErrnoException) => reject(error.code === 'EADDRINUSE'
+      ? new Error(`Port ${port} is in use, perhaps by xDev AI MCP in another window. Stop it there or change xdevAi.mcp.port.`)
+      : error);
+    listener.once('error', failed);
+    listener.listen(port, host, () => {
       authority = `${host}:${(listener.address() as AddressInfo).port}`;
-      listener.off('error', reject);
+      listener.off('error', failed);
       resolve();
     });
   });
