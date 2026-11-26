@@ -41,7 +41,7 @@ Each account has its own configuration directory on the workspace host. The CLIs
 
 ### View account quota
 
-Hover over **xDev AI** in the VS Code or code-server status bar. The hover lists terminal profiles with the plan name, percentage used, and reset time where available. Click **Refresh quota** to update the hover or open a profile's terminal for its full usage view. API key profiles are managed separately and have no subscription quota in the hover.
+The Terminal Accounts sidebar shows each account's 5-hour and weekly usage with its own reset time, and updates as new samples arrive. Hover over **xDev AI** in the VS Code or code-server status bar. The hover lists terminal profiles with the plan name, percentage used, and reset time where available. Click **Refresh quota** to update the hover or open a profile's terminal for its full usage view. API key profiles are managed separately and have no subscription quota in the hover.
 
 - **Codex.** ChatGPT profiles show rate-limit windows from Codex App Server. The extension refreshes these readings periodically in trusted workspaces. [Codex rate limits](https://learn.chatgpt.com/docs/app-server#6-rate-limits-chatgpt)
 - **Claude Code.** Open a new Claude session from xDev AI in a trusted workspace. On supported plans, the hover shows the latest quota sample after Claude replies. This uses the session's status line and requires Node.js on the workspace host's `PATH`. If you already use a custom Claude status line, open `/usage` in the terminal. [Claude Code status line](https://code.claude.com/docs/en/statusline#display-usage-limits)

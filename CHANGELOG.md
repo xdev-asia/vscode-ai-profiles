@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.15.0 - 2026-11-26
+
+### Added
+
+- Each terminal account in the Terminal Accounts sidebar lists its own quota rows: **5h** and **Week** (plus any extra limit), with a usage bar, the percentage used and that account's reset time. A window at 100% shows `Full · available again <time>`; a window that has reset shows 0% until the next request starts it. A Codex Premium seat shows only the weekly row.
+- The rows update on their own as new quota samples arrive, and **Refresh Account Quota** in the view title updates them on demand.
+
 ## 0.14.0 - 2026-11-26
 
 ### Added
