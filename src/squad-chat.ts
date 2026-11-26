@@ -673,7 +673,8 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
   private poolProfiles(directory: { terminals: TerminalProfile[] }, options: SquadOptions): TerminalProfile[] {
     if (options.accountPool === 'role' || !this.host) return [];
     const wanted = new Set(options.poolAccounts.map(name => name.trim()).filter(Boolean));
-    return directory.terminals.filter(profile => !wanted.size || wanted.has(profile.name) || wanted.has(terminalProfileId(profile)));
+    return directory.terminals.filter(profile => !profile.disabled &&
+      (!wanted.size || wanted.has(profile.name) || wanted.has(terminalProfileId(profile))));
   }
 
   /**

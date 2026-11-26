@@ -28,6 +28,9 @@ Open **xDev AI** in the Activity Bar. The sidebar contains **Terminal Accounts**
 4. In **API Profiles**, click **+** to add a profile. Select a profile to open xDev Chat with it, or right-click it to make it active or edit it.
 5. Click the trash icon next to a terminal account or API profile, or use its right-click **Delete** command. Deleting a terminal account closes its matching terminals in the current window and removes the profile directory, including saved sign-in data and CLI history. Deleting an API profile removes its saved key from xDev AI.
 6. To move terminal accounts to another machine, open the **...** menu of the Terminal Accounts view and choose **Export Terminal Accounts…**, or right-click one account. Pick the accounts and a passphrase; the `.xdevai` file holds each account's name and sign-in files (not its CLI history), encrypted with AES-256-GCM. On the other machine, choose **Import Terminal Accounts…** and enter the same passphrase. Signing in to one account on two machines can sign one of them out when its token renews. A Claude login kept in the macOS keychain is not in the file; sign in again after importing.
+7. To organize many accounts, right-click a terminal account and choose **Edit Account Tags** (for example `work, team-a`), **Edit Account Note** (owner, purpose, renewal date), or **Disable or Enable Account**. Tags show next to the account. A disabled account keeps its sign-in but is left out of the Squad pool and of MCP account picks. The sidebar also shows when each account was last opened.
+8. Click **Check Account Health** (pulse icon) on the Terminal Accounts toolbar. xDev AI reads every account's quota again and lists accounts that need sign-in or are nearly out of quota first. Choose one to open or sign in to it. xDev AI also warns once per quota window when an account reaches `xdevAi.quotaAlertPercent` (90 by default, `0` turns it off).
+9. Run **xDev AI: Show Audit Log** to see account deletions, imports, exports, and every change made through MCP. The log is a JSON Lines file in the extension's global storage and never holds keys or sign-in data.
 
 Install each CLI on the workspace host. If xDev AI cannot find one, enter its absolute executable path in User Settings or Remote Settings.
 
@@ -245,9 +248,23 @@ Open **xDev Squad → Memory** or run **xDev AI: Open Squad Memory**. Memory hol
 3. For a terminal client, reopen **Manage MCP** and choose **Copy Client Configuration**, then choose Claude Code, Codex, or Gemini CLI. Merge the snippet into the client's private config on the workspace host. For an xDev terminal profile, use `$CODEX_HOME/config.toml` for Codex or `$GEMINI_CLI_HOME/.gemini/settings.json` for Gemini CLI. In Claude Code, you can use `claude mcp add-json xdev_ai '<server definition>'` with the `mcpServers.xdev_ai` object from the snippet. Restart the client or refresh its MCP connections. [Claude Code configuration](https://code.claude.com/docs/en/mcp) · [Codex configuration](https://developers.openai.com/codex/config-reference/) · [Gemini CLI configuration](https://geminicli.com/docs/tools/mcp-server/)
 4. Ask your agent to “Use xDev AI to show the current SDLC stage and submit a draft for review.” The draft appears in **Workflow**. Approve it there, or ask the agent to request approval in a VS Code dialog.
 
-The MCP server exposes workflow status, start, stage context, draft submission, approval requests, and account aliases. It shares the same workspace state as the Squad panel. A confirmed approval advances the current stage. The server exposes no account credentials or shell execution tools. Stage context includes the project brief, excerpts of approved results, and enabled skills, so only connect clients you trust with that context.
+The MCP server exposes workflow status, start, stage context, draft submission, approval requests, and the account tools described below. It shares the same workspace state as the Squad panel. A confirmed approval advances the current stage. The server exposes no account credentials or shell execution tools. Stage context includes the project brief, excerpts of approved results, and enabled skills, so only connect clients you trust with that context.
 
-MCP listens on a loopback address on the workspace host, including on code-server. The client must run on that same host. Keep the copied configuration private and out of source control. **Stop MCP** ends access and invalidates the token. Reloading the window stops the server. A new start issues a new address and token.
+MCP listens on a loopback address on the workspace host, including on code-server. The client must run on that same host. Keep the copied configuration private and out of source control. **Stop MCP** ends access. The token is saved in VS Code SecretStorage and stays the same until you run **xDev AI: Rotate MCP Token**.
+
+**Keep the connection across restarts.** Set `xdevAi.mcp.port` to a fixed port such as `7788` and turn on `xdevAi.mcp.autoStart` (both under **Manage MCP**, or in user settings). Copy the client configuration once; it keeps working after VS Code restarts. For Claude Code, **Copy Client Configuration → Claude Code (command)** copies a ready `claude mcp add --transport http …` line. Only one window can use a fixed port; other windows report that it is in use.
+
+### Manage accounts through MCP
+
+`xdevAi.mcp.accountControl` (user or remote settings only, so a workspace cannot raise it) decides what MCP clients may do with your accounts. Change it under **Manage MCP → Account Control**; a running server restarts with the new tools.
+
+| Level | Tools |
+| --- | --- |
+| `off` | No account tools. |
+| `read` (default) | `xdev_accounts_list` (tags, note, disabled flag, plan, sign-in state, quota), `xdev_account_usage`, `xdev_accounts_pick` (the enabled, signed-in account with the most quota left, by provider or tag). |
+| `manage` | Also `xdev_account_rename`, `xdev_account_set_tags`, `xdev_account_set_note`, `xdev_account_set_disabled`, `xdev_account_refresh_usage`, `xdev_terminal_open`, `xdev_api_profile_select`, `xdev_squad_set_pool`. These always ask you in a VS Code dialog: `xdev_terminal_sign_in`, `xdev_terminal_open_bypass`, `xdev_account_remove`, `xdev_api_profile_add` (you type the key; the client never sees it), `xdev_api_profile_remove`. |
+
+Try “Use xDev AI to tag my Claude accounts by team and put the ones with the most quota in the Squad pool.” MCP never returns API keys, sign-in files, or account directories. Every change and failed attempt is written to the audit log.
 
 ### Manage a role manually
 

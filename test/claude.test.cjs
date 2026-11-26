@@ -44,6 +44,42 @@ test('Claude profiles remain independent across VS Code windows', async t => {
   await assert.rejects(firstWindow.add('claude', 'bad\nname'), /một dòng/);
 });
 
+test('terminal account tags, note, and disabled flag survive a rename and ignore invalid manifest values', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'xdev-metadata-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const store = new TerminalProfiles(dir);
+  const profile = await store.add('codex', 'Team');
+  assert.equal(typeof profile.createdAt, 'number');
+  const tagged = await store.setMetadata(profile, { tags: [' Work ', 'work', 'team-a'], note: 'Owner: An\nRenews 1 Dec', disabled: true });
+  assert.deepEqual(tagged.tags, ['work', 'team-a']);
+  assert.equal(tagged.disabled, true);
+  await store.rename(profile, 'Team A');
+  await store.touch(profile);
+  const [listed] = await store.list();
+  assert.equal(listed.name, 'Team A');
+  assert.deepEqual(listed.tags, ['work', 'team-a']);
+  assert.equal(listed.note, 'Owner: An\nRenews 1 Dec');
+  assert.equal(listed.disabled, true);
+  assert.equal(typeof listed.lastUsedAt, 'number');
+  const cleared = await store.setMetadata(profile, { tags: [], note: '', disabled: false });
+  assert.equal(cleared.tags, undefined);
+  assert.equal(cleared.note, undefined);
+  assert.equal(cleared.disabled, undefined);
+  assert.equal(cleared.name, 'Team A');
+  await assert.rejects(store.setMetadata(profile, { tags: ['has space'] }), /tags of 1 to 32/);
+  await assert.rejects(store.setMetadata(profile, { tags: Array.from({ length: 11 }, (_, i) => `t${i}`) }), /at most 10/);
+  await assert.rejects(store.setMetadata(profile, { note: 'x'.repeat(501) }), /500/);
+  await assert.rejects(store.setMetadata(profile, { note: 'bad‮char' }), /not allowed/);
+
+  await writeFile(join(profile.configDir, '.xdev-profile.json'), JSON.stringify({
+    name: 'Hand edited', tags: ['ok', 'not ok', 5], disabled: 'yes', lastUsedAt: -1
+  }));
+  const [edited] = await store.list();
+  assert.deepEqual(edited.tags, ['ok']);
+  assert.equal(edited.disabled, undefined);
+  assert.equal(edited.lastUsedAt, undefined);
+});
+
 test('terminal launches clear inherited overrides and reject non-executable paths', async () => {
   const env = terminalProfileEnv({ provider: 'claude', configDir: 'config' });
   for (const key of ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL',

@@ -6,12 +6,26 @@ import { exportAccounts, importAccounts, readAccountFile, validPassphrase } from
 import { canCaptureClaudeQuota, claudeQuotaFile, type AccountUsage, type UsageWindow } from './account-usage';
 import { claudeLoginScript } from './claude-login';
 import {
-  findTerminalExecutable, terminalArguments, terminalProfileEnv, terminalProfileId, terminalProviderIds, terminalProviders,
+  findTerminalExecutable, normalizeNote, normalizeTags, terminalArguments, terminalProfileEnv, terminalProfileId, terminalProviderIds, terminalProviders,
   validTerminalProfileName, type TerminalProfile, type TerminalProfiles, type TerminalProvider
 } from './terminal-profiles';
-import { planLabel, registerUsageStatus, type UsageStatus } from './usage-status';
+import { highestUse, planLabel, registerUsageStatus, type UsageStatus } from './usage-status';
+import type { AuditLog } from './audit';
 
-type Action = 'add' | 'open' | 'bypass' | 'signIn' | 'usage' | 'rename' | 'remove';
+type Action = 'add' | 'open' | 'bypass' | 'signIn' | 'usage' | 'rename' | 'remove' | 'edit';
+
+/** What other parts of xDev AI, such as MCP, can do with terminal accounts. */
+export interface TerminalAccounts {
+  onDidChange: vscode.Event<void>;
+  usage: UsageStatus;
+  /** Notifies views that an account changed outside this module. */
+  changed(): void;
+  /**
+   * Runs an account action for the account id without asking which account. `remove` and `bypass` still ask the
+   * user to confirm. Resolves false when the user cancels; throws when the action fails.
+   */
+  perform(action: 'open' | 'bypass' | 'signIn' | 'remove', id: string): Promise<boolean>;
+}
 type AccountTarget = TerminalAccountItem | string;
 type AccountTreeItem = TerminalAccountItem | UsageWindowItem;
 const accountsViewId = 'xdevAi.claude.accounts';
@@ -23,10 +37,20 @@ class TerminalAccountItem extends vscode.TreeItem {
     const provider = terminalProviders[profile.provider].name;
     const usage = usageStatus?.usage(this.id);
     const plan = usage?.signedOut ? 'Sign-in required' : planLabel(usage?.plan, usage?.seat);
-    this.description = [provider, plan].filter(Boolean).join(' · ');
-    this.tooltip = `${profile.name}\n${provider}\nPlan: ${plan ?? (profile.provider === 'gemini' || usage ? 'Not reported' : 'Checking…')}`;
+    const tags = profile.tags?.map(tag => `#${tag}`).join(' ');
+    this.description = [profile.disabled ? 'Disabled' : '', provider, plan, tags].filter(Boolean).join(' · ');
+    this.tooltip = [
+      profile.name, provider,
+      `Plan: ${plan ?? (profile.provider === 'gemini' || usage ? 'Not reported' : 'Checking…')}`,
+      profile.disabled ? 'Disabled: left out of the Squad pool and MCP account picks' : '',
+      tags ? `Tags: ${tags}` : '',
+      profile.lastUsedAt ? `Last opened ${new Date(profile.lastUsedAt).toLocaleString()}` : '',
+      profile.note ? `\n${profile.note}` : ''
+    ].filter(Boolean).join('\n');
     this.contextValue = 'aiTerminalAccount';
-    this.iconPath = new vscode.ThemeIcon('account');
+    this.iconPath = profile.disabled ? new vscode.ThemeIcon('circle-slash', new vscode.ThemeColor('disabledForeground'))
+      : usage?.signedOut ? new vscode.ThemeIcon('warning', new vscode.ThemeColor('charts.yellow'))
+        : new vscode.ThemeIcon('account');
     this.command = { command: 'xdevAi.openTerminal', title: 'Open AI Terminal', arguments: [this.id] };
     this.windows = usageRows(profile, usage);
     this.collapsibleState = this.windows.length ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.None;
@@ -80,7 +104,7 @@ class UsageWindowItem extends vscode.TreeItem {
   }
 }
 
-export function registerAiTerminals(context: vscode.ExtensionContext, profiles: TerminalProfiles): vscode.Event<void> {
+export function registerAiTerminals(context: vscode.ExtensionContext, profiles: TerminalProfiles, audit?: AuditLog): TerminalAccounts {
   const accountsChanged = new vscode.EventEmitter<void>();
   const treeChanged = new vscode.EventEmitter<void>();
   let usageStatus: UsageStatus | undefined;
@@ -129,7 +153,7 @@ export function registerAiTerminals(context: vscode.ExtensionContext, profiles: 
     const title = {
       add: 'Add AI Account', open: 'Choose an AI terminal account', signIn: 'Choose an account to sign in',
       bypass: 'Choose an account for a bypass session', usage: 'Choose an account to check usage', rename: 'Choose an account to rename',
-      remove: 'Choose a terminal account to delete'
+      remove: 'Choose a terminal account to delete', edit: 'Choose a terminal account to edit'
     }[action];
     const choices: (vscode.QuickPickItem & { profile?: TerminalProfile })[] = accounts.map(profile => ({
       label: profile.name,
@@ -157,7 +181,7 @@ export function registerAiTerminals(context: vscode.ExtensionContext, profiles: 
   }
 
   async function prepareTerminal(
-    action: Exclude<Action, 'rename' | 'remove'>,
+    action: Exclude<Action, 'rename' | 'remove' | 'edit'>,
     target?: AccountTarget,
     token?: vscode.CancellationToken,
     provider?: TerminalProvider
@@ -232,6 +256,7 @@ export function registerAiTerminals(context: vscode.ExtensionContext, profiles: 
       shellPath = '/bin/sh';
       shellArgs = ['-c', claudeLoginScript];
     }
+    void profiles.touch(profile);
     return {
       provider,
       signIn,
@@ -246,36 +271,50 @@ export function registerAiTerminals(context: vscode.ExtensionContext, profiles: 
     };
   }
 
+  /** Runs an action and resolves false when the user cancels. Errors are thrown to the caller. */
+  async function perform(action: Action, provider?: TerminalProvider, target?: AccountTarget, source: 'user' | 'mcp' = 'user'): Promise<boolean> {
+    if (action === 'remove') {
+      const profile = (await selectProfile(action, provider, target))?.profile;
+      if (!profile) return false;
+      const choice = 'Delete Account';
+      if (await vscode.window.showWarningMessage(`Delete “${profile.name}” (${terminalProviders[profile.provider].name})?`, {
+        modal: true,
+        detail: `${source === 'mcp' ? 'An AI client connected through xDev AI MCP asked for this. ' : ''}This closes its terminals and deletes the local profile, sign-in data, and CLI history stored in its directory.`
+      }, choice) !== choice) return false;
+      const profileEnvironment = terminalProfileEnv(profile);
+      for (const terminal of vscode.window.terminals) {
+        const options = terminal.creationOptions;
+        if ('env' in options && options.env && Object.entries(profileEnvironment).some(([key, value]) =>
+          value === profile.configDir && options.env?.[key] === value)) terminal.dispose();
+      }
+      try {
+        await profiles.remove(profile);
+        if (source === 'user') void audit?.record('user', 'terminal_remove', true, { id: terminalProfileId(profile), name: profile.name });
+      } finally {
+        accountsChanged.fire();
+      }
+      return true;
+    }
+    if (action === 'rename') {
+      const profile = (await selectProfile(action, provider, target))?.profile;
+      if (!profile) return false;
+      const name = await askProfileName('Rename AI terminal account', undefined, profile.name);
+      if (name === undefined || name.trim() === profile.name) return false;
+      await profiles.rename(profile, name);
+      accountsChanged.fire();
+      return true;
+    }
+    if (action === 'edit') return false;
+    const terminal = await prepareTerminal(action, target, undefined, provider);
+    if (!terminal) return false;
+    vscode.window.createTerminal(terminal.options).show();
+    return true;
+  }
+
   async function run(action: Action, provider?: TerminalProvider, target?: AccountTarget): Promise<void> {
     try {
-      if (action === 'remove') {
-        const profile = (await selectProfile(action, provider, target))?.profile;
-        if (!profile) return;
-        const choice = 'Delete Account';
-        if (await vscode.window.showWarningMessage(`Delete “${profile.name}” (${terminalProviders[profile.provider].name})?`, {
-          modal: true,
-          detail: 'This closes its terminals and deletes the local profile, sign-in data, and CLI history stored in its directory.'
-        }, choice) !== choice) return;
-        const profileEnvironment = terminalProfileEnv(profile);
-        for (const terminal of vscode.window.terminals) {
-          const options = terminal.creationOptions;
-          if ('env' in options && options.env && Object.entries(profileEnvironment).some(([key, value]) =>
-            value === profile.configDir && options.env?.[key] === value)) terminal.dispose();
-        }
-        try {
-          await profiles.remove(profile);
-        } finally {
-          accountsChanged.fire();
-        }
-        return;
-      }
-      if (action === 'rename') {
-        const profile = (await selectProfile(action, provider, target))?.profile;
-        if (!profile) return;
-        const name = await askProfileName('Rename AI terminal account', undefined, profile.name);
-        if (name === undefined || name.trim() === profile.name) return;
-        await profiles.rename(profile, name);
-        accountsChanged.fire();
+      if (action === 'remove' || action === 'rename' || action === 'edit') {
+        await perform(action, provider, target);
         return;
       }
       const terminal = await prepareTerminal(action, target, undefined, provider);
@@ -337,6 +376,7 @@ export function registerAiTerminals(context: vscode.ExtensionContext, profiles: 
       if (!uri) return;
       const result = await exportAccounts(picked.map(item => item.profile), passphrase);
       await vscode.workspace.fs.writeFile(uri, result.content);
+      void audit?.record('user', 'terminal_export', true, { accounts: picked.map(item => terminalProfileId(item.profile)) });
       const missing = result.withoutSignIn.length ? ` No sign-in file for ${result.withoutSignIn.join(', ')}: sign in again after importing.` : '';
       void vscode.window.showInformationMessage(`Exported ${picked.length} account${picked.length === 1 ? '' : 's'}.${missing}`);
     } catch (error) {
@@ -361,7 +401,8 @@ export function registerAiTerminals(context: vscode.ExtensionContext, profiles: 
         modal: true, detail: `${list}\n\nEach one is added as a new account; a name already in use gets a number.`
       }, add) !== add) return;
       try {
-        await importAccounts(profiles, content, passphrase);
+        const imported = await importAccounts(profiles, content, passphrase);
+        void audit?.record('user', 'terminal_import', true, { accounts: imported.map(terminalProfileId) });
       } finally {
         accountsChanged.fire();
       }
@@ -369,6 +410,68 @@ export function registerAiTerminals(context: vscode.ExtensionContext, profiles: 
     } catch (error) {
       void vscode.window.showErrorMessage(error instanceof Error ? error.message : 'Unable to import the accounts.');
     }
+  }
+
+  async function editMetadata(field: 'tags' | 'note' | 'disabled', target?: AccountTarget): Promise<void> {
+    try {
+      const profile = (await selectProfile('edit', undefined, target))?.profile;
+      if (!profile) return;
+      if (field === 'disabled') {
+        await profiles.setMetadata(profile, { disabled: !profile.disabled });
+      } else if (field === 'tags') {
+        const input = await vscode.window.showInputBox({
+          title: `Tags for “${profile.name}”`, value: profile.tags?.join(', ') ?? '', placeHolder: 'work, team-a, backup',
+          prompt: 'Separate tags with commas. Leave empty to clear them.',
+          validateInput(value) {
+            try { normalizeTags(value.split(',')); return undefined; } catch (error) { return (error as Error).message; }
+          }
+        });
+        if (input === undefined) return;
+        await profiles.setMetadata(profile, { tags: input.split(',') });
+      } else {
+        const input = await vscode.window.showInputBox({
+          title: `Note for “${profile.name}”`, value: profile.note ?? '', prompt: 'Owner, purpose, or renewal date. Leave empty to clear it.',
+          validateInput(value) {
+            try { normalizeNote(value); return undefined; } catch (error) { return (error as Error).message; }
+          }
+        });
+        if (input === undefined) return;
+        await profiles.setMetadata(profile, { note: input });
+      }
+      accountsChanged.fire();
+    } catch (error) {
+      void vscode.window.showErrorMessage(error instanceof Error ? error.message : 'Unable to update the account.');
+    }
+  }
+
+  async function checkHealth(): Promise<void> {
+    await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'Checking AI accounts…' },
+      () => usageStatus!.refresh(true));
+    const accounts = await profiles.list();
+    if (!accounts.length) {
+      void vscode.window.showInformationMessage('Add an AI terminal account first.');
+      return;
+    }
+    const threshold = vscode.workspace.getConfiguration('xdevAi').get<number>('quotaAlertPercent', 90) || 90;
+    const items = accounts.map(profile => {
+      const usage = usageStatus!.usage(terminalProfileId(profile));
+      const used = highestUse(usage);
+      const state = profile.disabled ? 0 : usage?.signedOut ? 3 : used !== undefined && used >= threshold ? 2 : 1;
+      const icon = ['$(circle-slash)', '$(pass)', '$(warning)', '$(error)'][state];
+      const detail = profile.disabled ? 'Disabled' : usage?.signedOut ? 'Sign-in required'
+        : used !== undefined ? `Highest window ${Number(used.toFixed(1))}% used` : 'No quota reading';
+      return {
+        label: `${icon} ${profile.name}`, state, profile,
+        description: [terminalProviders[profile.provider].name, planLabel(usage?.plan, usage?.seat), ...(profile.tags ?? []).map(tag => `#${tag}`)].filter(Boolean).join(' · '),
+        detail
+      };
+    }).sort((a, b) => b.state - a.state || a.profile.name.localeCompare(b.profile.name, 'vi'));
+    const problems = items.filter(item => item.state >= 2).length;
+    const choice = await vscode.window.showQuickPick(items, {
+      title: `AI account health · ${problems ? `${problems} need attention` : 'All good'}`,
+      placeHolder: 'Choose an account to open its terminal, or to sign in when it needs to', matchOnDescription: true, matchOnDetail: true
+    });
+    if (choice) await run(choice.state === 3 ? 'signIn' : 'open', undefined, terminalProfileId(choice.profile));
   }
 
   const command = (id: string, action: Action, provider?: TerminalProvider) =>
@@ -407,6 +510,10 @@ export function registerAiTerminals(context: vscode.ExtensionContext, profiles: 
     command('xdevAi.removeTerminalAccount', 'remove'),
     vscode.commands.registerCommand('xdevAi.exportTerminalAccounts', (target?: AccountTarget) => exportCommand(target)),
     vscode.commands.registerCommand('xdevAi.importTerminalAccounts', () => importCommand()),
+    vscode.commands.registerCommand('xdevAi.editTerminalAccountTags', (target?: AccountTarget) => editMetadata('tags', target)),
+    vscode.commands.registerCommand('xdevAi.editTerminalAccountNote', (target?: AccountTarget) => editMetadata('note', target)),
+    vscode.commands.registerCommand('xdevAi.toggleTerminalAccount', (target?: AccountTarget) => editMetadata('disabled', target)),
+    vscode.commands.registerCommand('xdevAi.checkAccountHealth', () => checkHealth()),
     vscode.window.registerTerminalProfileProvider('xdevAi.terminal', terminalProvider()),
     vscode.window.registerTerminalProfileProvider('xdevAi.terminal.bypass', terminalProvider(undefined, 'bypass')),
     // Keep the commands and profile used by older VS Code settings and workflows.
@@ -420,5 +527,10 @@ export function registerAiTerminals(context: vscode.ExtensionContext, profiles: 
   );
   usageStatus = registerUsageStatus(context, shortcut, profiles, accountsChanged.event);
   context.subscriptions.push(usageStatus.onDidChange(() => treeChanged.fire()));
-  return accountsChanged.event;
+  return {
+    onDidChange: accountsChanged.event,
+    usage: usageStatus,
+    changed: () => accountsChanged.fire(),
+    perform: (action, id) => perform(action, undefined, id, 'mcp')
+  };
 }

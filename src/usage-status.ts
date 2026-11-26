@@ -29,7 +29,17 @@ export function planLabel(plan: string | undefined, seat?: AccountUsage['seat'])
 export interface UsageStatus {
   /** Latest known plan and sign-in state for each terminal account, keyed by profile id. */
   usage(id: string): AccountUsage | undefined;
+  /** Reads quota again and resolves once the readings, including any queued refresh, are done. */
+  refresh(force?: boolean): Promise<void>;
   onDidChange: vscode.Event<void>;
+}
+
+const alertedKey = 'quotaAlerts.v1';
+
+/** Highest used share across an account's current windows, or undefined when no reading is known. */
+export function highestUse(usage: AccountUsage | undefined, now = Date.now()): number | undefined {
+  const windows = usage?.windows.filter(window => !window.resetsAt || window.resetsAt > now) ?? [];
+  return windows.length ? Math.max(...windows.map(window => window.used)) : undefined;
 }
 
 export function registerUsageStatus(
@@ -46,6 +56,31 @@ export function registerUsageStatus(
   let running = false;
   let pending = false;
   let forceNext = false;
+  let waiters: (() => void)[] = [];
+  let names = new Map<string, string>();
+
+  /** Warns once per account window and reset time when its use reaches `xdevAi.quotaAlertPercent`. */
+  function alert(snapshots: Map<string, AccountUsage>): void {
+    const threshold = vscode.workspace.getConfiguration('xdevAi').get<number>('quotaAlertPercent', 90);
+    if (!(threshold > 0)) return;
+    const seen = new Set(context.globalState.get<string[]>(alertedKey, []));
+    const fresh: string[] = [];
+    for (const [id, usage] of snapshots) {
+      if (usage.signedOut) continue;
+      for (const window of usage.windows) {
+        if (window.used < threshold || (window.resetsAt && window.resetsAt <= Date.now())) continue;
+        const key = `${id}|${window.label}|${window.resetsAt ?? ''}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        fresh.push(`${names.get(id) ?? id} · ${window.label} ${Number(window.used.toFixed(1))}%`);
+      }
+    }
+    if (!fresh.length) return;
+    void context.globalState.update(alertedKey, [...seen].slice(-200));
+    void vscode.window.showWarningMessage(`xDev AI quota is almost used: ${fresh.join(', ')}.`, 'Check Accounts').then(choice => {
+      if (choice) void vscode.commands.executeCommand('xdevAi.checkAccountHealth');
+    });
+  }
 
   async function currentUsage(profile: TerminalProfile): Promise<AccountUsage | undefined> {
     const cached = cache.get(terminalProfileId(profile));
@@ -62,6 +97,7 @@ export function registerUsageStatus(
     if (key === latestKey) return;
     latestKey = key;
     changed.fire();
+    alert(snapshots);
   }
 
   function render(accounts: readonly TerminalProfile[], snapshots: Map<string, AccountUsage>, refreshing = false): void {
@@ -97,16 +133,23 @@ export function registerUsageStatus(
     status.tooltip = tip;
   }
 
-  async function refresh(force = false): Promise<void> {
-    if (controller.signal.aborted) return;
+  function refresh(force = false): Promise<void> {
+    if (controller.signal.aborted) return Promise.resolve();
+    const done = new Promise<void>(resolve => waiters.push(resolve));
     if (running) {
       pending = true;
       forceNext ||= force;
-      return;
+      return done;
     }
+    void read(force);
+    return done;
+  }
+
+  async function read(force: boolean): Promise<void> {
     running = true;
     try {
       const accounts = await profiles.list();
+      names = new Map(accounts.map(profile => [terminalProfileId(profile), profile.name]));
       const ids = new Set(accounts.map(terminalProfileId));
       for (const id of cache.keys()) if (!ids.has(id)) cache.delete(id);
       const snapshots = new Map<string, AccountUsage>();
@@ -144,7 +187,11 @@ export function registerUsageStatus(
         const force = forceNext;
         pending = false;
         forceNext = false;
-        void refresh(force);
+        void read(force);
+      } else {
+        const resolved = waiters;
+        waiters = [];
+        for (const resolve of resolved) resolve();
       }
     }
   }
@@ -154,12 +201,12 @@ export function registerUsageStatus(
   }, 15_000);
   context.subscriptions.push(
     changed,
-    { dispose() { clearInterval(timer); controller.abort(); } },
+    { dispose() { clearInterval(timer); controller.abort(); for (const resolve of waiters) resolve(); waiters = []; } },
     vscode.commands.registerCommand(refreshCommand, () => refresh(true)),
     onProfilesChanged(() => void refresh()),
     vscode.window.onDidChangeWindowState(state => { if (state.focused) void refresh(); }),
     vscode.workspace.onDidGrantWorkspaceTrust(() => void refresh())
   );
   void refresh();
-  return { usage: id => latest.get(id), onDidChange: changed.event };
+  return { usage: id => latest.get(id), refresh, onDidChange: changed.event };
 }

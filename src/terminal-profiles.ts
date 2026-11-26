@@ -30,7 +30,18 @@ export function terminalArguments(provider: TerminalProvider, launch: 'open' | '
   return args;
 }
 
-export interface TerminalProfile {
+/** Management details kept in each account's manifest next to its name. */
+export interface TerminalProfileMetadata {
+  /** Short labels for grouping and filtering, for example `work` or `team-a`. */
+  tags?: string[];
+  note?: string;
+  /** A disabled account keeps its sign-in but is left out of the Squad pool and of MCP account picks. */
+  disabled?: boolean;
+  createdAt?: number;
+  lastUsedAt?: number;
+}
+
+export interface TerminalProfile extends TerminalProfileMetadata {
   provider: TerminalProvider;
   name: string;
   configDir: string;
@@ -46,6 +57,49 @@ const profileId = /^[a-f0-9-]{36}$/;
 export function validTerminalProfileName(name: unknown): name is string {
   return typeof name === 'string' && name.trim().length > 0 && name.length <= 80 &&
     !/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(name);
+}
+
+export const maxTags = 10;
+export const maxNoteLength = 500;
+const tagPattern = /^[\p{L}\p{N}._-]{1,32}$/u;
+
+export function validTag(tag: unknown): tag is string {
+  return typeof tag === 'string' && tagPattern.test(tag);
+}
+
+/** Trims, lowercases, and de-duplicates tags. Throws on a tag that is not 1 to 32 letters, digits, `.`, `_`, or `-`. */
+export function normalizeTags(tags: readonly unknown[]): string[] {
+  const result = [...new Set(tags.map(tag => typeof tag === 'string' ? tag.trim().toLowerCase() : tag))].filter(tag => tag !== '');
+  if (!result.every(validTag)) throw new Error('Use tags of 1 to 32 letters, digits, dots, underscores, or hyphens.');
+  if (result.length > maxTags) throw new Error(`Use at most ${maxTags} tags.`);
+  return result;
+}
+
+export function normalizeNote(note: unknown): string {
+  if (typeof note !== 'string') throw new Error('The note must be text.');
+  const text = note.trim();
+  if (text.length > maxNoteLength) throw new Error(`Keep the note to ${maxNoteLength} characters.`);
+  if (/[\p{Cf}\p{Zl}\p{Zp}]|[^\P{Cc}\n\t]/u.test(text)) throw new Error('The note contains characters that are not allowed.');
+  return text;
+}
+
+interface Manifest extends TerminalProfileMetadata {
+  name: string;
+}
+
+function readMetadata(value: Record<string, unknown>): TerminalProfileMetadata {
+  const metadata: TerminalProfileMetadata = {};
+  if (Array.isArray(value.tags)) {
+    const tags = value.tags.filter(validTag).slice(0, maxTags);
+    if (tags.length) metadata.tags = tags;
+  }
+  if (typeof value.note === 'string' && value.note && value.note.length <= maxNoteLength) metadata.note = value.note;
+  if (value.disabled === true) metadata.disabled = true;
+  for (const key of ['createdAt', 'lastUsedAt'] as const) {
+    const time = value[key];
+    if (typeof time === 'number' && Number.isSafeInteger(time) && time > 0) metadata[key] = time;
+  }
+  return metadata;
 }
 
 export class TerminalProfiles {
@@ -67,9 +121,11 @@ export class TerminalProfiles {
       .map(async entry => {
         const configDir = join(root, entry.name);
         try {
-          const metadata = JSON.parse(await readFile(join(configDir, manifestName), 'utf8')) as { name?: unknown } | null;
-          const name = metadata?.name;
-          return validTerminalProfileName(name) ? { provider, name, configDir } : undefined;
+          const parsed = JSON.parse(await readFile(join(configDir, manifestName), 'utf8')) as unknown;
+          if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
+          const value = parsed as Record<string, unknown>;
+          const name = value.name;
+          return validTerminalProfileName(name) ? { ...readMetadata(value), provider, name, configDir } : undefined;
         } catch (error) {
           if (error instanceof SyntaxError || (error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
           throw error;
@@ -87,26 +143,55 @@ export class TerminalProfiles {
     const configDir = join(root, randomUUID());
     await mkdir(root, { recursive: true, mode: 0o700 });
     await mkdir(configDir, { mode: 0o700 });
-    await writeFile(join(configDir, manifestName), JSON.stringify({ name }), { mode: 0o600, flag: 'wx' });
-    return { provider, name, configDir };
+    const createdAt = Date.now();
+    await writeFile(join(configDir, manifestName), JSON.stringify({ name, createdAt }), { mode: 0o600, flag: 'wx' });
+    return { provider, name, configDir, createdAt };
   }
 
-  async rename({ provider, configDir }: TerminalProfile, name: string): Promise<void> {
+  async rename(profile: TerminalProfile, name: string): Promise<void> {
     name = name.trim();
     if (!validTerminalProfileName(name)) {
       throw new Error('Tên hồ sơ cần có từ 1 đến 80 ký tự và chỉ nằm trên một dòng.');
     }
-    if (!(await this.list(provider)).some(profile => profile.configDir === configDir)) {
+    await this.update(profile, current => ({ ...current, name }));
+  }
+
+  /** Changes tags, note, or the disabled flag. `undefined` keeps a field; an empty list or note clears it. */
+  async setMetadata(
+    profile: TerminalProfile, change: { tags?: readonly unknown[]; note?: unknown; disabled?: boolean }
+  ): Promise<TerminalProfile> {
+    const tags = change.tags === undefined ? undefined : normalizeTags(change.tags);
+    const note = change.note === undefined ? undefined : normalizeNote(change.note);
+    return this.update(profile, current => {
+      const next = { ...current };
+      if (tags !== undefined) { if (tags.length) next.tags = tags; else delete next.tags; }
+      if (note !== undefined) { if (note) next.note = note; else delete next.note; }
+      if (change.disabled !== undefined) { if (change.disabled) next.disabled = true; else delete next.disabled; }
+      return next;
+    });
+  }
+
+  /** Records when the account was last opened. Failures are ignored because the time is informational. */
+  async touch(profile: TerminalProfile): Promise<void> {
+    await this.update(profile, current => ({ ...current, lastUsedAt: Date.now() })).catch(() => undefined);
+  }
+
+  private async update({ provider, configDir }: TerminalProfile, change: (current: Manifest) => Manifest): Promise<TerminalProfile> {
+    const current = (await this.list(provider)).find(profile => profile.configDir === configDir);
+    if (!current) {
       throw new Error('Không tìm thấy hồ sơ terminal.');
     }
+    const { provider: _provider, configDir: _configDir, ...manifest } = current;
+    const next = change(manifest);
     const temporaryManifest = join(configDir, `${randomUUID()}.tmp`);
     try {
-      await writeFile(temporaryManifest, JSON.stringify({ name }), { mode: 0o600, flag: 'wx' });
+      await writeFile(temporaryManifest, JSON.stringify(next), { mode: 0o600, flag: 'wx' });
       await rename(temporaryManifest, join(configDir, manifestName));
     } catch (error) {
       await unlink(temporaryManifest).catch(() => undefined);
       throw error;
     }
+    return { ...readMetadata(next as unknown as Record<string, unknown>), name: next.name, provider, configDir };
   }
 
   async remove({ provider, configDir }: TerminalProfile): Promise<void> {

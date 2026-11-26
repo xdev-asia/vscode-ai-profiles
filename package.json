@@ -183,6 +183,42 @@
         "title": "Delete API Profile",
         "category": "xDev AI",
         "icon": "$(trash)"
+      },
+      {
+        "command": "xdevAi.editTerminalAccountTags",
+        "title": "Edit Account Tags",
+        "category": "xDev AI",
+        "icon": "$(tag)"
+      },
+      {
+        "command": "xdevAi.editTerminalAccountNote",
+        "title": "Edit Account Note",
+        "category": "xDev AI",
+        "icon": "$(note)"
+      },
+      {
+        "command": "xdevAi.toggleTerminalAccount",
+        "title": "Disable or Enable Account",
+        "category": "xDev AI",
+        "icon": "$(circle-slash)"
+      },
+      {
+        "command": "xdevAi.checkAccountHealth",
+        "title": "Check Account Health",
+        "category": "xDev AI",
+        "icon": "$(pulse)"
+      },
+      {
+        "command": "xdevAi.showAuditLog",
+        "title": "Show Audit Log",
+        "category": "xDev AI",
+        "icon": "$(output)"
+      },
+      {
+        "command": "xdevAi.rotateMcpToken",
+        "title": "Rotate MCP Token",
+        "category": "xDev AI",
+        "icon": "$(key)"
       }
     ],
     "viewsContainers": {
@@ -288,6 +324,16 @@
           "group": "1_workspace@3"
         },
         {
+          "command": "xdevAi.checkAccountHealth",
+          "when": "view == xdevAi.claude.accounts",
+          "group": "navigation@4"
+        },
+        {
+          "command": "xdevAi.showAuditLog",
+          "when": "view == xdevAi.claude.accounts",
+          "group": "2_accounts@3"
+        },
+        {
           "command": "xdevAi.importTerminalAccounts",
           "when": "view == xdevAi.claude.accounts",
           "group": "2_accounts@1"
@@ -348,6 +394,21 @@
           "command": "xdevAi.openTerminalBypass",
           "when": "view == xdevAi.claude.accounts && viewItem == aiTerminalAccount && isWorkspaceTrusted",
           "group": "1_account@4"
+        },
+        {
+          "command": "xdevAi.editTerminalAccountTags",
+          "when": "view == xdevAi.claude.accounts && viewItem == aiTerminalAccount",
+          "group": "1_account@5"
+        },
+        {
+          "command": "xdevAi.editTerminalAccountNote",
+          "when": "view == xdevAi.claude.accounts && viewItem == aiTerminalAccount",
+          "group": "1_account@6"
+        },
+        {
+          "command": "xdevAi.toggleTerminalAccount",
+          "when": "view == xdevAi.claude.accounts && viewItem == aiTerminalAccount",
+          "group": "1_account@7"
         },
         {
           "command": "xdevAi.exportTerminalAccounts",
@@ -528,6 +589,43 @@
           "scope": "machine",
           "description": "Absolute path to Gemini CLI on the workspace host. Leave empty to detect the installation automatically."
         },
+        "xdevAi.quotaAlertPercent": {
+          "type": "number",
+          "default": 90,
+          "minimum": 0,
+          "maximum": 100,
+          "markdownDescription": "Warn once per quota window and reset time when a terminal account's 5-hour or weekly use reaches this percentage. `0` turns the warning off."
+        },
+        "xdevAi.mcp.accountControl": {
+          "type": "string",
+          "enum": [
+            "off",
+            "read",
+            "manage"
+          ],
+          "default": "read",
+          "scope": "machine",
+          "enumDescriptions": [
+            "MCP clients get no account tools.",
+            "MCP clients may list accounts, their tags, sign-in state, and quota, and ask which account has the most quota left.",
+            "MCP clients may also rename, tag, disable, and open accounts, add or select API profiles, and set the Squad pool. Deleting, signing in, adding an API key, and bypass sessions always ask you in VS Code."
+          ],
+          "markdownDescription": "What AI clients connected to xDev AI MCP may do with your accounts. MCP never returns API keys, sign-in files, or account directories. Changes are listed in **xDev AI: Show Audit Log**. Set only in user or remote settings, not by a workspace."
+        },
+        "xdevAi.mcp.autoStart": {
+          "type": "boolean",
+          "default": false,
+          "scope": "machine",
+          "markdownDescription": "Start xDev AI MCP when a trusted workspace folder opens. With several windows, set this together with `xdevAi.mcp.port` only if one window should serve MCP: the others report that the port is in use."
+        },
+        "xdevAi.mcp.port": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 65535,
+          "scope": "machine",
+          "markdownDescription": "Loopback port for xDev AI MCP. `0` picks a free port each start. A fixed port, such as `7788`, together with the saved token keeps client configuration working after VS Code restarts. Rotate the token with **xDev AI: Rotate MCP Token**."
+        },
         "xdevAi.chatModels.maxInputTokens": {
           "type": "number",
           "default": 128000,
@@ -590,7 +688,7 @@
             "type": "string"
           },
           "default": [],
-          "markdownDescription": "Claude Code accounts in the worker pool, by name as shown under Roles. Empty uses every Claude Code account. Used when `xdevAi.squad.accountPool` is not `role`."
+          "markdownDescription": "Claude Code accounts in the worker pool, by id (`claude:<uuid>`, shown by the xDev AI MCP tool `xdev_accounts_list`) or by name as shown under Roles. Ids keep working after a rename. Empty uses every enabled Claude Code account. Disabled accounts are always left out. Used when `xdevAi.squad.accountPool` is not `role`."
         },
         "xdevAi.squad.resumeFeedback": {
           "type": "boolean",
