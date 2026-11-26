@@ -8,17 +8,21 @@ import {
   findTerminalExecutable, terminalArguments, terminalProfileEnv, terminalProfileId, terminalProviderIds, terminalProviders,
   validTerminalProfileName, type TerminalProfile, type TerminalProfiles, type TerminalProvider
 } from './terminal-profiles';
-import { registerUsageStatus } from './usage-status';
+import { planLabel, registerUsageStatus, type UsageStatus } from './usage-status';
 
 type Action = 'add' | 'open' | 'bypass' | 'signIn' | 'usage' | 'rename' | 'remove';
 type AccountTarget = TerminalAccountItem | string;
 const accountsViewId = 'xdevAi.claude.accounts';
 
 class TerminalAccountItem extends vscode.TreeItem {
-  constructor(readonly profile: TerminalProfile) {
+  constructor(readonly profile: TerminalProfile, usageStatus?: UsageStatus) {
     super(profile.name);
     this.id = terminalProfileId(profile);
-    this.description = terminalProviders[profile.provider].name;
+    const provider = terminalProviders[profile.provider].name;
+    const usage = usageStatus?.usage(this.id);
+    const plan = usage?.signedOut ? 'Sign-in required' : planLabel(usage?.plan, usage?.seat);
+    this.description = [provider, plan].filter(Boolean).join(' · ');
+    this.tooltip = `${profile.name}\n${provider}\nPlan: ${plan ?? (profile.provider === 'gemini' || usage ? 'Not reported' : 'Checking…')}`;
     this.contextValue = 'aiTerminalAccount';
     this.iconPath = new vscode.ThemeIcon('account');
     this.command = { command: 'xdevAi.openTerminal', title: 'Open AI Terminal', arguments: [this.id] };
@@ -27,12 +31,14 @@ class TerminalAccountItem extends vscode.TreeItem {
 
 export function registerAiTerminals(context: vscode.ExtensionContext, profiles: TerminalProfiles): vscode.Event<void> {
   const accountsChanged = new vscode.EventEmitter<void>();
+  const treeChanged = new vscode.EventEmitter<void>();
+  let usageStatus: UsageStatus | undefined;
   const view = vscode.window.createTreeView<TerminalAccountItem>(accountsViewId, {
     treeDataProvider: {
-      onDidChangeTreeData: accountsChanged.event,
+      onDidChangeTreeData: treeChanged.event,
       getTreeItem: item => item,
       async getChildren() {
-        return (await profiles.list()).map(profile => new TerminalAccountItem(profile));
+        return (await profiles.list()).map(profile => new TerminalAccountItem(profile, usageStatus));
       }
     }
   });
@@ -253,6 +259,8 @@ export function registerAiTerminals(context: vscode.ExtensionContext, profiles: 
   });
   context.subscriptions.push(
     accountsChanged,
+    treeChanged,
+    accountsChanged.event(() => treeChanged.fire()),
     view,
     shortcut,
     view.onDidChangeVisibility(event => {
@@ -280,6 +288,7 @@ export function registerAiTerminals(context: vscode.ExtensionContext, profiles: 
     command('xdevAi.claude.renameAccount', 'rename', 'claude'),
     vscode.window.registerTerminalProfileProvider('xdevAi.claude.terminal', terminalProvider('claude'))
   );
-  registerUsageStatus(context, shortcut, profiles, accountsChanged.event);
+  usageStatus = registerUsageStatus(context, shortcut, profiles, accountsChanged.event);
+  context.subscriptions.push(usageStatus.onDidChange(() => treeChanged.fire()));
   return accountsChanged.event;
 }
