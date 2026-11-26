@@ -4,6 +4,7 @@ import { Accounts, accountStorageKey, summarize, type Account, type AccountSumma
 import { TerminalProfiles } from './terminal-profiles';
 import { registerAiTerminals } from './ai-terminal';
 import { ChatPanel } from './panel';
+import { registerChatModels } from './chat-model-provider';
 import { registerSquad } from './squad-view';
 import { registerXdevMcp } from './mcp';
 import { chat, normalizeBaseUrl, providers, type ChatMessage, type ChatOptions, type Provider } from './core';
@@ -167,6 +168,7 @@ export function activate(context: vscode.ExtensionContext): XDevAI {
     panel,
     apiProfilesChanged,
     apiProfiles,
+    registerChatModels(accounts, apiProfilesChanged.event),
     context.secrets.onDidChange(({ key }) => {
       if (key === accountStorageKey) {
         apiProfilesChanged.fire();

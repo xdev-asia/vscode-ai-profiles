@@ -270,6 +270,14 @@ The chat tab authenticates with API keys. Get a key and model ID from your provi
 
 VS Code SecretStorage holds the API profiles. You may need to add your profiles again on a different VS Code installation or server. The chat sends your message and the selected profile's conversation history to its provider. Custom base URLs must use HTTPS or loopback HTTP.
 
+### Use API profiles in the built-in chat
+
+In VS Code 1.104 or later, each API profile is also a language model of the provider **xDev AI** (vendor `xdev-ai`), offered to the editor's own chat and to other extensions (`vscode.lm.selectChatModels({ vendor: 'xdev-ai' })`). The model has the profile's name. Requests run in the extension host; the API key stays in SecretStorage.
+
+- The answer arrives in one piece, not token by token.
+- The models report no tool calling and no image input, so use them for plain chat.
+- `xdevAi.chatModels.maxInputTokens` sets the input token limit reported for every profile.
+
 ## Use the TypeScript library
 
 The chat client also runs independently in Node.js 20.3 or later. Run `npm ci` and `npm pack` from the repository root to create an `xdev-ai` archive. Install that archive in your Node.js project, then set `AI_MODEL` and `OPENAI_API_KEY` for this example.

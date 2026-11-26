@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.16.0 - 2026-11-26
+
+### Added
+
+- API profiles are offered to the editor's built-in chat as language models. The extension contributes the model provider **xDev AI** (`languageModelChatProviders`, vendor `xdev-ai`) with one model per API profile, named after the profile. A request runs in the extension host through the profile's provider; the API key stays in SecretStorage and is not part of the model entry.
+- `xdevAi.chatModels.maxInputTokens` (default `128000`) sets the input token limit reported for these models.
+
+### Changed
+
+- The extension needs VS Code 1.104 or later, the first release with the Language Model Chat Provider API, or a code-server release that bundles Code 1.104 or later.
+
+### Limits
+
+- The answer arrives in one piece when the provider has finished it, not token by token.
+- These models report no tool calling and no image input. Tool calls and images in a conversation are left out of the request; text and tool-result text are sent.
+- Token counts are estimated at four characters per token.
+- Checked in desktop VS Code 1.147.0 through the extension API (`vscode.lm.selectChatModels` and `sendRequest`). The model picker of the chat view and code-server were not checked.
+
 ## 0.15.1 - 2026-11-26
 
 ### Changed
