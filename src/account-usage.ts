@@ -13,6 +13,8 @@ export interface UsageWindow {
 
 export interface AccountUsage {
   plan?: string;
+  /** ChatGPT Business (plan team/business): a Standard seat has a 5-hour window, a Premium seat only a weekly one. */
+  seat?: 'standard' | 'premium';
   windows: UsageWindow[];
   observedAt?: number;
   signedOut?: boolean;
@@ -40,6 +42,17 @@ function durationLabel(minutes: unknown, fallback: string): string {
   return `${minutes}m`;
 }
 
+const businessPlans = new Set(['team', 'business', 'self_serve_business', 'self_serve_business_prolite', 'self_serve_business_usage_based']);
+
+/** The rate-limit answer has no seat field: both seats report plan team, so the seat is read from the main windows' lengths. */
+export function businessSeat(plan: string | undefined, rateLimits: unknown): AccountUsage['seat'] {
+  if (!plan || !businessPlans.has(plan.toLowerCase())) return undefined;
+  const limits = object(rateLimits);
+  const minutes = (['primary', 'secondary'] as const).filter(key => limits[key] != null).map(key => object(limits[key]).windowDurationMins);
+  if (!minutes.length || minutes.some(m => typeof m !== 'number' || !Number.isFinite(m) || m <= 0)) return undefined;
+  return (minutes as number[]).some(m => m <= 360) ? 'standard' : 'premium';
+}
+
 export function codexUsage(accountResponse: unknown, limitsResponse: unknown): AccountUsage {
   const auth = object(accountResponse);
   const account = object(auth.account);
@@ -55,8 +68,11 @@ export function codexUsage(accountResponse: unknown, limitsResponse: unknown): A
       return windowUsage(name ? `${name} · ${duration}` : duration, limit.usedPercent, limit.resetsAt);
     });
   });
+  const plan = label(account.planType) ?? label(object(limits.rateLimits).planType);
+  const main = object(limits.rateLimitsByLimitId).codex ?? limits.rateLimits;
   return {
-    plan: label(account.planType) ?? label(object(limits.rateLimits).planType),
+    plan,
+    seat: businessSeat(plan, main),
     windows,
     signedOut: auth.account === null && auth.requiresOpenaiAuth === true,
     observedAt: windows.length ? Date.now() : undefined
@@ -122,6 +138,22 @@ async function readCodex(executable: string, env: NodeJS.ProcessEnv, cwd: string
 
 export const claudeQuotaFile = '.xdev-quota.json';
 
+/**
+ * A Claude Team seat reports subscriptionType team either way; a Premium seat carries a Max rate-limit tier
+ * (default_claude_max_5x or _20x). Reads only rateLimitTier from the profile's .credentials.json (absent where the
+ * login is in the OS keychain), never a token.
+ */
+export async function claudeTeamSeat(configDir: string, subscription: string | undefined): Promise<AccountUsage['seat']> {
+  if (subscription?.toLowerCase() !== 'team') return undefined;
+  try {
+    const tier = object(object(JSON.parse(await readFile(join(configDir, '.credentials.json'), 'utf8'))).claudeAiOauth).rateLimitTier;
+    if (typeof tier !== 'string' || !tier) return undefined;
+    return /max_(5|20)x/i.test(tier) ? 'premium' : 'standard';
+  } catch {
+    return undefined;
+  }
+}
+
 export async function readClaudeQuota(configDir: string): Promise<AccountUsage> {
   try {
     const snapshot = object(JSON.parse(await readFile(join(configDir, claudeQuotaFile), 'utf8')));
@@ -180,7 +212,8 @@ export async function readAccountUsage(profile: TerminalProfile, preferred: stri
       });
     });
     const auth = object(status);
-    return { plan: label(auth.subscriptionType), windows: [], signedOut: auth.loggedIn === false, unavailable: !status };
+    const plan = label(auth.subscriptionType);
+    return { plan, seat: await claudeTeamSeat(cwd, plan), windows: [], signedOut: auth.loggedIn === false, unavailable: !status };
   } catch {
     return { windows: [], unavailable: true };
   }

@@ -39,6 +39,10 @@ test('worker arguments restrict tools by role and cap spending', () => {
   assert.ok(!args.includes('--no-session-persistence'), 'work sessions stay resumable');
   assert.equal(JSON.parse(value('--json-schema')).required.includes('memory'), true);
 
+  const any = workerTools('Implement', 'work', ['*']);
+  assert.ok(any.allowed.includes('Bash'), '"*" allows every shell command');
+  assert.ok(!workerTools('Review', 'work', ['*']).allowed.includes('Bash'), 'Review stays read-only');
+
   const review = workerTools('Review', 'work', ['npm test']);
   assert.deepEqual(review.tools, ['Read', 'Glob', 'Grep', 'Bash']);
   assert.ok(!review.allowed.some(tool => tool === 'Edit' || tool.includes('npm test')));

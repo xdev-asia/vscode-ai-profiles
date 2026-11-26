@@ -20,13 +20,28 @@ function appendWindow(tip: vscode.MarkdownString, window: UsageWindow): void {
   tip.appendMarkdown(`  \n\`${'█'.repeat(filled)}${'░'.repeat(10 - filled)}\`  \n`);
 }
 
+export function planLabel(plan: string | undefined, seat?: AccountUsage['seat']): string | undefined {
+  if (!plan) return undefined;
+  const name = plan.replace(/[_-]+/g, ' ').replace(/\b\p{L}/gu, letter => letter.toUpperCase());
+  return seat ? `${name} · ${seat === 'premium' ? 'Premium' : 'Standard'} seat` : name;
+}
+
+export interface UsageStatus {
+  /** Latest known plan and sign-in state for each terminal account, keyed by profile id. */
+  usage(id: string): AccountUsage | undefined;
+  onDidChange: vscode.Event<void>;
+}
+
 export function registerUsageStatus(
   context: vscode.ExtensionContext,
   status: vscode.StatusBarItem,
   profiles: TerminalProfiles,
   onProfilesChanged: vscode.Event<void>
-): void {
+): UsageStatus {
   const controller = new AbortController();
+  const changed = new vscode.EventEmitter<void>();
+  let latest = new Map<string, AccountUsage>();
+  let latestKey = '';
   const cache = new Map<string, { checkedAt: number; usage: AccountUsage }>();
   let running = false;
   let pending = false;
@@ -40,7 +55,16 @@ export function registerUsageStatus(
     return { ...cached?.usage, ...sample };
   }
 
+  function publish(snapshots: Map<string, AccountUsage>): void {
+    const key = JSON.stringify([...snapshots].map(([id, usage]) => [id, usage.plan, usage.seat, usage.signedOut]));
+    latest = new Map(snapshots);
+    if (key === latestKey) return;
+    latestKey = key;
+    changed.fire();
+  }
+
   function render(accounts: readonly TerminalProfile[], snapshots: Map<string, AccountUsage>, refreshing = false): void {
+    publish(snapshots);
     const tip = new vscode.MarkdownString('**xDev AI · Account quota**\n\n');
     tip.isTrusted = { enabledCommands: [refreshCommand, usageCommand] };
     if (refreshing) tip.appendMarkdown('_Refreshing…_\n\n');
@@ -52,7 +76,7 @@ export function registerUsageStatus(
       tip.appendMarkdown('**');
       tip.appendText(profile.name);
       tip.appendMarkdown('**  \n');
-      tip.appendText([provider.name, usage?.plan].filter(Boolean).join(' · '));
+      tip.appendText([provider.name, planLabel(usage?.plan, usage?.seat)].filter(Boolean).join(' · '));
       tip.appendMarkdown('  \n');
       const windows = usage?.signedOut ? [] : usage?.windows.filter(window => !window.resetsAt || window.resetsAt > Date.now());
       if (windows?.length) {
@@ -128,6 +152,7 @@ export function registerUsageStatus(
     if (vscode.window.state.focused && !running) void refresh();
   }, 15_000);
   context.subscriptions.push(
+    changed,
     { dispose() { clearInterval(timer); controller.abort(); } },
     vscode.commands.registerCommand(refreshCommand, () => refresh(true)),
     onProfilesChanged(() => void refresh()),
@@ -135,4 +160,5 @@ export function registerUsageStatus(
     vscode.workspace.onDidGrantWorkspaceTrust(() => void refresh())
   );
   void refresh();
+  return { usage: id => latest.get(id), onDidChange: changed.event };
 }

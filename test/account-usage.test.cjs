@@ -92,3 +92,31 @@ test('Claude stores numeric limits only and hides windows past reset', async t =
   await writeFile(join(workspace, '.claude', 'settings.local.json'), JSON.stringify({ statusLine: { type: 'command', command: 'custom' } }));
   assert.equal(await canCaptureClaudeQuota(root, workspace), false);
 });
+
+test('Business seats: a 5-hour window means Standard, weekly only means Premium, unknown lengths say nothing', () => {
+  const { businessSeat, codexUsage } = require('../dist/account-usage.js');
+  const h5 = { usedPercent: 1, windowDurationMins: 300 };
+  const week = { usedPercent: 1, windowDurationMins: 10080 };
+  assert.equal(businessSeat('team', { primary: h5, secondary: week }), 'standard');
+  assert.equal(businessSeat('team', { primary: week }), 'premium');
+  assert.equal(businessSeat('business', { primary: week, secondary: null }), 'premium');
+  assert.equal(businessSeat('team', { primary: { usedPercent: 1 } }), undefined);
+  assert.equal(businessSeat('plus', { primary: h5 }), undefined);
+  const usage = codexUsage({ account: { type: 'chatgpt', planType: 'team' } }, { rateLimitsByLimitId: { codex: { primary: week } } });
+  assert.equal(usage.seat, 'premium');
+});
+
+test('Claude Team seat comes from rateLimitTier only: a Max tier is Premium, another is Standard', async t => {
+  const { claudeTeamSeat } = require('../dist/account-usage.js');
+  const root = await mkdtemp(join(tmpdir(), 'xdev seat '));
+  t.after(() => rm(root, { recursive: true, force: true, maxRetries: 5 }));
+  assert.equal(await claudeTeamSeat(root, 'team'), undefined);
+  const save = tier => writeFile(join(root, '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'x', rateLimitTier: tier, subscriptionType: 'team' } }));
+  await save('default_claude_max_5x');
+  assert.equal(await claudeTeamSeat(root, 'team'), 'premium');
+  await save('default_claude_max_20x');
+  assert.equal(await claudeTeamSeat(root, 'Team'), 'premium');
+  await save('default_claude_ai');
+  assert.equal(await claudeTeamSeat(root, 'team'), 'standard');
+  assert.equal(await claudeTeamSeat(root, 'max'), undefined);
+});

@@ -2,7 +2,7 @@
   "name": "xdev-ai",
   "displayName": "xDev AI",
   "description": "Manage AI accounts, open Claude Code, Codex, and Gemini terminals, and coordinate AI tasks in VS Code.",
-  "version": "0.13.0",
+  "version": "0.13.1",
   "publisher": "xdev-asia",
   "icon": "media/icon.png",
   "private": true,
@@ -249,7 +249,7 @@
           "type": "array",
           "items": { "type": "string" },
           "default": ["npm test", "npm run build", "npm run lint"],
-          "markdownDescription": "Command prefixes that headless Claude Code workers (Implement and Tests) may run without asking, for example `npm test` or `dotnet test`. Other shell commands are denied and reported in the chat. Read-only git commands are always allowed."
+          "markdownDescription": "Command prefixes that headless Claude Code workers (Implement and Tests) may run without asking, for example `npm test` or `dotnet test`. Other shell commands are denied and reported in the chat. Read-only git commands are always allowed. Use `\"*\"` to let them run any shell command without asking."
         },
         "xdevAi.squad.workerBudgetUsd": {
           "type": "number",

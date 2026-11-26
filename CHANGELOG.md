@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.13.1 - 2026-11-26
+
+### Added
+
+- The Terminal Accounts sidebar shows each account's plan next to its provider, for example `Claude Code · Max` or `Codex · Plus`, and `Sign-in required` when the account is signed out. The tooltip shows the plan too.
+- Team and Business accounts show their seat: `Claude Code · Team · Premium seat` or `Codex · Team · Standard seat`. Claude reads it from the login's rate-limit tier, Codex from whether the account has a 5-hour limit.
+
 ## 0.13.0 - 2026-11-23
 
 ### Added

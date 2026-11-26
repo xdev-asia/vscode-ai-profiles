@@ -140,7 +140,8 @@ export function workerTools(
   if (mode === 'plan' || mode === 'ask' || mode === 'gate' || role === 'Lead' || role === 'Review') {
     return { tools: [...readTools, 'Bash'], allowed: reads };
   }
-  const commands = allowedCommands.map(command => `Bash(${command}:*)`);
+  // "*" lets Implement and Tests run any shell command without asking.
+  const commands = allowedCommands.includes('*') ? ['Bash'] : allowedCommands.map(command => `Bash(${command}:*)`);
   return {
     tools: [...readTools, 'Edit', 'Write', 'Bash'],
     allowed: [...reads, 'Edit', 'Write', ...commands]
@@ -148,7 +149,7 @@ export function workerTools(
 }
 
 export function validCommand(command: unknown): command is string {
-  return typeof command === 'string' && /^[\w./@:+=-]+(?: [\w./@:+=-]+)*$/.test(command) && command.length <= 120;
+  return command === '*' || typeof command === 'string' && /^[\w./@:+=-]+(?: [\w./@:+=-]+)*$/.test(command) && command.length <= 120;
 }
 
 /** The MCP servers a run starts: none for AI gates, which judge the work only from what they are given. */
