@@ -2,7 +2,7 @@
   "name": "xdev-ai",
   "displayName": "xDev AI",
   "description": "Manage AI accounts, open Claude Code, Codex, and Gemini terminals, and coordinate AI tasks in VS Code.",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "publisher": "xdev-asia",
   "icon": "media/icon.png",
   "private": true,
@@ -15,7 +15,7 @@
     "url": "https://github.com/xdev-asia/vscode-ai-profiles/issues"
   },
   "engines": {
-    "vscode": "^1.95.0",
+    "vscode": "^1.104.0",
     "node": ">=20.3"
   },
   "categories": [
@@ -412,6 +412,13 @@
         "label": "xDev AI"
       }
     ],
+    "languageModelChatProviders": [
+      {
+        "vendor": "xdev-ai",
+        "displayName": "xDev AI",
+        "managementCommand": "xdevAi.manageAccounts"
+      }
+    ],
     "languageModelTools": [
       {
         "name": "xdev_squad_ask",
@@ -520,6 +527,12 @@
           "default": "",
           "scope": "machine",
           "description": "Absolute path to Gemini CLI on the workspace host. Leave empty to detect the installation automatically."
+        },
+        "xdevAi.chatModels.maxInputTokens": {
+          "type": "number",
+          "default": 128000,
+          "minimum": 1000,
+          "markdownDescription": "Input token limit that xDev AI reports to the built-in chat for every API profile it lists as a model. Lower it when a profile's model has a smaller context window."
         },
         "xdevAi.squad.approver": {
           "type": "string",
@@ -838,7 +851,7 @@
   "devDependencies": {
     "@modelcontextprotocol/sdk": "1.32.2",
     "@types/node": "^20.19.43",
-    "@types/vscode": "1.95.0",
+    "@types/vscode": "1.104.0",
     "@vscode/vsce": "4.1.1",
     "esbuild": "0.28.2",
     "jsdom": "26.1.0",
