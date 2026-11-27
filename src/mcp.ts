@@ -1,11 +1,20 @@
+import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { writeFile } from 'node:fs/promises';
+import { createServer as createProbe, type AddressInfo } from 'node:net';
+import { join } from 'node:path';
 import * as vscode from 'vscode';
 import { type Accounts } from './accounts';
 import type { AccountUsage } from './account-usage';
 import type { AuditLog } from './audit';
 import type { TerminalAccounts } from './ai-terminal';
 import { providers, type Provider } from './core';
+import {
+  hasXdevServer, mcpSettingKeys, mcpTokenVariable, mcpUrlVariable, notifyMcpChanged, setMcpControl, withXdevServer,
+  type McpControl, type McpPanelState, type McpSettingKey
+} from './mcp-control';
 import type { McpConnection, McpTool } from './mcp-transport';
-import { poolModes, type PoolMode, type SquadChat } from './squad-chat';
+import { approvers, chatPromptLimit, poolModes, type PoolMode, type RunRecord, type RunStep, type SquadChat, type SquadChatEntry } from './squad-chat';
 import {
   maxNoteLength, maxTags, terminalProfileId, terminalProviderIds, type TerminalProfile, type TerminalProfiles, type TerminalProvider
 } from './terminal-profiles';
@@ -35,6 +44,18 @@ interface NativeMcpApi {
 export const accountControlLevels = ['off', 'read', 'manage'] as const;
 export type AccountControlLevel = typeof accountControlLevels[number];
 
+/** How much an MCP client may do with Squad: nothing, watch runs, or plan work and run worker steps as the lead. */
+export const squadControlLevels = ['off', 'read', 'run'] as const;
+export type SquadControlLevel = typeof squadControlLevels[number];
+
+/** Where a change that needs the user's yes is confirmed: a VS Code dialog, or the MCP client when the user is away from VS Code. */
+export const confirmModes = ['vscode', 'client'] as const;
+export type ConfirmMode = typeof confirmModes[number];
+
+const confirmTtlMs = 10 * 60_000;
+const maxPendingConfirmations = 20;
+const maxWaitSeconds = 600;
+
 export interface ApiProfileRequest {
   provider: Provider;
   name: string;
@@ -47,15 +68,34 @@ export interface AccountHost {
   level(): AccountControlLevel;
   usage?(id: string): AccountUsage | undefined;
   refreshUsage?(): Promise<void>;
-  /** Opens, signs in, opens with bypass, or deletes a terminal account. Resolves false when the user cancels. */
-  perform?(action: 'open' | 'bypass' | 'signIn' | 'remove', id: string): Promise<boolean>;
+  /** What MCP clients may do with Squad. Absent means off. */
+  squadLevel?(): SquadControlLevel;
+  /** Where confirmations are answered. Absent means a VS Code dialog. */
+  confirmIn?(): ConfirmMode;
+  /** Tells a user at VS Code about a confirmation waiting in the client. Resolves true when they approve it there. */
+  notify?(title: string, detail: string, label: string): Promise<boolean>;
+  /**
+   * Opens, signs in, opens with bypass, or deletes a terminal account. Resolves false when the user cancels.
+   * `confirmed` skips the VS Code dialog because the user already confirmed in the client.
+   */
+  perform?(action: 'open' | 'bypass' | 'signIn' | 'remove', id: string, confirmed?: boolean): Promise<boolean>;
   changed?(): void;
   /** Shows a modal VS Code dialog and resolves true only when the user picks `label`. */
   confirm(title: string, detail: string, label: string, signal: AbortSignal): Promise<boolean>;
   audit?(action: string, ok: boolean, details: Record<string, unknown>, error?: unknown): void;
   addApiProfile?(request: ApiProfileRequest): Promise<boolean>;
-  removeApiProfile?(id: string): Promise<boolean>;
+  removeApiProfile?(id: string, confirmed?: boolean): Promise<boolean>;
   setPool?(mode: PoolMode, accounts: string[]): Promise<void>;
+}
+
+interface PendingConfirmation {
+  expires: number;
+  run(signal: AbortSignal): Promise<unknown>;
+  result?: Promise<unknown>;
+}
+
+function clip(text: string, limit: number): string {
+  return text.length <= limit ? text : `${text.slice(0, limit - 1)}…`;
 }
 
 const stageArgs = {
@@ -158,6 +198,68 @@ export function xdevMcpTools(squad: SquadChat, accounts: Accounts, profiles: Ter
   const confirm = (title: string, detail: string, label: string, signal: AbortSignal) =>
     host ? host.confirm(title, `An AI client connected through xDev AI MCP asked for this.\n\n${detail}`, label, signal) : Promise.resolve(false);
 
+  /**
+   * With confirmations in the client, a change that needs the user's yes is not made by the tool that asks for
+   * it. The tool returns a confirmation id; the change is made when the client calls xdev_confirm, which the
+   * client's own permission prompt shows to the user. A user at VS Code can approve the same request there.
+   */
+  const pending = new Map<string, PendingConfirmation>();
+  const viaClient = () => host?.confirmIn?.() === 'client';
+  const defer = (
+    name: string, args: Record<string, unknown>, title: string, detail: string, label: string, action: (signal: AbortSignal) => Promise<unknown>
+  ) => {
+    const now = Date.now();
+    for (const [id, entry] of pending) if (entry.expires < now) pending.delete(id);
+    if (pending.size >= maxPendingConfirmations) throw new Error('Too many confirmations are waiting. Ask the user about the earlier ones first.');
+    const confirmId = randomUUID().slice(0, 8);
+    const entry: PendingConfirmation = {
+      expires: now + confirmTtlMs,
+      async run(signal) {
+        try {
+          const result = await action(signal);
+          host?.audit?.(`${name}_confirmed`, true, args);
+          return result;
+        } catch (error) {
+          host?.audit?.(`${name}_confirmed`, false, args, error);
+          throw error;
+        }
+      }
+    };
+    pending.set(confirmId, entry);
+    void host?.notify?.(title, detail, label).then(approved => {
+      if (!approved || pending.get(confirmId) !== entry || entry.expires < Date.now()) return;
+      entry.result ??= entry.run(new AbortController().signal);
+      entry.result.catch(() => undefined);
+    }).catch(() => undefined);
+    return {
+      done: false, needsConfirmation: true, confirmId, title, detail: clip(detail, 4_000), expiresInSeconds: confirmTtlMs / 1_000,
+      instructions: 'Nothing has changed yet. Show the title and detail to the user and ask them. Call xdev_confirm with this confirmId and approve true only after the user says yes to it in this conversation, and with approve false when they say no.'
+    };
+  };
+  const confirmTool = tool('xdev_confirm', 'Answer a confirmation that another xDev AI tool returned (needsConfirmation). Use approve true only after the user said yes to that exact request in this conversation; never decide for the user.', 'destructive', {
+    confirmId: { type: 'string', maxLength: 16 },
+    approve: { type: 'boolean' }
+  }, async ({ confirmId, approve }, signal) => {
+    const id = String(confirmId);
+    const entry = pending.get(id);
+    if (!entry || (!entry.result && entry.expires < Date.now())) {
+      pending.delete(id);
+      throw new Error('This confirmation is unknown or has expired. Call the original tool again if the user still wants it.');
+    }
+    if (approve !== true && !entry.result) {
+      pending.delete(id);
+      host?.audit?.('confirm_declined', true, { confirmId: id });
+      return { done: false, reason: 'Declined. Do not retry unless the user asks again.' };
+    }
+    // Approved here, or already approved by the user at VS Code: both get the one result.
+    entry.result ??= entry.run(signal);
+    try {
+      return await entry.result;
+    } finally {
+      pending.delete(id);
+    }
+  });
+
   const workflowTools = [
     workflowTool('workflow_status', 'Get the ID and current step of the xDev SDLC workflow for this workspace.', true, {}, status),
     workflowTool('workflow_start', 'Start an xDev workflow with a project brief at the user’s request. An existing workflow is preserved.', false, {
@@ -184,6 +286,13 @@ export function xdevMcpTools(squad: SquadChat, accounts: Accounts, profiles: Ter
         }
         if (busy || waitingForApproval) throw new Error('An xDev operation is already in progress.');
         const approve = 'Approve Stage';
+        if (viaClient()) {
+          return defer('workflow_request_approval', { workflowId, step }, `Approve the xDev ${stage.name} stage?`, draft, approve, async confirmed => {
+            squad.customizations.requireTool('xdev_sdlc');
+            await squad.approveStage(workflowId as string, step as number, draft, { draft, signal: confirmed });
+            return { approved: true, ...status() };
+          });
+        }
         waitingForApproval = true;
         try {
           const choice = await vscode.window.showWarningMessage(`Approve the xDev ${stage.name} stage?`, {
@@ -199,7 +308,6 @@ export function xdevMcpTools(squad: SquadChat, accounts: Accounts, profiles: Ter
         }
       })
   ];
-  if (level() === 'off') return workflowTools;
 
   const readTools = [
     tool('xdev_accounts_list', 'List xDev API profiles and terminal accounts (Claude Code, Codex, Gemini CLI) with tags, note, disabled flag, plan, sign-in state, and quota use. Never returns keys or sign-in data.', true, {}, list),
@@ -225,7 +333,6 @@ export function xdevMcpTools(squad: SquadChat, accounts: Accounts, profiles: Ter
       };
     }, [])
   ];
-  if (level() !== 'manage') return [...workflowTools, ...readTools];
 
   const changedProfile = async (profile: Promise<TerminalProfile>) => {
     const next = await profile;
@@ -261,18 +368,34 @@ export function xdevMcpTools(squad: SquadChat, accounts: Accounts, profiles: Ter
     }),
     manageTool('terminal_sign_in', 'Open a sign-in terminal for this account after the user confirms in VS Code. The user completes sign-in in that terminal.', false, idArg, async ({ id }, signal) => {
       const profile = await findTerminal(id);
-      if (!await confirm(`Sign in to “${profile.name}”?`, 'This opens a terminal where you complete sign-in with the provider.', 'Open Sign-In', signal)) return declined;
-      return { done: await needs(host?.perform)('signIn', String(id)) };
+      const title = `Sign in to “${profile.name}”?`;
+      const detail = 'This opens a terminal on the workspace host where you complete sign-in with the provider.';
+      const perform = needs(host?.perform);
+      if (viaClient()) return defer('terminal_sign_in', { id }, title, detail, 'Open Sign-In', async () => ({ done: await perform('signIn', String(id)) }));
+      if (!await confirm(title, detail, 'Open Sign-In', signal)) return declined;
+      return { done: await perform('signIn', String(id)) };
     }),
-    manageTool('terminal_open_bypass', 'Open a terminal for this account with the CLI’s permission prompts skipped. VS Code asks the user to confirm. Use only when the user asks.', true, idArg, async ({ id }) => {
+    manageTool('terminal_open_bypass', 'Open a terminal for this account with the CLI’s permission prompts skipped. The user is asked to confirm. Use only when the user asks.', true, idArg, async ({ id }) => {
       const profile = await findTerminal(id);
       if (profile.disabled) throw new Error('This account is disabled. Enable it first if the user wants it.');
-      const done = await needs(host?.perform)('bypass', String(id));
+      const perform = needs(host?.perform);
+      if (viaClient()) {
+        return defer('terminal_open_bypass', { id }, `Open “${profile.name}” with bypass permissions?`,
+          'The session skips the CLI’s approval prompts on the workspace host.', 'Open with Bypass',
+          async () => ({ done: await perform('bypass', String(id), true) }));
+      }
+      const done = await perform('bypass', String(id));
       return done ? { done } : declined;
     }),
-    manageTool('account_remove', 'Delete a terminal account with its sign-in data and CLI history. VS Code asks the user to confirm. Use only when the user asks.', true, idArg, async ({ id }) => {
-      await findTerminal(id);
-      const done = await needs(host?.perform)('remove', String(id));
+    manageTool('account_remove', 'Delete a terminal account with its sign-in data and CLI history. The user is asked to confirm. Use only when the user asks.', true, idArg, async ({ id }) => {
+      const profile = await findTerminal(id);
+      const perform = needs(host?.perform);
+      if (viaClient()) {
+        return defer('account_remove', { id }, `Delete “${profile.name}”?`,
+          'This closes its terminals and deletes the local profile, sign-in data, and CLI history stored in its directory. It cannot be undone.', 'Delete Account',
+          async () => ({ done: await perform('remove', String(id), true) }));
+      }
+      const done = await perform('remove', String(id));
       return done ? { done } : declined;
     }),
     manageTool('api_profile_select', 'Make an API profile the active one for xDev Chat.', false, idArg, async ({ id }) => {
@@ -287,12 +410,21 @@ export function xdevMcpTools(squad: SquadChat, accounts: Accounts, profiles: Ter
     }, async ({ provider, name, model, baseUrl }, signal) => {
       const request = { provider: provider as Provider, name: String(name).trim(), model: String(model).trim(), baseUrl: baseUrl as string | undefined };
       if (!Object.hasOwn(providers, request.provider) || !request.name || !request.model) throw new Error('Give a provider, name, and model.');
+      // The key is typed in VS Code so that no client sees it; that cannot be done from the client.
+      if (viaClient()) throw new Error('Adding an API profile needs the user at VS Code to type the key. Ask them to add it under API Profiles.');
       if (!await confirm(`Add the API profile “${request.name}”?`, `${providers[request.provider].name} · ${request.model}${request.baseUrl ? ` · ${request.baseUrl}` : ''}\nYou type the API key next.`, 'Enter API Key', signal)) return declined;
       const done = await needs(host?.addApiProfile)(request);
       return done ? { done } : declined;
     }, ['provider', 'name', 'model']),
-    manageTool('api_profile_remove', 'Delete an API profile and its saved key. VS Code asks the user to confirm. Use only when the user asks.', true, idArg, async ({ id }) => {
-      const done = await needs(host?.removeApiProfile)(String(id));
+    manageTool('api_profile_remove', 'Delete an API profile and its saved key. The user is asked to confirm. Use only when the user asks.', true, idArg, async ({ id }) => {
+      const remove = needs(host?.removeApiProfile);
+      if (viaClient()) {
+        const profile = (await accounts.read()).accounts.find(candidate => candidate.id === id);
+        if (!profile) throw new Error('Unknown API profile id. Call xdev_accounts_list.');
+        return defer('api_profile_remove', { id }, `Delete the API profile “${profile.name}”?`,
+          'This removes the API profile and its saved key from xDev AI.', 'Delete Profile', async () => ({ done: await remove(String(id), true) }));
+      }
+      const done = await remove(String(id));
       return done ? { done } : declined;
     }),
     manageTool('squad_set_pool', 'Set how Squad workers choose Claude Code accounts: role (each role’s own account), roundRobin, or quota (most quota left), and which account ids are in the pool. An empty list uses every enabled Claude Code account.', false, {
@@ -308,7 +440,190 @@ export function xdevMcpTools(squad: SquadChat, accounts: Accounts, profiles: Ter
       return { mode, accounts: chosen };
     })
   ];
-  return [...workflowTools, ...readTools, ...manageTools];
+
+  // Squad control: the connected client acts as the lead. It plans, hands tasks to accounts, and reads results.
+  const squadLevel = () => host?.squadLevel?.() ?? 'off';
+  const stepView = (step: RunStep, index: number, brief: boolean) => ({
+    index, role: step.role, account: step.profile, kind: step.kind ?? 'api', repo: step.repo, status: step.status,
+    ...(brief ? {} : {
+      brief: clip(step.brief, 1_000), summary: step.summary === undefined ? undefined : clip(step.summary, 4_000),
+      files: step.files?.slice(0, 80), review: step.gate && { verdict: step.gate.verdict, reason: step.gate.reason, by: step.gate.by },
+      costUsd: step.costUsd, seconds: step.ms === undefined ? undefined : Math.round(step.ms / 1_000), attempts: step.attempts
+    })
+  });
+  const runView = (record: RunRecord, brief = false) => ({
+    id: record.id, request: clip(record.prompt, brief ? 200 : 500), status: record.status, approver: record.approver,
+    startedAt: iso(record.time), costUsd: Number(record.costUsd.toFixed(4)),
+    currentStep: record.status === 'active' ? squad.currentStep(record) : null,
+    steps: record.steps.map((step, index) => stepView(step, index, brief)),
+    ...(brief ? {} : {
+      repositories: record.trees?.map(tree => ({
+        repo: tree.target, branch: tree.branch, worktree: tree.path, commit: tree.commit, stat: tree.stat, filesChanged: tree.files,
+        pushed: Boolean(tree.pushed), merged: Boolean(tree.merged)
+      })),
+      // The Claude Code session of each headless step, which the user can continue from the run in VS Code.
+      sessions: record.sessions.map(({ role, profile, sessionId, repo }) => ({ role, account: profile, sessionId, repo }))
+    })
+  });
+  const planView = () => {
+    const plan = squad.pendingPlan();
+    return plan ? { id: plan.id, tasks: plan.jobs.map(({ role, brief, profile, kind, repo }) => ({ role, account: profile, kind, repo, brief })) } : null;
+  };
+  const entryView = ({ author, profile, text }: SquadChatEntry) => ({ author, account: profile, text: clip(text, 2_000) });
+  const activity = () => {
+    const { busy, status: text, live } = squad.snapshot();
+    return {
+      busy, status: text || undefined,
+      working: live && {
+        role: live.role, account: live.profile, seconds: Math.round((Date.now() - live.since) / 1_000),
+        reads: live.reads, edits: live.edits, commands: live.commands, problems: live.problems,
+        recent: live.items.slice(-5).map(item => `${item.kind}: ${clip(item.text, 160)}`)
+      }
+    };
+  };
+  const findRun = (id: unknown): RunRecord => {
+    const record = squad.run(id);
+    if (!record) throw new Error('Unknown run id. Call xdev_squad_status.');
+    return record;
+  };
+  /** Waits until Squad is idle, at most `seconds`. A client that disconnects stops waiting, not the work. */
+  const settle = async (seconds: unknown, signal: AbortSignal, fallback: number): Promise<boolean> => {
+    const wanted = typeof seconds === 'number' && Number.isFinite(seconds) ? seconds : fallback;
+    const end = Date.now() + Math.max(0, Math.min(maxWaitSeconds, wanted)) * 1_000;
+    while (squad.snapshot().busy && Date.now() < end) {
+      signal.throwIfAborted();
+      await new Promise(resolve => setTimeout(resolve, 200));
+    }
+    return !squad.snapshot().busy;
+  };
+  const outcome = (finished: boolean, runId?: unknown) => {
+    const record = runId === undefined ? undefined : squad.run(runId);
+    return {
+      finished, ...activity(), ...(record ? { run: runView(record) } : {}),
+      ...(finished ? {} : { note: 'Still working. Call xdev_squad_wait, then xdev_squad_run for the result.' })
+    };
+  };
+  const waitArg = { waitSeconds: { type: 'integer', minimum: 0, maximum: maxWaitSeconds, description: 'How long to wait for the result before returning. The work continues after that.' } };
+  const runArg = { runId: { type: 'string', maxLength: 64, description: 'Run id from xdev_squad_status or xdev_squad_approve_plan.' } };
+  const squadReadTool = (name: string, description: string, properties: Properties, run: McpTool['run'], required?: string[]): McpTool =>
+    tool(`xdev_${name}`, description, 'read', properties, (args, signal) => {
+      if (squadLevel() === 'off') throw new Error('Squad control is turned off. The user can set xdevAi.mcp.squadControl.');
+      return run(args, signal);
+    }, required);
+  /** A tool that plans or runs Squad work: needs the run level and is written to the audit log. */
+  const squadRunTool = (name: string, description: string, properties: Properties, run: McpTool['run'], required?: string[]): McpTool =>
+    tool(`xdev_${name}`, description, 'write', properties, async (args, signal) => {
+      if (squadLevel() !== 'run') throw new Error('Running Squad work is turned off. The user can set xdevAi.mcp.squadControl to run.');
+      try {
+        const result = await run(args, signal);
+        host?.audit?.(name, true, args);
+        return result;
+      } catch (error) {
+        host?.audit?.(name, false, args, error);
+        throw error;
+      }
+    }, required);
+
+  const squadReadTools = [
+    squadReadTool('squad_status', 'See xDev Squad: whether a worker is running and what it is doing, the pending plan, the account each role uses, the account pool mode, and every kept run with the status of its steps (active, done, or stopped).', {}, async () => {
+      const snapshot = squad.snapshot();
+      return {
+        ...activity(), pendingPlan: planView(), roles: await squad.roster(), accountPool: snapshot.accountPool, defaultApprover: snapshot.approver,
+        runs: snapshot.runs.map(record => runView(record, true))
+      };
+    }),
+    squadReadTool('squad_run', 'Read one Squad run: each step’s brief, account, status, result summary, changed files and AI review, the branch and worktree of each repository, the Claude Code session id of each headless step, and the latest messages. Set changes to true for the file diffs.', {
+      ...runArg, changes: { type: 'boolean', description: 'Also return the changed files with their diffs.' }
+    }, async ({ runId, changes }) => {
+      const record = findRun(runId);
+      const messages = squad.snapshot().entries.filter(entry => entry.run === record.id).slice(-8).map(entryView);
+      if (changes !== true) return { ...runView(record), messages };
+      let budget = 40_000;
+      const files = (await squad.changes(record.id)).slice(0, 100).map(({ repo, path, status: state, added, removed, binary, patch }) => {
+        const shown = binary ? '' : patch.slice(0, budget);
+        budget -= shown.length;
+        return { repo, path, status: state, added, removed, patch: shown, ...(shown.length < patch.length ? { truncated: true } : {}) };
+      });
+      return { ...runView(record), messages, files };
+    }, ['runId']),
+    squadReadTool('squad_wait', 'Wait until the running Squad step or request ends, then return what Squad is doing. Use after a tool returned finished false.', {
+      seconds: { type: 'integer', minimum: 1, maximum: maxWaitSeconds }, runId: runArg.runId
+    }, async ({ seconds, runId }, signal) => outcome(await settle(seconds, signal, 300), runId), [])
+  ];
+
+  const taskSchema = {
+    type: 'object', additionalProperties: false, required: ['role', 'brief'],
+    properties: {
+      role: { type: 'string', enum: ['Implement', 'Review', 'Tests'], description: 'Implement edits files, Review reads the diff, Tests adds and runs tests.' },
+      brief: { type: 'string', maxLength: 4_000, description: 'What to do, written so the worker can act without this conversation: files, symbols, and the expected result.' },
+      account: { type: 'string', maxLength: 200, description: 'Claude Code account id from xdev_accounts_list that does this task. Without it the task uses the account pool or the role’s account.' },
+      repo: { type: 'string', maxLength: 300, description: 'The repository the task works in, when the workspace holds several.' }
+    }
+  };
+  const squadRunTools = [
+    squadRunTool('squad_submit_plan', 'Hand out work as the lead: save a plan of one to eight tasks for Squad workers. Each task names a worker role, a brief, and optionally the Claude Code account that does it. Tasks run in the order given, one at a time, in a git worktree on a new local branch. Nothing runs until xdev_squad_approve_plan.', {
+      request: { type: 'string', maxLength: chatPromptLimit, description: 'The user’s request the plan answers.' },
+      summary: { type: 'string', maxLength: 4_000, description: 'A short summary of the plan, shown in the Squad chat.' },
+      tasks: { type: 'array', minItems: 1, maxItems: 8, items: taskSchema }
+    }, async args => ({ plan: await squad.submitPlan(args, 'Lead through MCP').then(planView), note: 'Nothing runs yet. Call xdev_squad_approve_plan with the plan id.' })),
+    squadRunTool('squad_ask', 'Send a message to Squad’s own Lead, or to one role with @Implement, @Review or @Tests. Lead may answer with a plan, which then waits as the pending plan.', {
+      message: { type: 'string', maxLength: chatPromptLimit }, ...waitArg
+    }, async ({ message, waitSeconds }, signal) => {
+      const started = await squad.send(message);
+      const finished = await settle(waitSeconds, signal, 120);
+      return { ...outcome(finished), replies: finished ? (await started.finished).map(entryView) : undefined, pendingPlan: planView() };
+    }, ['message']),
+    squadRunTool('squad_approve_plan', 'Approve the pending plan. This prepares a run and, for Claude Code tasks, a git worktree per repository; no step runs yet. The approver decides what follows each step: human waits for you after every step, ai lets a passing AI review start the next one.', {
+      planId: { type: 'string', maxLength: 64 },
+      approver: { type: 'string', enum: [...approvers] }
+    }, async ({ planId, approver }) => {
+      const known = new Set(squad.snapshot().runs.map(record => record.id));
+      const started = await squad.approve(planId, undefined, approver ?? squad.snapshot().approver);
+      const entries = await started.finished;
+      const record = squad.snapshot().runs.find(candidate => !known.has(candidate.id));
+      if (!record) throw new Error(entries.at(-1)?.text ?? 'The run could not be prepared.');
+      return { run: runView(record), note: 'No step has run. Call xdev_squad_run_step with the run id.' };
+    }, ['planId']),
+    squadRunTool('squad_discard_plan', 'Discard the pending plan without running it.', { planId: { type: 'string', maxLength: 64 } }, async ({ planId }) => {
+      await squad.discard(planId);
+      return { done: true };
+    }),
+    squadRunTool('squad_run_step', 'Run the current step of a run once: its account’s Claude Code works headless in the worktree (or its text API answers) and stops. Optionally replace the step’s brief. Returns the step’s result, or finished false when it is still working after waitSeconds.', {
+      ...runArg, brief: { type: 'string', maxLength: 4_000 }, ...waitArg
+    }, async ({ runId, brief, waitSeconds }, signal) => {
+      await squad.runStep(runId, brief || undefined);
+      return outcome(await settle(waitSeconds, signal, 300), runId);
+    }, ['runId']),
+    squadRunTool('squad_skip_step', 'Skip the current step of a run.', runArg, async ({ runId }) => {
+      await squad.skipStep(runId);
+      return { run: runView(findRun(runId)) };
+    }),
+    squadRunTool('squad_request_changes', 'Send feedback on a run’s changes back to Implement as a new step in the same worktree. A finished run reopens. Run the new step with xdev_squad_run_step.', {
+      ...runArg, text: { type: 'string', maxLength: 4_000 },
+      repo: { type: 'string', maxLength: 300, description: 'Needed when the run works in several repositories.' },
+      account: { type: 'string', maxLength: 200, description: 'Claude Code account id that applies the feedback. Without it, the account that implemented the change.' }
+    }, async ({ runId, text, repo, account }) => {
+      await squad.requestChanges(runId, text, repo, account);
+      return { run: runView(findRun(runId)) };
+    }, ['runId', 'text']),
+    squadRunTool('squad_finish_run', 'End a run now: remaining steps are skipped and each worktree is committed to its local branch. Nothing is merged or pushed; the user does that in VS Code.', runArg, async ({ runId }) => {
+      await squad.finish(runId);
+      return { run: runView(findRun(runId)), note: 'Committed locally. Merging, pushing, and deploying stay with the user in VS Code.' };
+    }),
+    squadRunTool('squad_stop', 'Stop the Squad step or request that is running now.', {}, () => {
+      squad.cancel();
+      return activity();
+    })
+  ];
+
+  return [
+    ...workflowTools,
+    ...(level() === 'off' ? [] : readTools),
+    ...(level() === 'manage' ? manageTools : []),
+    ...(squadLevel() === 'off' ? [] : squadReadTools),
+    ...(squadLevel() === 'run' ? squadRunTools : []),
+    ...(viaClient() ? [confirmTool] : [])
+  ];
 }
 
 function clientConfig(client: string, { url, headers }: McpConnection): string {
@@ -322,16 +637,58 @@ export interface XdevMcpOptions {
   audit?: AuditLog;
   terminals?: TerminalAccounts;
   addApiProfile?(request: ApiProfileRequest): Promise<boolean>;
-  removeApiProfile?(id: string): Promise<boolean>;
+  /** `confirmed` skips the VS Code dialog because the user already confirmed in the client. */
+  removeApiProfile?(id: string, confirmed?: boolean): Promise<boolean>;
+}
+
+/** What a quick setup lets AI clients do. The user picks one in VS Code; a client can never raise these. */
+const setupPresets = [
+  {
+    label: 'Full control', description: 'For an AI lead you talk to away from VS Code',
+    detail: 'Manage accounts, plan and run Squad work, and confirm changes in the AI client.',
+    values: { accountControl: 'manage', squadControl: 'run', confirmIn: 'client' }
+  },
+  {
+    label: 'Lead Squad', description: 'Plan and run work',
+    detail: 'Read accounts and quota, plan and run Squad work. Confirmations stay in VS Code.',
+    values: { accountControl: 'read', squadControl: 'run', confirmIn: 'vscode' }
+  },
+  {
+    label: 'Read only', description: 'Watch',
+    detail: 'See accounts, quota, and Squad runs. No changes.',
+    values: { accountControl: 'read', squadControl: 'read', confirmIn: 'vscode' }
+  }
+] as const;
+
+/** The preferred port when it is free, else the next one, else any free port. */
+function freePort(preferred: number): Promise<number> {
+  const attempt = (port: number) => new Promise<number>((resolve, reject) => {
+    const probe = createProbe();
+    probe.once('error', reject);
+    probe.listen(port, '127.0.0.1', () => {
+      const chosen = (probe.address() as AddressInfo).port;
+      probe.close(() => resolve(chosen));
+    });
+  });
+  return attempt(preferred).catch(() => attempt(preferred + 1)).catch(() => attempt(0));
+}
+
+function firstSentence(text: string): string {
+  const end = text.search(/[.:](\s|$)/);
+  return end < 0 ? text : text.slice(0, end + 1).replace(/:$/, '.');
 }
 
 function mcpSettings() {
   const config = vscode.workspace.getConfiguration('xdevAi.mcp');
   const level = config.get<string>('accountControl', 'read');
+  const squadLevel = config.get<string>('squadControl', 'off');
+  const confirmIn = config.get<string>('confirmIn', 'vscode');
   return {
     autoStart: config.get<boolean>('autoStart', false),
     port: Math.trunc(config.get<number>('port', 0)),
-    level: accountControlLevels.find(candidate => candidate === level) ?? 'read'
+    level: accountControlLevels.find(candidate => candidate === level) ?? 'read',
+    squadLevel: squadControlLevels.find(candidate => candidate === squadLevel) ?? 'off',
+    confirmIn: confirmModes.find(candidate => candidate === confirmIn) ?? 'vscode'
   };
 }
 
@@ -342,6 +699,8 @@ export function registerXdevMcp(
   let starting: Promise<void> | undefined;
   let manageOpen = false;
   let disposed = false;
+  /** Set while a setup changes several settings, so the server restarts once at the end. */
+  let configuring = false;
   let dialogs: Promise<unknown> = Promise.resolve();
   const changed = new vscode.EventEmitter<void>();
   const stop = () => {
@@ -349,12 +708,19 @@ export function registerXdevMcp(
     connection = undefined;
     changed.fire();
   };
-  context.subscriptions.push({ dispose() { disposed = true; stop(); } }, changed);
+  context.subscriptions.push({ dispose() { disposed = true; setMcpControl(undefined); stop(); } }, changed, changed.event(notifyMcpChanged));
   const version = String(context.extension.packageJSON.version);
   const { audit, terminals } = options;
 
   const host: AccountHost = {
     level: () => mcpSettings().level,
+    squadLevel: () => mcpSettings().squadLevel,
+    confirmIn: () => mcpSettings().confirmIn,
+    async notify(title, detail, label) {
+      const line = detail.split('\n', 1)[0];
+      const message = `xDev AI MCP: ${title} ${line.length <= 200 ? line : `${line.slice(0, 199)}…`} You can also answer in the AI client that asked.`;
+      return await vscode.window.showWarningMessage(message, label) === label;
+    },
     usage: terminals ? id => terminals.usage.usage(id) : undefined,
     refreshUsage: terminals ? () => terminals.usage.refresh(true) : undefined,
     perform: terminals?.perform,
@@ -424,6 +790,115 @@ export function registerXdevMcp(
   }
 
   const ready = () => vscode.workspace.isTrusted && Boolean(vscode.workspace.workspaceFolders?.length);
+
+  const folderFile = () => {
+    const folder = vscode.workspace.workspaceFolders?.[0];
+    return folder && join(folder.uri.fsPath, '.mcp.json');
+  };
+  const readFolderFile = () => {
+    try {
+      const file = folderFile();
+      return file ? readFileSync(file, 'utf8') : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const copyConfiguration = async () => {
+    if (!connection) throw new Error('Start xDev AI MCP first.');
+    const client = await vscode.window.showQuickPick(['Claude Code', 'Claude Code (command)', 'Codex', 'Gemini CLI', 'VS Code'], {
+      title: 'Copy xDev AI MCP Configuration', placeHolder: 'The copied configuration includes a private token'
+    });
+    if (!client || !connection) return;
+    await vscode.env.clipboard.writeText(clientConfig(client, connection));
+    void vscode.window.showInformationMessage(mcpSettings().port
+      ? 'xDev AI MCP configuration copied. Keep it private; it keeps working until you rotate the token or change the port.'
+      : 'xDev AI MCP configuration copied. Keep it private. The port changes when MCP restarts; set xdevAi.mcp.port to keep it.');
+  };
+  let toolCache: { key: string; tools: McpPanelState['tools'] } | undefined;
+  let fileCache: { time: number; setUp: boolean } | undefined;
+  const control: McpControl = {
+    state() {
+      const settings = mcpSettings();
+      const key = `${settings.level}|${settings.squadLevel}|${settings.confirmIn}`;
+      if (toolCache?.key !== key) {
+        toolCache = {
+          key, tools: xdevMcpTools(squad, accounts, profiles, host).map(({ name, description, annotations }) => ({
+            name, summary: firstSentence(description ?? ''), kind: annotations?.readOnlyHint ? 'read' as const : 'change' as const
+          }))
+        };
+      }
+      // The panel refreshes often while a worker runs; the file is read at most every two seconds.
+      if (!fileCache || Date.now() - fileCache.time > 2_000) fileCache = { time: Date.now(), setUp: hasXdevServer(readFolderFile()) };
+      return {
+        ready: ready(), running: Boolean(connection), url: connection?.url, port: settings.port, autoStart: settings.autoStart,
+        accountControl: settings.level, squadControl: settings.squadLevel, confirmIn: settings.confirmIn,
+        folder: vscode.workspace.workspaceFolders?.[0]?.name, folderSetUp: fileCache.setUp, tools: toolCache.tools
+      };
+    },
+    async start() {
+      if (!ready()) throw new Error('Open a trusted workspace folder to start xDev AI MCP.');
+      await start();
+    },
+    stop,
+    async set(key, value) {
+      const allowed: Record<McpSettingKey, readonly unknown[]> = {
+        accountControl: accountControlLevels, squadControl: squadControlLevels, confirmIn: confirmModes, autoStart: [true, false]
+      };
+      const name = mcpSettingKeys.find(candidate => candidate === key);
+      if (!name || !allowed[name].includes(value)) throw new Error('Unknown MCP setting.');
+      await vscode.workspace.getConfiguration('xdevAi.mcp').update(name, value, vscode.ConfigurationTarget.Global);
+      void audit?.record('user', 'mcp_setting', true, { key: name, value });
+    },
+    copyConfiguration,
+    async setUpFolder() {
+      const folder = vscode.workspace.workspaceFolders?.[0];
+      const file = folderFile();
+      if (!ready() || !folder || !file) throw new Error('Open a trusted workspace folder to set up xDev AI MCP.');
+      const settings = mcpSettings();
+      const keep = 'Keep current settings';
+      const pick = await vscode.window.showQuickPick([
+        ...setupPresets.map(({ label, description, detail }) => ({ label, description, detail })),
+        { label: keep, detail: `Accounts: ${settings.level} · Squad: ${settings.squadLevel} · Confirm in: ${settings.confirmIn === 'client' ? 'the AI client' : 'VS Code'}` }
+      ], { title: `Set up xDev AI MCP for ${folder.name}`, placeHolder: 'What may AI clients connected to this folder do?' });
+      if (!pick || disposed) return;
+      const preset = setupPresets.find(candidate => candidate.label === pick.label);
+      const config = vscode.workspace.getConfiguration('xdevAi.mcp');
+      const port = settings.port || await freePort(7788);
+      configuring = true;
+      try {
+        for (const [key, value] of Object.entries(preset?.values ?? {})) await config.update(key, value, vscode.ConfigurationTarget.Global);
+        // A fixed port and automatic start keep the folder's configuration working after VS Code restarts.
+        if (port !== settings.port) await config.update('port', port, vscode.ConfigurationTarget.Global);
+        if (!settings.autoStart) await config.update('autoStart', true, vscode.ConfigurationTarget.Global);
+      } finally {
+        configuring = false;
+      }
+      await restart();
+      await writeFile(file, withXdevServer(readFolderFile(), port));
+      fileCache = undefined;
+      void audit?.record('user', 'mcp_setup_folder', true, { folder: folder.name, preset: pick.label, port });
+      notifyMcpChanged();
+      const open = 'Open AI Terminal';
+      const show = 'Show .mcp.json';
+      void vscode.window.showInformationMessage(
+        `xDev AI MCP is set up for ${folder.name} (${pick.label}). Claude Code sessions that xDev AI opens in this folder find the server in .mcp.json and ask once to use it. Reopen AI terminals that were already open.`, open, show
+      ).then(choice => {
+        if (choice === open) return vscode.commands.executeCommand('xdevAi.openTerminal');
+        if (choice === show) return vscode.window.showTextDocument(vscode.Uri.file(file));
+      });
+    },
+    async environment(): Promise<Record<string, string>> {
+      const settings = mcpSettings();
+      if (!ready()) return {};
+      // With a fixed port and automatic start the address is known before the server is up.
+      const url = connection?.url ?? (settings.port && settings.autoStart ? `http://127.0.0.1:${settings.port}/mcp` : undefined);
+      return url ? { [mcpUrlVariable]: url, [mcpTokenVariable]: await token() } : {};
+    }
+  };
+  setMcpControl(control);
+  const runSetup = () => control.setUpFolder().catch(error =>
+    void vscode.window.showErrorMessage(`xDev AI MCP could not be set up. ${error instanceof Error ? error.message : ''}`));
+  context.subscriptions.push(vscode.commands.registerCommand('xdevAi.initMcp', runSetup));
   const autoStart = () => {
     if (disposed || connection || !ready() || !mcpSettings().autoStart) return;
     start().catch(error => {
@@ -436,6 +911,8 @@ export function registerXdevMcp(
     vscode.workspace.onDidChangeWorkspaceFolders(autoStart),
     vscode.workspace.onDidChangeConfiguration(event => {
       if (!event.affectsConfiguration('xdevAi.mcp')) return;
+      notifyMcpChanged();
+      if (configuring) return;
       if (connection) {
         // Tools and their access level are fixed for a running server, so restart it with the new settings.
         restart().catch(error => void vscode.window.showErrorMessage(`xDev AI MCP could not restart. ${error instanceof Error ? error.message : ''}`));
@@ -463,18 +940,24 @@ export function registerXdevMcp(
     manageOpen = true;
     try {
       const settings = mcpSettings();
+      const setupLabel = 'Set Up for This Folder';
       const startLabel = 'Start MCP';
       const stopLabel = 'Stop MCP';
       const restartLabel = 'Restart MCP';
       const copyLabel = 'Copy Client Configuration';
       const rotateLabel = 'Rotate Token';
       const levelLabel = `Account Control: ${settings.level}`;
+      const squadLabel = `Squad Control: ${settings.squadLevel}`;
+      const confirmLabel = `Confirm Changes In: ${settings.confirmIn === 'client' ? 'the AI client' : 'VS Code'}`;
       const autoLabel = `Start Automatically: ${settings.autoStart ? 'on' : 'off'}`;
       const auditLabel = 'Show Audit Log';
       const items: vscode.QuickPickItem[] = [
+        { label: setupLabel, detail: 'Choose what AI clients may do, keep a fixed port, start the server, and add it to the .mcp.json of this folder.' },
         ...(connection ? [{ label: copyLabel }, { label: restartLabel }, { label: stopLabel }] : [{ label: startLabel }]),
         { label: '', kind: vscode.QuickPickItemKind.Separator },
         { label: levelLabel, description: 'off · read · manage', detail: 'What AI clients may do with your accounts. Changes always ask you first when they delete, sign in, or bypass.' },
+        { label: squadLabel, description: 'off · read · run', detail: 'Whether an AI client may act as the Squad lead: plan work, hand tasks to your accounts, and run worker steps.' },
+        { label: confirmLabel, description: 'vscode · client', detail: 'Choose the AI client when you work away from VS Code, for example through Claude Code Remote Control.' },
         { label: autoLabel, description: settings.port ? `port ${settings.port}` : 'random port', detail: 'Set xdevAi.mcp.port so client configuration keeps working after a restart.' },
         { label: rotateLabel },
         { label: auditLabel }
@@ -484,6 +967,7 @@ export function registerXdevMcp(
         placeHolder: connection ? 'Connect a client or change the server' : 'Enable local MCP access for this workspace window'
       }))?.label;
       if (disposed || !action) return;
+      if (action === setupLabel) await control.setUpFolder();
       if (action === stopLabel) stop();
       if (action === startLabel || action === restartLabel) {
         await (action === startLabel ? start() : restart());
@@ -499,21 +983,39 @@ export function registerXdevMcp(
           void audit?.record('user', 'mcp_account_control', true, { level: level.label });
         }
       }
+      if (action === squadLabel) {
+        const level = await vscode.window.showQuickPick(squadControlLevels.map(id => ({
+          label: id, picked: id === settings.squadLevel,
+          description: {
+            off: 'No Squad tools',
+            read: 'See the plan, runs, steps, results, and diffs',
+            run: 'Also submit plans, approve them, run and skip steps, request changes, and commit a run locally'
+          }[id]
+        })), { title: 'xDev AI MCP Squad control', placeHolder: 'Merging, pushing, and deploying always stay in VS Code' });
+        if (level) {
+          await vscode.workspace.getConfiguration('xdevAi.mcp').update('squadControl', level.label, vscode.ConfigurationTarget.Global);
+          void audit?.record('user', 'mcp_squad_control', true, { level: level.label });
+        }
+      }
+      if (action === confirmLabel) {
+        const mode = await vscode.window.showQuickPick([
+          { label: 'vscode', picked: settings.confirmIn === 'vscode', description: 'A dialog in VS Code. The AI client cannot answer it.' },
+          {
+            label: 'client', picked: settings.confirmIn === 'client', description: 'The AI client asks you, and a VS Code notification also works.',
+            detail: 'Keep permission prompts on in that client: with prompts skipped, the AI can confirm for you.'
+          }
+        ], { title: 'Where xDev AI MCP confirms sign-in, bypass, delete, and stage approval' });
+        if (mode) {
+          await vscode.workspace.getConfiguration('xdevAi.mcp').update('confirmIn', mode.label, vscode.ConfigurationTarget.Global);
+          void audit?.record('user', 'mcp_confirm_in', true, { mode: mode.label });
+        }
+      }
       if (action === autoLabel) {
         await vscode.workspace.getConfiguration('xdevAi.mcp').update('autoStart', !settings.autoStart, vscode.ConfigurationTarget.Global);
       }
       if (action === rotateLabel) await vscode.commands.executeCommand('xdevAi.rotateMcpToken');
       if (action === auditLabel) await vscode.commands.executeCommand('xdevAi.showAuditLog');
-      if (action === copyLabel && connection) {
-        const client = await vscode.window.showQuickPick(['Claude Code', 'Claude Code (command)', 'Codex', 'Gemini CLI', 'VS Code'], {
-          title: 'Copy xDev AI MCP Configuration', placeHolder: 'The copied configuration includes a private token'
-        });
-        if (!client || !connection) return;
-        await vscode.env.clipboard.writeText(clientConfig(client, connection));
-        void vscode.window.showInformationMessage(settings.port
-          ? 'xDev AI MCP configuration copied. Keep it private; it keeps working until you rotate the token or change the port.'
-          : 'xDev AI MCP configuration copied. Keep it private. The port changes when MCP restarts; set xdevAi.mcp.port to keep it.');
-      }
+      if (action === copyLabel && connection) await copyConfiguration();
     } catch (error) {
       void vscode.window.showErrorMessage(`xDev AI MCP could not complete the operation. ${error instanceof Error ? error.message : ''}`);
     } finally {

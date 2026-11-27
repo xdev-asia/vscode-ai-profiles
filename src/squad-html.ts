@@ -27,6 +27,7 @@ export function squadPage({ cspSource, nonce, script, chatScript, workspaceScrip
       <button type="button" id="show-customizations" aria-pressed="false">Skills &amp; Tools</button>
       <button type="button" id="show-memory" aria-pressed="false">Memory</button>
       <button type="button" id="show-project" aria-pressed="false">Project</button>
+      <button type="button" id="show-mcp" aria-pressed="false">MCP</button>
     </nav>
   </header>
   <main id="chat-panel">
@@ -193,7 +194,8 @@ export function squadPage({ cspSource, nonce, script, chatScript, workspaceScrip
     </section>
     <section class="detail">
       <h2>xDev AI MCP</h2>
-      <div class="actions"><button type="button" id="manage-mcp">Manage MCP</button></div>
+      <p class="subtle">Let AI clients such as Claude Code read your accounts and lead Squad.</p>
+      <div class="actions"><button type="button" id="manage-mcp">Open MCP settings</button></div>
     </section>
     <p id="customizations-notice" class="workspace-notice" role="status"></p>
   </main>
@@ -228,6 +230,49 @@ export function squadPage({ cspSource, nonce, script, chatScript, workspaceScrip
       <div class="actions"><button type="button" id="project-clean" class="primary">Clean up…</button></div>
     </section>
     <p id="project-notice" class="workspace-notice" role="status"></p>
+  </main>
+  <main id="mcp-panel" class="workspace-panel" hidden>
+    <section class="detail">
+      <div class="workspace-heading"><h2>xDev AI MCP</h2><span id="mcp-status" class="mcp-status"></span></div>
+      <p class="subtle">AI clients on this machine, such as Claude Code, Codex, or Gemini CLI, connect here to read your accounts and quota, lead Squad, and drive the SDLC workflow. The server listens only on this machine and needs a private token.</p>
+      <p id="mcp-summary"></p>
+      <div class="actions">
+        <button type="button" id="mcp-setup" class="primary">Set up for this folder</button>
+        <button type="button" id="mcp-toggle">Start</button>
+        <button type="button" id="mcp-copy">Copy client configuration…</button>
+      </div>
+      <p id="mcp-folder" class="subtle"></p>
+    </section>
+    <section class="detail mcp-levels">
+      <h2>What clients may do</h2>
+      <label>Accounts <select id="mcp-accountControl">
+        <option value="off">Off</option><option value="read">Read</option><option value="manage">Manage</option>
+      </select></label>
+      <p id="mcp-accountControl-hint" class="subtle"></p>
+      <label>Squad <select id="mcp-squadControl">
+        <option value="off">Off</option><option value="read">Read</option><option value="run">Run: the client leads</option>
+      </select></label>
+      <p id="mcp-squadControl-hint" class="subtle"></p>
+      <label>Confirm changes in <select id="mcp-confirmIn">
+        <option value="vscode">VS Code</option><option value="client">The AI client</option>
+      </select></label>
+      <p id="mcp-confirmIn-hint" class="subtle"></p>
+      <label class="checkbox"><input type="checkbox" id="mcp-autoStart"> Start with a trusted workspace</label>
+      <p id="mcp-port" class="subtle"></p>
+    </section>
+    <section class="detail">
+      <h2 id="mcp-tools-title">Tools</h2>
+      <p class="subtle">What a connected client can call with the settings above. “Change” tools are written to the audit log.</p>
+      <ul id="mcp-tools" class="workspace-list mcp-tools"></ul>
+    </section>
+    <section class="detail">
+      <div class="actions">
+        <button type="button" id="mcp-rotate">Rotate token</button>
+        <button type="button" id="mcp-audit">Audit log</button>
+        <button type="button" id="mcp-more">More options…</button>
+      </div>
+    </section>
+    <p id="mcp-notice" class="workspace-notice" role="status"></p>
   </main>
   <div id="squad-toast" class="toast" role="status" hidden></div>
   <script nonce="${nonce}" src="${chatScript}"></script>

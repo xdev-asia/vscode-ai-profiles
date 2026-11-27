@@ -460,6 +460,7 @@ export class SquadChat {
       /** Lead's resumable session in this chat: turns used of the configured maximum. */
       leadSession: lead && options.leadSessionTurns > 0 ? { turns: lead.turns, max: options.leadSessionTurns } : undefined,
       planApproval: options.planApproval,
+      approver: options.approver,
       accountPool: options.accountPool,
       runs: runs ?? [],
       workflow,
@@ -724,9 +725,85 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
   }
 
   /**
-   * Approving a plan only prepares a run: its steps and, for Claude Code steps, a git worktree.
-   * No agent starts until the user runs a step. Each step pauses the run when it ends.
+   * Saves a plan written by a lead outside Squad, such as a Claude Code session connected through MCP.
+   * Each task runs under its own `account` when given (an enabled Claude Code account), otherwise under the
+   * account pool or the role's seat. Tasks keep the lead's order, and a role may appear more than once.
+   * Like a plan from Lead, nothing runs until the plan is approved.
    */
+  async submitPlan(input: unknown, lead = 'External lead'): Promise<NonNullable<ReturnType<SquadChat['pendingPlan']>>> {
+    this.requireIdle();
+    const { request, summary, tasks } = (input ?? {}) as { request?: unknown; summary?: unknown; tasks?: unknown };
+    if (typeof request !== 'string' || !request.trim() || request.length > chatPromptLimit) throw new Error('Give the request the plan answers, up to 8,000 characters.');
+    if (typeof summary !== 'string' || !summary.trim() || summary.length > 4_000) throw new Error('Give a summary of the plan, up to 4,000 characters.');
+    if (!Array.isArray(tasks) || !tasks.length || tasks.length > 8) throw new Error('Give one to eight tasks.');
+    if (this.read().plan) throw new Error('Approve or discard the current plan first.');
+    const options = this.options();
+    const directory = await this.directory();
+    const pool = this.poolProfiles(directory, options);
+    const repositories = this.host ? await (this.host.repositories?.().catch(() => []) ?? Promise.resolve([])) : [];
+    const multiple = repositories.length > 1;
+    let jobs: Job[] = [];
+    for (const [index, raw] of tasks.entries()) {
+      const label = `Task ${index + 1}`;
+      const task = (raw && typeof raw === 'object' ? raw : {}) as { role?: unknown; brief?: unknown; repo?: unknown; account?: unknown };
+      const role = workerRoles.find(candidate => candidate === task.role);
+      if (!role) throw new Error(`${label}: choose a role from ${workerRoles.join(', ')}.`);
+      const brief = typeof task.brief === 'string' ? task.brief.trim() : '';
+      if (!brief || brief.length > 4_000) throw new Error(`${label}: write a brief of up to 4,000 characters.`);
+      let agent: Agent | undefined;
+      let pooled = false;
+      if (task.account !== undefined && task.account !== null && task.account !== '') {
+        const profile = directory.terminals.find(candidate => terminalProfileId(candidate) === task.account || candidate.name === task.account);
+        if (!profile) throw new Error(`${label}: ${shorten(String(task.account), 80)} is not a Claude Code account here. Call xdev_accounts_list.`);
+        if (profile.disabled) throw new Error(`${label}: the account ${profile.name} is disabled.`);
+        agent = claudeAgent(profile);
+        pooled = true;
+      } else agent = pool.length ? claudeAgent(pool[0]) : this.agentFor(role, directory);
+      if (!agent) throw new Error(`${label}: ${role} has no account. Give the task an "account", or the user assigns one under Roles or sets an account pool.`);
+      if (agent.kind === 'claude' && !this.host?.folder()) throw new Error('Open a workspace folder to use a Claude Code account in Squad.');
+      let repo: string | undefined;
+      if (agent.kind === 'claude' && repositories.length) {
+        const named = typeof task.repo === 'string' ? task.repo.trim().replace(/\/+$/, '') : '';
+        if (named && !repositories.includes(named)) throw new Error(`${label}: unknown repository ${shorten(named, 80)}. Choose from: ${repositories.slice(0, 40).join(', ')}.`);
+        repo = named || suggestRepository(repositories, [brief]);
+      }
+      jobs.push({
+        role, brief, profile: agent.name, kind: agent.kind, accountId: agent.id, revision: agent.revision,
+        ...(repo ? { repo } : {}), ...(pooled ? { pooled } : {})
+      });
+    }
+    // Tasks without their own account share the pool, in turn or by quota, like a plan from Lead.
+    let cursor: number | undefined;
+    const open = jobs.filter(job => job.kind === 'claude' && !job.pooled);
+    if (open.length && pool.length) {
+      const assigned = await this.assignPool(open, pool, options);
+      cursor = assigned.cursor;
+      let next = 0;
+      jobs = jobs.map(job => job.kind === 'claude' && !job.pooled ? assigned.jobs[next++] : job);
+    }
+    await this.write(state => {
+      if (state.plan) throw new Error('Approve or discard the current plan first.');
+      if (cursor !== undefined) state.poolCursor = cursor;
+      state.chatId ??= randomUUID();
+      state.chatTime ??= Date.now();
+      state.chatTitle ??= runTitle(request);
+      state.entries.push({ author: 'You', text: request.trim(), to: 'Lead' });
+      state.entries.push({ author: 'Lead', profile: shorten(lead, 80), text: shorten(summary.trim(), responseLimit) });
+      state.plan = { id: randomUUID(), prompt: request.trim(), jobs, repos: multiple ? repositories : undefined };
+    });
+    this.changed();
+    return this.pendingPlan()!;
+  }
+
+  /** Worker roles and the account each would use, for a lead that plans outside Squad. */
+  async roster(): Promise<{ role: Role; account?: string; kind?: AgentKind }[]> {
+    const directory = await this.directory();
+    return roles.map(role => {
+      const agent = this.agentFor(role, directory);
+      return { role, ...(agent ? { account: agent.name, kind: agent.kind } : {}) };
+    });
+  }
+
   /**
    * Approving a plan only prepares a run: its steps and, for Claude Code steps, one git worktree per
    * repository the steps work in. No agent starts until the user runs a step.
@@ -1210,7 +1287,7 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
    * Sends review feedback on the changes back to Implement as a new step in the same worktree.
    * A finished run becomes active again; its next commit lands on the same branch.
    */
-  async requestChanges(id: unknown, textInput: unknown, repo?: unknown): Promise<void> {
+  async requestChanges(id: unknown, textInput: unknown, repo?: unknown, accountInput?: unknown): Promise<void> {
     this.requireIdle();
     const { record, tree } = this.runTree(id, repo);
     if (typeof textInput !== 'string' || !textInput.trim() || textInput.length > 4_000) throw new Error('Describe the changes you want, up to 4,000 characters.');
@@ -1225,8 +1302,17 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
       ? [...record.sessions].reverse().find(item => item.role === 'Implement' && (item.repo ?? '.') === tree.target) : undefined;
     const sessionProfile = session && directory.terminals.find(profile => terminalProfileId(profile) === session.profileId);
     const pool = this.poolProfiles(directory, options);
-    const pooled = sessionProfile ?? pool[0];
-    const agent = pooled ? claudeAgent(pooled) : this.agentFor('Implement', directory);
+    const hasAccount = accountInput !== undefined && accountInput !== null && accountInput !== '';
+    const named = hasAccount
+      ? directory.terminals.find(profile => !profile.disabled && (terminalProfileId(profile) === accountInput || profile.name === accountInput)) : undefined;
+    if (hasAccount && !named) throw new Error('That is not an enabled Claude Code account here.');
+    const seat = this.agentFor('Implement', directory);
+    // A run planned with its own accounts may have no Implement seat: keep the account that did the work.
+    const earlier = seat?.kind === 'claude' ? undefined
+      : [...record.steps].reverse().find(step => step.role === 'Implement' && step.pooled && (step.repo ?? tree.target) === tree.target);
+    const pooled = named ?? sessionProfile ?? pool[0]
+      ?? (earlier && directory.terminals.find(profile => !profile.disabled && terminalProfileId(profile) === earlier.accountId));
+    const agent = pooled ? claudeAgent(pooled) : seat;
     if (agent?.kind !== 'claude') throw new Error('Assign a Claude Code account to Implement under Roles to apply review feedback.');
     const brief = `Apply this review feedback to the changes already made in this worktree (see git diff ${tree.base.slice(0, 12)}):\n${textInput.trim()}`;
     await this.updateRun(record.id, (saved, state) => {

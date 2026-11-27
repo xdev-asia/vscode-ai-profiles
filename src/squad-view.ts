@@ -12,6 +12,7 @@ import { isRole, noteLimit, readTask, roles, SquadStore, type Role } from './squ
 import { approvalSettings, disposableRun, poolModes, runTitle, settledAt, SquadChat, type RunTree, type SquadOptions, type WorkerHost } from './squad-chat';
 import { readClaudeQuota } from './account-usage';
 import { allEnvFiles, envFilesFor, loadEnv } from './squad-env';
+import { mcpControl, mcpServerName, onMcpChanged } from './mcp-control';
 import { readMcpGrants, readProjectMcp, workerMcp, type McpGrant } from './squad-mcp';
 import { folderSize, formatBytes, freeBytes, removeFolders, sessionFolder, sessionFolders } from './squad-storage';
 import { FileMemento, workspaceKey } from './squad-state';
@@ -24,7 +25,7 @@ import { git, validBranch, Worktrees, type MergeRequestMode } from './squad-work
 import { mergeSkills, readSyncFolder, syncProfileSkills, writeSyncFolder } from './skill-sync';
 
 const viewId = 'xdevAi.squad';
-type SquadTab = 'workflow' | 'customizations' | 'memory' | 'project';
+type SquadTab = 'workflow' | 'customizations' | 'memory' | 'project' | 'mcp';
 
 function squadSetting<T>(key: string, fallback: T): T {
   return vscode.workspace.getConfiguration('xdevAi.squad').get<T>(key) ?? fallback;
@@ -188,6 +189,8 @@ export function registerSquad(
     vscode.commands.registerCommand('xdevAi.squad.customizations', () => view.open('customizations')),
     vscode.commands.registerCommand('xdevAi.squad.memory', () => view.open('memory')),
     vscode.commands.registerCommand('xdevAi.squad.project', () => view.open('project')),
+    vscode.commands.registerCommand('xdevAi.squad.mcp', () => view.open('mcp')),
+    onMcpChanged(() => void view.refresh()),
     vscode.commands.registerCommand('xdevAi.squad.syncSkills', () => view.syncFolder()),
     vscode.commands.registerCommand('xdevAi.squad.cleanWorktrees', async () => {
       try {
@@ -357,7 +360,7 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
   private async projectInfo() {
     const folder = workspaceFolder();
     const grants = mcpGrants();
-    const projectServers = folder && vscode.workspace.isTrusted ? Object.keys(readProjectMcp(folder)) : [];
+    const projectServers = folder && vscode.workspace.isTrusted ? Object.keys(readProjectMcp(folder)).filter(name => name !== mcpServerName) : [];
     const keys = ['baseBranch', 'mergeRequests', 'mergeRequestTarget', 'workerBudgetUsd', 'workerTimeoutMinutes', 'workerAllowedCommands',
       'repositoryAllowedCommands', 'worktreeLinks', 'codegraph', 'mcpServers', 'cleanupAfterDays', 'minFreeDiskGb', 'workerEnvFiles', 'deployTargets', 'repositoryBaseBranches'];
     const free = await freeBytes(this.worktreeRoot).catch(() => undefined);
@@ -557,7 +560,7 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
     const folder = workspaceFolder();
     if (!folder) throw new Error('Open a workspace folder first.');
     if (!vscode.workspace.isTrusted) throw new Error('Trust this workspace before giving workers MCP servers.');
-    const available = Object.keys(readProjectMcp(folder)).filter(name => !mcpGrants().some(grant => grant.name === name));
+    const available = Object.keys(readProjectMcp(folder)).filter(name => name !== mcpServerName && !mcpGrants().some(grant => grant.name === name));
     const custom = '$(edit) Define a server in settings…';
     const name = await vscode.window.showQuickPick([...available, custom], {
       title: 'Give Squad workers an MCP server', placeHolder: available.length ? 'Servers in this project\'s .mcp.json' : 'No unused servers in .mcp.json'
@@ -735,7 +738,7 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
       this.actions = this.actions.then(async () => {
         if (this.view !== view) return;
         const type = message?.type === 'squadChat' ? 'chatSettled' :
-          message?.type === 'workspace' || message?.type === 'project' ? 'workspaceSettled' : 'settled';
+          message?.type === 'workspace' || message?.type === 'project' || message?.type === 'mcp' ? 'workspaceSettled' : 'settled';
         try {
           const data = await this.receive(message);
           await this.refresh();
@@ -797,6 +800,7 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
         ...this.store.read(),
         teamChat,
         customizations: this.teamChat.customizations.read(),
+        mcp: mcpControl()?.state(),
         memory: this.teamChat.memory.read(),
         sync: {
           folder: this.syncFolderPath() ?? '',
@@ -837,6 +841,21 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
     if (!input || typeof input !== 'object') return;
     const message = input as Record<string, unknown>;
     if (message.type === 'workspace') return this.updateWorkflowOrCustomizations(message);
+    if (message.type === 'mcp') {
+      const mcp = mcpControl();
+      if (!mcp) throw new Error('xDev AI MCP is not available in this window.');
+      switch (message.action) {
+        case 'setup': return mcp.setUpFolder();
+        case 'start': return mcp.start();
+        case 'stop': return mcp.stop();
+        case 'copy': return mcp.copyConfiguration();
+        case 'set': return mcp.set(message.key, message.value);
+        case 'rotate': return vscode.commands.executeCommand('xdevAi.rotateMcpToken');
+        case 'audit': return vscode.commands.executeCommand('xdevAi.showAuditLog');
+        case 'more': return vscode.commands.executeCommand('xdevAi.manageMcp');
+        default: return;
+      }
+    }
     if (message.type === 'project') {
       switch (message.action) {
         case 'editSettings': return vscode.commands.executeCommand('workbench.action.openWorkspaceSettingsFile');

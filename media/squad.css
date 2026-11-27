@@ -413,3 +413,13 @@ button.link:hover { color: var(--vscode-textLink-activeForeground, var(--accent)
 .chat-sessions small:empty {
   display: none;
 }
+.mcp-status { padding: 0 8px; border: 1px solid var(--border); border-radius: 10px; color: var(--muted); font-size: .86em; }
+.mcp-status:empty { display: none; }
+.mcp-status.on { color: var(--vscode-testing-iconPassed, var(--accent)); border-color: currentColor; }
+.mcp-levels label:not(.checkbox) { display: grid; gap: 2px; font-weight: 600; }
+.mcp-levels select { max-width: 100%; font-weight: 400; }
+.mcp-levels .subtle { margin: -4px 0 4px; }
+.mcp-tools li { justify-content: flex-start; min-width: 0; overflow-wrap: anywhere; }
+.mcp-tools span { flex-basis: 100%; color: var(--muted); }
+.mcp-tools small { padding: 0 4px; border: 1px solid var(--border); border-radius: 3px; color: var(--muted); }
+.mcp-tools small.change { color: var(--vscode-editorWarning-foreground, var(--accent)); border-color: currentColor; }

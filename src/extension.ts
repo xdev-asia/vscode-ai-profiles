@@ -150,9 +150,9 @@ async function manageAccounts(accounts: Accounts, item?: ApiAccountTarget): Prom
   }
 }
 
-async function removeAccount(accounts: Accounts, account: Account, fromMcp = false): Promise<boolean> {
+async function removeAccount(accounts: Accounts, account: Account, fromMcp = false, confirmed = false): Promise<boolean> {
   const remove = 'Delete Profile';
-  if (await vscode.window.showWarningMessage(`Delete “${account.name}”?`, {
+  if (confirmed || await vscode.window.showWarningMessage(`Delete “${account.name}”?`, {
     modal: true,
     detail: `${fromMcp ? 'An AI client connected through xDev AI MCP asked for this. ' : ''}This removes the API profile and its saved key from xDev AI.`
   }, remove) === remove) {
@@ -235,10 +235,10 @@ export function activate(context: vscode.ExtensionContext): XDevAI {
     audit,
     terminals,
     addApiProfile: preset => addAccount(accounts, preset),
-    async removeApiProfile(id) {
+    async removeApiProfile(id, confirmed) {
       const account = (await accounts.read()).accounts.find(candidate => candidate.id === id);
       if (!account) throw new Error('Unknown API profile id. Call xdev_accounts_list.');
-      return removeAccount(accounts, account, true);
+      return removeAccount(accounts, account, true, confirmed === true);
     }
   });
 
