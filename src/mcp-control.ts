@@ -6,7 +6,7 @@
 export const mcpServerName = 'xdev_ai';
 export const mcpUrlVariable = 'XDEV_AI_MCP_URL';
 export const mcpTokenVariable = 'XDEV_AI_MCP_TOKEN';
-export const mcpSettingKeys = ['accountControl', 'squadControl', 'confirmIn', 'autoStart'] as const;
+export const mcpSettingKeys = ['accountControl', 'squadControl', 'confirmIn', 'autoStart', 'port'] as const;
 export type McpSettingKey = typeof mcpSettingKeys[number];
 
 /** What the MCP tab shows. It never holds the token. */
@@ -34,6 +34,7 @@ export interface McpControl {
   state(): McpPanelState;
   start(): Promise<void>;
   stop(): void;
+  restart(): Promise<void>;
   set(key: unknown, value: unknown): Promise<void>;
   copyConfiguration(): Promise<void>;
   /** Asks what clients may do, fixes the port, starts the server, and writes the folder's .mcp.json. */

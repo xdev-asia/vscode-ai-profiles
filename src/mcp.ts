@@ -854,12 +854,19 @@ export function registerXdevMcp(
       await start();
     },
     stop,
+    async restart() {
+      if (!ready()) throw new Error('Open a trusted workspace folder to start xDev AI MCP.');
+      await restart();
+    },
     async set(key, value) {
-      const allowed: Record<McpSettingKey, readonly unknown[]> = {
+      const allowed: Record<Exclude<McpSettingKey, 'port'>, readonly unknown[]> = {
         accountControl: accountControlLevels, squadControl: squadControlLevels, confirmIn: confirmModes, autoStart: [true, false]
       };
       const name = mcpSettingKeys.find(candidate => candidate === key);
-      if (!name || !allowed[name].includes(value)) throw new Error('Unknown MCP setting.');
+      if (!name) throw new Error('Unknown MCP setting.');
+      if (name === 'port') {
+        if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > 65535) throw new Error('Enter a port from 0 to 65535. 0 takes a free port on every start.');
+      } else if (!allowed[name].includes(value)) throw new Error('Unknown MCP setting.');
       await vscode.workspace.getConfiguration('xdevAi.mcp').update(name, value, vscode.ConfigurationTarget.Global);
       void audit?.record('user', 'mcp_setting', true, { key: name, value });
     },

@@ -152,7 +152,8 @@ function mountSquadWorkspace(vscode) {
         : `Not set up for ${mcp.folder} yet. Set up asks what clients may do, keeps a fixed port, starts the server, and adds it to .mcp.json without the token.`;
     byId('mcp-setup').textContent = mcp?.folderSetUp ? 'Set up again' : 'Set up for this folder';
     byId('mcp-toggle').textContent = mcp?.running ? 'Stop' : 'Start';
-    byId('mcp-setup').disabled = byId('mcp-toggle').disabled = busy || !usable;
+    byId('mcp-setup').disabled = byId('mcp-toggle').disabled = byId('mcp-restart').disabled = busy || !usable;
+    byId('mcp-restart').hidden = !mcp?.running;
     byId('mcp-copy').disabled = busy || !mcp?.running;
     for (const key of Object.keys(mcpHints)) {
       const select = byId(`mcp-${key}`);
@@ -163,11 +164,14 @@ function mountSquadWorkspace(vscode) {
     byId('mcp-autoStart').checked = Boolean(mcp?.autoStart);
     byId('mcp-autoStart').disabled = busy || !mcp;
     const actual = mcp?.url ? new URL(mcp.url).port : '';
+    const portInput = byId('mcp-port-input');
+    if (mcp && document.activeElement !== portInput) portInput.value = String(mcp.port);
+    portInput.disabled = byId('mcp-port-save').disabled = busy || !mcp;
     byId('mcp-port').textContent = !mcp ? '' : mcp.portBusy
       ? `Port ${mcp.port} is used by another window, so this window uses ${actual} until it restarts. AI terminals opened here connect to this window. Configuration copied with port ${mcp.port} reaches the other window.`
-      : mcp.port ? `Port ${mcp.port}, kept across restarts, so client configuration keeps working.`
-      : 'Port: a free one on every start, so copied configuration stops working after a restart. Set up for this folder keeps one port.';
-    for (const id of ['mcp-rotate', 'mcp-audit', 'mcp-more']) byId(id).disabled = busy || !mcp;
+      : mcp.port ? `Port ${mcp.port} is kept across restarts, so client configuration keeps working.`
+      : '0 takes a free port on every start, so copied configuration stops working after a restart. Enter a port such as 7788 to keep it.';
+    for (const id of ['mcp-rotate', 'mcp-audit']) byId(id).disabled = busy || !mcp;
     const tools = mcp?.tools ?? [];
     byId('mcp-tools-title').textContent = `Tools (${tools.length})`;
     byId('mcp-tools').replaceChildren(...tools.map(tool => {
@@ -316,7 +320,7 @@ function mountSquadWorkspace(vscode) {
         remove.type = 'button';
         remove.disabled = Boolean(pending);
         remove.setAttribute('aria-label', `Remove MCP server ${server.name}`);
-        remove.addEventListener('click', () => send('removeMcp', { name: server.name }, 'project', 'project'));
+        remove.addEventListener('click', () => send('removeMcp', { name: server.name }, 'mcp', 'project'));
         const actions = element('div', undefined, 'actions');
         actions.append(remove);
         row.append(title, detail, actions);
@@ -429,15 +433,22 @@ function mountSquadWorkspace(vscode) {
   byId('mcp-copy').addEventListener('click', () => sendMcp('copy'));
   byId('mcp-rotate').addEventListener('click', () => sendMcp('rotate'));
   byId('mcp-audit').addEventListener('click', () => sendMcp('audit'));
-  byId('mcp-more').addEventListener('click', () => sendMcp('more'));
+  byId('mcp-restart').addEventListener('click', () => sendMcp('restart'));
+  byId('mcp-port-form').addEventListener('submit', event => {
+    event.preventDefault();
+    sendMcp('set', { key: 'port', value: Number(byId('mcp-port-input').value) });
+  });
+  byId('project-open-mcp').addEventListener('click', () => byId('show-mcp').click());
   for (const key of Object.keys(mcpHints)) {
     byId(`mcp-${key}`).addEventListener('change', event => sendMcp('set', { key, value: event.target.value }));
   }
   byId('mcp-autoStart').addEventListener('change', event => sendMcp('set', { key: 'autoStart', value: event.target.checked }));
   byId('native-skills').addEventListener('click', () => send('nativeSkills'));
-  for (const [id, action] of [['project-edit', 'editSettings'], ['project-add-mcp', 'addMcp'], ['project-mcp-file', 'openMcpFile'],
-    ['project-check', 'checkStorage'], ['project-clean', 'cleanStorage']]) {
+  for (const [id, action] of [['project-edit', 'editSettings'], ['project-check', 'checkStorage'], ['project-clean', 'cleanStorage']]) {
     byId(id).addEventListener('click', () => send(action, {}, 'project', 'project'));
+  }
+  for (const [id, action] of [['project-add-mcp', 'addMcp'], ['project-mcp-file', 'openMcpFile']]) {
+    byId(id).addEventListener('click', () => send(action, {}, 'mcp', 'project'));
   }
   return { render, settle, loadError(error) {
     byId('workflow-notice').textContent = error;

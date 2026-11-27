@@ -154,7 +154,7 @@ Assign a **Claude Code** terminal account (instead of an API profile) to a role 
 
 **Manage each project.** Open **xDev Squad → Project** (or **xDev AI: Open Squad Project Settings and Storage**). It lists this project's repositories and Squad settings, marks the ones set in the project's `.vscode/settings.json`, and opens that file with **Edit project settings**. Roles, runs, memory, skills, and settings are kept per project.
 
-**Give workers MCP servers.** Workers never load your own MCP servers. To let them use one, such as a read-only database or documentation server, click **Add server** on the Project tab, pick a server from the project's `.mcp.json`, list the tools workers may call, and pick the roles. It is saved in the project settings:
+**Give workers MCP servers.** Workers never load your own MCP servers. To let them use one, such as a read-only database or documentation server, click **Add server** under **MCP servers for Squad workers** on the MCP tab, pick a server from the project's `.mcp.json`, list the tools workers may call, and pick the roles. It is saved in the project settings:
 
 ```json
 "xdevAi.squad.mcpServers": {
@@ -243,7 +243,7 @@ Open **xDev Squad → Memory** or run **xDev AI: Open Squad Memory**. Memory hol
 
 ### Set up MCP for a folder
 
-Open **xDev Squad → MCP** (or run **xDev AI: Open MCP Settings**) to see whether the server runs, what connected clients may do, and every tool they can call. Click **Set up for this folder**, or run **xDev AI: Set Up MCP for This Folder**:
+Open **xDev Squad → MCP** (or run **xDev AI: Open MCP Settings**) to see whether the server runs, what connected clients may do, the port and token, every tool they can call, and the MCP servers Squad workers may use. Click **Set up for this folder**, or run **xDev AI: Set Up MCP for This Folder**:
 
 1. Choose what AI clients may do: **Full control** (manage accounts, lead Squad, confirm in the client), **Lead Squad**, **Read only**, or keep your current settings.
 2. xDev AI keeps a fixed port (7788 when it is free), turns on automatic start, and starts the server.
@@ -255,20 +255,20 @@ The variables are visible to programs that run in those terminals. Stop the serv
 
 ### Control the workflow through MCP
 
-1. In a trusted workspace, open **xDev Squad → Skills & Tools → Manage MCP** or run **xDev AI: Manage MCP**. Choose **Start MCP**.
+1. In a trusted workspace, open **xDev Squad → MCP** and click **Start**. The tab holds everything about MCP; **xDev AI: Manage MCP** offers the same actions as a menu.
 2. In VS Code builds with native MCP support, run **MCP: List Servers** and start **xDev AI** if needed. Select its tools in Copilot Agent Chat. [VS Code MCP server management](https://code.visualstudio.com/docs/agents/run/manage-mcp-servers)
-3. For a terminal client, reopen **Manage MCP** and choose **Copy Client Configuration**, then choose Claude Code, Codex, or Gemini CLI. Merge the snippet into the client's private config on the workspace host. For an xDev terminal profile, use `$CODEX_HOME/config.toml` for Codex or `$GEMINI_CLI_HOME/.gemini/settings.json` for Gemini CLI. In Claude Code, you can use `claude mcp add-json xdev_ai '<server definition>'` with the `mcpServers.xdev_ai` object from the snippet. Restart the client or refresh its MCP connections. [Claude Code configuration](https://code.claude.com/docs/en/mcp) · [Codex configuration](https://developers.openai.com/codex/config-reference/) · [Gemini CLI configuration](https://geminicli.com/docs/tools/mcp-server/)
+3. For a terminal client, click **Copy client configuration…** on the MCP tab, then choose Claude Code, Codex, or Gemini CLI. Merge the snippet into the client's private config on the workspace host. For an xDev terminal profile, use `$CODEX_HOME/config.toml` for Codex or `$GEMINI_CLI_HOME/.gemini/settings.json` for Gemini CLI. In Claude Code, you can use `claude mcp add-json xdev_ai '<server definition>'` with the `mcpServers.xdev_ai` object from the snippet. Restart the client or refresh its MCP connections. [Claude Code configuration](https://code.claude.com/docs/en/mcp) · [Codex configuration](https://developers.openai.com/codex/config-reference/) · [Gemini CLI configuration](https://geminicli.com/docs/tools/mcp-server/)
 4. Ask your agent to “Use xDev AI to show the current SDLC stage and submit a draft for review.” The draft appears in **Workflow**. Approve it there, or ask the agent to request approval in a VS Code dialog.
 
 The MCP server exposes workflow status, start, stage context, draft submission, approval requests, and the account and Squad tools described below. It shares the same workspace state as the Squad panel. A confirmed approval advances the current stage. The server exposes no account credentials or shell execution tools. Stage context includes the project brief, excerpts of approved results, and enabled skills, so only connect clients you trust with that context.
 
 MCP listens on a loopback address on the workspace host, including on code-server. The client must run on that same host. Keep the copied configuration private and out of source control. **Stop MCP** ends access. The token is saved in VS Code SecretStorage and stays the same until you run **xDev AI: Rotate MCP Token**.
 
-**Keep the connection across restarts.** Set `xdevAi.mcp.port` to a fixed port such as `7788` and turn on `xdevAi.mcp.autoStart` (both under **Manage MCP**, or in user settings). Copy the client configuration once; it keeps working after VS Code restarts. For Claude Code, **Copy Client Configuration → Claude Code (command)** copies a ready `claude mcp add --transport http …` line. Only one window can have a fixed port. Each window serves its own workspace, so another window takes a free port instead and says so on the MCP tab: AI terminals opened from that window connect to it, and configuration copied with the fixed port reaches the window that holds the port.
+**Keep the connection across restarts.** Set `xdevAi.mcp.port` to a fixed port such as `7788` and turn on `xdevAi.mcp.autoStart` (both under **Connection** on the MCP tab, or in user settings). Copy the client configuration once; it keeps working after VS Code restarts. For Claude Code, **Copy Client Configuration → Claude Code (command)** copies a ready `claude mcp add --transport http …` line. Only one window can have a fixed port. Each window serves its own workspace, so another window takes a free port instead and says so on the MCP tab: AI terminals opened from that window connect to it, and configuration copied with the fixed port reaches the window that holds the port.
 
 ### Manage accounts through MCP
 
-`xdevAi.mcp.accountControl` (user or remote settings only, so a workspace cannot raise it) decides what MCP clients may do with your accounts. Change it under **Manage MCP → Account Control**; a running server restarts with the new tools.
+`xdevAi.mcp.accountControl` (user or remote settings only, so a workspace cannot raise it) decides what MCP clients may do with your accounts. Change it under **What clients may do → Accounts** on the MCP tab; a running server restarts with the new tools.
 
 | Level | Tools |
 | --- | --- |
@@ -282,7 +282,7 @@ Try “Use xDev AI to tag my Claude accounts by team and put the ones with the m
 
 A connected client can act as the Squad lead: it plans the work, hands each task to one of your Claude Code accounts, runs the steps, and reads the results. This also works from a Claude Code session you control remotely (Remote Control), because that session runs on the workspace host. The account of that session plans; your other accounts do the work.
 
-1. Under **Manage MCP → Squad Control**, choose `run` (`xdevAi.mcp.squadControl`, user or remote settings only; `off` by default). Keep `xdevAi.mcp.accountControl` at `read` or higher so the client can list accounts.
+1. On the MCP tab, under **What clients may do → Squad**, choose `run` (`xdevAi.mcp.squadControl`, user or remote settings only; `off` by default). Keep `xdevAi.mcp.accountControl` at `read` or higher so the client can list accounts.
 2. Connect the client. **Set up for this folder** with **Full control** or **Lead Squad** does steps 1 and 2 at once (see [Set up MCP for a folder](#set-up-mcp-for-a-folder)); otherwise copy the client configuration and, for remote use, set a fixed `xdevAi.mcp.port` and turn on `xdevAi.mcp.autoStart`.
 3. Ask, for example: “Use xDev AI to add a health endpoint: give the implementation to the account with the most quota left and the review to another account, then show me the result.”
 
@@ -300,7 +300,7 @@ These tools show no VS Code dialog, so the client's own permission prompt is the
 
 ### Confirm changes away from VS Code
 
-Signing in, bypass sessions, deletions, and SDLC stage approval ask for your yes. By default that is a VS Code dialog, which you cannot answer when you work through a remote client. Under **Manage MCP → Confirm Changes In**, choose `client` (`xdevAi.mcp.confirmIn`, user or remote settings only):
+Signing in, bypass sessions, deletions, and SDLC stage approval ask for your yes. By default that is a VS Code dialog, which you cannot answer when you work through a remote client. On the MCP tab, under **Confirm changes in**, choose `client` (`xdevAi.mcp.confirmIn`, user or remote settings only):
 
 1. The tool makes no change. It returns a confirmation id with the title and detail of the request.
 2. The client shows you the request and, after your yes, calls `xdev_confirm`. Its permission prompt for that call is your confirmation. A notification in VS Code can approve the same request when you are at your desk.

@@ -218,10 +218,8 @@ export function squadPage({ cspSource, nonce, script, chatScript, workspaceScrip
       <dl id="project-settings" class="project-settings"></dl>
     </section>
     <section class="detail">
-      <div class="workspace-heading"><h2>MCP servers for workers</h2><button type="button" id="project-add-mcp" class="primary">Add server</button></div>
-      <p class="subtle">Workers never load your own MCP servers. Only the servers listed here start, only their listed tools can be called, and AI reviews get none.</p>
-      <ul id="project-mcp" class="workspace-list"></ul>
-      <div class="actions"><button type="button" id="project-mcp-file" hidden>Open .mcp.json</button></div>
+      <div class="workspace-heading"><h2>MCP servers for workers</h2><button type="button" id="project-open-mcp">Open the MCP tab</button></div>
+      <p class="subtle">The MCP servers this project gives Squad workers are managed on the MCP tab, with the rest of MCP.</p>
     </section>
     <section class="detail">
       <div class="workspace-heading"><h2>Storage</h2><button type="button" id="project-check">Check storage</button></div>
@@ -239,6 +237,7 @@ export function squadPage({ cspSource, nonce, script, chatScript, workspaceScrip
       <div class="actions">
         <button type="button" id="mcp-setup" class="primary">Set up for this folder</button>
         <button type="button" id="mcp-toggle">Start</button>
+        <button type="button" id="mcp-restart" hidden>Restart</button>
         <button type="button" id="mcp-copy">Copy client configuration…</button>
       </div>
       <p id="mcp-folder" class="subtle"></p>
@@ -257,8 +256,20 @@ export function squadPage({ cspSource, nonce, script, chatScript, workspaceScrip
         <option value="vscode">VS Code</option><option value="client">The AI client</option>
       </select></label>
       <p id="mcp-confirmIn-hint" class="subtle"></p>
+    </section>
+    <section class="detail mcp-levels">
+      <h2>Connection</h2>
       <label class="checkbox"><input type="checkbox" id="mcp-autoStart"> Start with a trusted workspace</label>
+      <form id="mcp-port-form" class="mcp-port">
+        <label>Port <input type="number" id="mcp-port-input" min="0" max="65535" step="1" inputmode="numeric" required></label>
+        <button type="submit" id="mcp-port-save">Save port</button>
+      </form>
       <p id="mcp-port" class="subtle"></p>
+      <div class="actions">
+        <button type="button" id="mcp-rotate">Rotate token</button>
+        <button type="button" id="mcp-audit">Audit log</button>
+      </div>
+      <p class="subtle">Rotating the token cuts off every client until it gets the new configuration. AI terminals opened by xDev AI get the new token when you reopen them.</p>
     </section>
     <section class="detail">
       <h2 id="mcp-tools-title">Tools</h2>
@@ -266,11 +277,10 @@ export function squadPage({ cspSource, nonce, script, chatScript, workspaceScrip
       <ul id="mcp-tools" class="workspace-list mcp-tools"></ul>
     </section>
     <section class="detail">
-      <div class="actions">
-        <button type="button" id="mcp-rotate">Rotate token</button>
-        <button type="button" id="mcp-audit">Audit log</button>
-        <button type="button" id="mcp-more">More options…</button>
-      </div>
+      <div class="workspace-heading"><h2>MCP servers for Squad workers</h2><button type="button" id="project-add-mcp" class="primary">Add server</button></div>
+      <p class="subtle">The other direction: servers that Squad workers may call. Workers never load your own MCP servers. Only the servers listed here start, only their listed tools can be called, and AI reviews get none.</p>
+      <ul id="project-mcp" class="workspace-list"></ul>
+      <div class="actions"><button type="button" id="project-mcp-file" hidden>Open .mcp.json</button></div>
     </section>
     <p id="mcp-notice" class="workspace-notice" role="status"></p>
   </main>

@@ -389,8 +389,8 @@ button.link:hover { color: var(--vscode-textLink-activeForeground, var(--accent)
 .project-settings dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
 .project-settings .scope { font-size: 0.85em; padding: 0 4px; border-radius: 3px; border: 1px solid var(--vscode-panel-border); }
 .project-settings .scope.project { color: var(--vscode-textLink-foreground); border-color: currentColor; }
-#project-panel .problem { color: var(--vscode-errorForeground); }
-#project-panel .workspace-list li { min-width: 0; overflow-wrap: anywhere; }
+#project-panel .problem, #mcp-panel .problem { color: var(--vscode-errorForeground); }
+#project-panel .workspace-list li, #mcp-panel .workspace-list li { min-width: 0; overflow-wrap: anywhere; }
 @media (max-width: 300px) { .project-settings { grid-template-columns: 1fr; } .project-settings dd { margin-bottom: 4px; } }
 
 .deployed .healthy span { color: var(--vscode-testing-iconPassed, var(--vscode-charts-green)); }
@@ -423,3 +423,5 @@ button.link:hover { color: var(--vscode-textLink-activeForeground, var(--accent)
 .mcp-tools span { flex-basis: 100%; color: var(--muted); }
 .mcp-tools small { padding: 0 4px; border: 1px solid var(--border); border-radius: 3px; color: var(--muted); }
 .mcp-tools small.change { color: var(--vscode-editorWarning-foreground, var(--accent)); border-color: currentColor; }
+.mcp-port { display: flex; flex-wrap: wrap; align-items: end; gap: 6px; }
+.mcp-port input { width: 7em; font-weight: 400; }
