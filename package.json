@@ -215,6 +215,12 @@
         "icon": "$(output)"
       },
       {
+        "command": "xdevAi.reviewMcpConfirmations",
+        "title": "Review MCP Confirmations",
+        "category": "xDev AI",
+        "icon": "$(shield)"
+      },
+      {
         "command": "xdevAi.initMcp",
         "title": "Set Up MCP for This Folder",
         "category": "xDev AI",
@@ -660,7 +666,7 @@
           "scope": "machine",
           "enumDescriptions": [
             "A dialog in VS Code confirms sign-in, bypass sessions, deletions, and SDLC stage approval. The AI client cannot answer it.",
-            "The tool returns a confirmation id and makes no change. The AI client asks you and calls `xdev_confirm`; a VS Code notification can approve the same request. Use it when you are away from VS Code."
+            "The tool returns a confirmation id and makes no change. The AI client asks you and calls `xdev_confirm`; while the request waits, a notice in VS Code lets you review and answer it there. Use it when you are away from VS Code."
           ],
           "markdownDescription": "Where xDev AI MCP confirms changes that need your yes. With `client`, keep permission prompts on in the AI client: a client that skips its prompts can confirm for you. Adding an API profile always needs VS Code, where you type the key. Set only in user or remote settings, not by a workspace."
         },

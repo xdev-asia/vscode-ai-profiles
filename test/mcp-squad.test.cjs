@@ -188,12 +188,18 @@ test('with confirmations in the client, nothing changes until xdev_confirm', { t
   const performed = [];
   const audited = [];
   const notices = [];
-  let approveInVsCode;
+  let answerInVsCode;
   let mode = 'vscode';
   const host = {
     level: () => 'manage', confirmIn: () => mode,
     confirm: async () => { throw new Error('No VS Code dialog is expected.'); },
-    notify: (title, detail, label) => { notices.push({ title, label }); return new Promise(resolve => { approveInVsCode = resolve; }); },
+    // Stands in for the VS Code notice: open until the confirmation is settled, wherever that happens.
+    notify: ({ title, label }, settled) => {
+      const notice = { title, label, open: true };
+      notices.push(notice);
+      void settled.then(() => { notice.open = false; });
+      return new Promise(resolve => { answerInVsCode = resolve; });
+    },
     perform: async (action, id, confirmed) => { performed.push([action, id, confirmed]); return true; },
     removeApiProfile: async (id, confirmed) => { performed.push(['removeApi', id, confirmed]); return true; },
     audit: (action, ok) => audited.push([action, ok])
@@ -208,9 +214,11 @@ test('with confirmations in the client, nothing changes until xdev_confirm', { t
   assert.equal(asked.done, false);
   assert.match(asked.title, /Delete “Implement account”/);
   assert.deepEqual(performed, []);
-  assert.deepEqual(notices.at(-1), { title: asked.title, label: 'Delete Account' });
+  assert.deepEqual(notices.at(-1), { title: asked.title, label: 'Delete Account', open: true });
 
   assert.deepEqual(await call('confirm', { confirmId: asked.confirmId, approve: false }), { done: false, reason: 'Declined. Do not retry unless the user asks again.' });
+  await tick();
+  assert.equal(notices.at(-1).open, false, 'the notice closes when the client declines');
   await assert.rejects(call('confirm', { confirmId: asked.confirmId, approve: true }), /unknown or has expired/);
   assert.deepEqual(performed, []);
 
@@ -218,19 +226,32 @@ test('with confirmations in the client, nothing changes until xdev_confirm', { t
   assert.notEqual(again.confirmId, asked.confirmId);
   assert.deepEqual(await call('confirm', { confirmId: again.confirmId, approve: true }), { done: true });
   assert.deepEqual(performed, [['remove', idOf(1), true]]);
+  await tick();
+  assert.equal(notices.at(-1).open, false, 'the notice closes when the client approves');
   await assert.rejects(call('confirm', { confirmId: again.confirmId, approve: true }), /unknown or has expired/);
   assert.equal(performed.length, 1, 'a confirmation runs once');
 
   // A user at VS Code approves the same request from its notification; the client then gets that one result.
   const bypass = await call('terminal_open_bypass', { id: idOf(2) });
-  approveInVsCode(true);
+  assert.equal(notices.at(-1).open, true);
+  answerInVsCode(true);
   await tick();
   assert.deepEqual(performed.at(-1), ['bypass', idOf(2), true]);
+  assert.equal(notices.at(-1).open, false, 'the notice closes when the user approves in VS Code');
   assert.deepEqual(await call('confirm', { confirmId: bypass.confirmId, approve: false }), { done: true });
   assert.equal(performed.length, 2);
 
   await assert.rejects(call('api_profile_add', { provider: 'openai', name: 'Key', model: 'm' }), /at VS Code to type the key/);
-  assert.equal((await call('terminal_sign_in', { id: idOf(0) })).needsConfirmation, true);
+
+  // Declining in VS Code changes nothing, closes the notice, and the client is told when it asks.
+  const signIn = await call('terminal_sign_in', { id: idOf(0) });
+  assert.equal(signIn.needsConfirmation, true);
+  answerInVsCode(false);
+  await tick();
+  assert.equal(notices.at(-1).open, false);
+  assert.deepEqual(await call('confirm', { confirmId: signIn.confirmId, approve: true }), { done: false, reason: 'The user declined in VS Code. Do not retry unless the user asks again.' });
+  assert.equal(performed.length, 2, 'a request declined in VS Code never runs');
+  await assert.rejects(call('confirm', { confirmId: signIn.confirmId, approve: true }), /unknown or has expired/);
 
   // Approving an SDLC stage also goes through the client.
   const { workflow } = await call('workflow_start', { brief: 'Add pagination' });

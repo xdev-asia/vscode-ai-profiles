@@ -72,8 +72,13 @@ export interface AccountHost {
   squadLevel?(): SquadControlLevel;
   /** Where confirmations are answered. Absent means a VS Code dialog. */
   confirmIn?(): ConfirmMode;
-  /** Tells a user at VS Code about a confirmation waiting in the client. Resolves true when they approve it there. */
-  notify?(title: string, detail: string, label: string): Promise<boolean>;
+  /**
+   * Shows a user at VS Code a confirmation that waits in the client, until `settled` resolves. Resolves true when
+   * they approve it there, false when they decline it there, and undefined when it was settled elsewhere.
+   */
+  notify?(request: ConfirmationRequest, settled: Promise<void>): Promise<boolean | undefined>;
+  /** Confirmations that wait for an answer. Kept by the host so they outlive a server restart, for example after a settings change. */
+  confirmations?: Map<string, PendingConfirmation>;
   /**
    * Opens, signs in, opens with bypass, or deletes a terminal account. Resolves false when the user cancels.
    * `confirmed` skips the VS Code dialog because the user already confirmed in the client.
@@ -88,11 +93,24 @@ export interface AccountHost {
   setPool?(mode: PoolMode, accounts: string[]): Promise<void>;
 }
 
-interface PendingConfirmation {
+export interface ConfirmationRequest {
+  title: string;
+  detail: string;
+  /** The button that approves, such as "Delete Account". */
+  label: string;
+}
+
+export interface PendingConfirmation {
   expires: number;
   run(signal: AbortSignal): Promise<unknown>;
   result?: Promise<unknown>;
+  /** The user declined at VS Code; the client is told when it asks. */
+  declined?: boolean;
+  /** Closes the notice in VS Code. */
+  close(): void;
 }
+
+const declinedByUser = { done: false, reason: 'Declined. Do not retry unless the user asks again.' };
 
 function clip(text: string, limit: number): string {
   return text.length <= limit ? text : `${text.slice(0, limit - 1)}…`;
@@ -203,17 +221,25 @@ export function xdevMcpTools(squad: SquadChat, accounts: Accounts, profiles: Ter
    * it. The tool returns a confirmation id; the change is made when the client calls xdev_confirm, which the
    * client's own permission prompt shows to the user. A user at VS Code can approve the same request there.
    */
-  const pending = new Map<string, PendingConfirmation>();
+  const pending = host?.confirmations ?? new Map<string, PendingConfirmation>();
   const viaClient = () => host?.confirmIn?.() === 'client';
+  /** Forgets a confirmation and closes its notice in VS Code. */
+  const closeConfirmation = (id: string, entry: PendingConfirmation) => {
+    if (pending.get(id) === entry) pending.delete(id);
+    entry.close();
+  };
   const defer = (
     name: string, args: Record<string, unknown>, title: string, detail: string, label: string, action: (signal: AbortSignal) => Promise<unknown>
   ) => {
     const now = Date.now();
-    for (const [id, entry] of pending) if (entry.expires < now) pending.delete(id);
+    for (const [id, entry] of pending) if (entry.expires < now) closeConfirmation(id, entry);
     if (pending.size >= maxPendingConfirmations) throw new Error('Too many confirmations are waiting. Ask the user about the earlier ones first.');
     const confirmId = randomUUID().slice(0, 8);
+    let close = () => {};
+    const settled = new Promise<void>(resolve => { close = resolve; });
     const entry: PendingConfirmation = {
       expires: now + confirmTtlMs,
+      close,
       async run(signal) {
         try {
           const result = await action(signal);
@@ -226,10 +252,21 @@ export function xdevMcpTools(squad: SquadChat, accounts: Accounts, profiles: Ter
       }
     };
     pending.set(confirmId, entry);
-    void host?.notify?.(title, detail, label).then(approved => {
-      if (!approved || pending.get(confirmId) !== entry || entry.expires < Date.now()) return;
-      entry.result ??= entry.run(new AbortController().signal);
-      entry.result.catch(() => undefined);
+    // The notice must not outlive the confirmation, so an unanswered one closes when it expires.
+    const expiry = setTimeout(() => closeConfirmation(confirmId, entry), confirmTtlMs);
+    expiry.unref?.();
+    void settled.then(() => clearTimeout(expiry));
+    void host?.notify?.({ title, detail, label }, settled).then(answer => {
+      if (answer === undefined || pending.get(confirmId) !== entry || entry.result || entry.expires < Date.now()) return;
+      if (answer) {
+        // The client gets this one result when it asks; the entry stays until then or until it expires.
+        entry.result = entry.run(new AbortController().signal);
+        entry.result.catch(() => undefined);
+      } else {
+        entry.declined = true;
+        host?.audit?.('confirm_declined', true, { confirmId, by: 'vscode' });
+      }
+      entry.close();
     }).catch(() => undefined);
     return {
       done: false, needsConfirmation: true, confirmId, title, detail: clip(detail, 4_000), expiresInSeconds: confirmTtlMs / 1_000,
@@ -243,20 +280,24 @@ export function xdevMcpTools(squad: SquadChat, accounts: Accounts, profiles: Ter
     const id = String(confirmId);
     const entry = pending.get(id);
     if (!entry || (!entry.result && entry.expires < Date.now())) {
-      pending.delete(id);
+      if (entry) closeConfirmation(id, entry);
       throw new Error('This confirmation is unknown or has expired. Call the original tool again if the user still wants it.');
     }
+    if (entry.declined) {
+      closeConfirmation(id, entry);
+      return { ...declinedByUser, reason: 'The user declined in VS Code. Do not retry unless the user asks again.' };
+    }
     if (approve !== true && !entry.result) {
-      pending.delete(id);
+      closeConfirmation(id, entry);
       host?.audit?.('confirm_declined', true, { confirmId: id });
-      return { done: false, reason: 'Declined. Do not retry unless the user asks again.' };
+      return declinedByUser;
     }
     // Approved here, or already approved by the user at VS Code: both get the one result.
     entry.result ??= entry.run(signal);
     try {
       return await entry.result;
     } finally {
-      pending.delete(id);
+      closeConfirmation(id, entry);
     }
   });
 
@@ -715,14 +756,71 @@ export function registerXdevMcp(
   const version = String(context.extension.packageJSON.version);
   const { audit, terminals } = options;
 
+  /** Confirmations a client waits for, which a user at VS Code can also answer. */
+  const waiting = new Map<string, ConfirmationRequest & { answer(approved: boolean | undefined): void }>();
+  const waitingItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 90);
+  waitingItem.command = 'xdevAi.reviewMcpConfirmations';
+  waitingItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+  const showWaiting = () => {
+    if (!waiting.size) { waitingItem.hide(); return; }
+    waitingItem.text = `$(shield) MCP: ${waiting.size} to confirm`;
+    waitingItem.tooltip = 'An AI client connected through xDev AI MCP waits for your answer. Click to review.';
+    waitingItem.show();
+  };
+  /** Keeps text from an account or profile name from turning into a link in a notification. */
+  const plain = (text: string) => text.replace(/[\[\]]/g, '');
+  context.subscriptions.push(waitingItem, vscode.commands.registerCommand('xdevAi.reviewMcpConfirmations', async () => {
+    if (!waiting.size) {
+      void vscode.window.showInformationMessage('No xDev AI MCP confirmation is waiting.');
+      return;
+    }
+    let id = [...waiting.keys()][0];
+    if (waiting.size > 1) {
+      const pick = await vscode.window.showQuickPick([...waiting].map(([key, request]) => ({ label: request.title, detail: request.detail.split('\n', 1)[0], key })), {
+        title: 'xDev AI MCP confirmations', placeHolder: 'An AI client asked for these. Choose one to answer.'
+      });
+      if (!pick) return;
+      id = pick.key;
+    }
+    const request = waiting.get(id);
+    if (!request) return;
+    const decline = 'Decline';
+    const choice = await vscode.window.showWarningMessage(request.title, {
+      modal: true, detail: `An AI client connected through xDev AI MCP asked for this.\n\n${request.detail}`
+    }, request.label, decline);
+    // Closing the dialog leaves the request waiting; it can still be answered here or in the client.
+    if (choice !== request.label && choice !== decline) return;
+    const current = waiting.get(id);
+    // The client may have answered while the dialog was open.
+    if (!current) void vscode.window.showInformationMessage('This request was already answered in the AI client.');
+    else current.answer(choice === request.label);
+  }));
+
   const host: AccountHost = {
+    confirmations: new Map(),
     level: () => mcpSettings().level,
     squadLevel: () => mcpSettings().squadLevel,
     confirmIn: () => mcpSettings().confirmIn,
-    async notify(title, detail, label) {
-      const line = detail.split('\n', 1)[0];
-      const message = `xDev AI MCP: ${title} ${line.length <= 200 ? line : `${line.slice(0, 199)}…`} You can also answer in the AI client that asked.`;
-      return await vscode.window.showWarningMessage(message, label) === label;
+    notify(request, settled) {
+      // A message with buttons cannot be closed by an extension and would stay after the client answered. A progress
+      // notice closes when its task ends, so it lasts exactly as long as the confirmation.
+      const id = randomUUID();
+      return new Promise<boolean | undefined>(resolve => {
+        const done = (answer: boolean | undefined) => {
+          if (!waiting.delete(id)) return;
+          showWaiting();
+          resolve(answer);
+        };
+        waiting.set(id, { ...request, answer: done });
+        showWaiting();
+        void settled.then(() => done(undefined));
+        const text = `xDev AI MCP: ${plain(request.title)} [Review](command:xdevAi.reviewMcpConfirmations) or answer in the AI client that asked.`;
+        void vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: text, cancellable: true }, (_progress, cancel) => {
+          // Cancel on the notice declines; the client is told when it asks.
+          cancel.onCancellationRequested(() => done(false));
+          return new Promise<void>(close => void settled.then(close));
+        });
+      });
     },
     usage: terminals ? id => terminals.usage.usage(id) : undefined,
     refreshUsage: terminals ? () => terminals.usage.refresh(true) : undefined,

@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- The VS Code notice for a confirmation that waits in the AI client no longer stays after the request was answered. It closes when the client or you answer, or when the request expires after 10 minutes.
+
+### Changed
+
+- The notice has a **Review** link, which opens a dialog to approve or decline, and a **Cancel** button, which declines. A status bar entry shows how many requests wait, and **xDev AI: Review MCP Confirmations** lists them.
+- A request you decline in VS Code tells the client so when it asks.
+- Waiting confirmations survive a restart of the MCP server, for example after you change a setting.
+
 ## 0.18.0 - 2026-11-27
 
 ### Added
