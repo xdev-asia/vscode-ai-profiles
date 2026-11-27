@@ -13,6 +13,7 @@ import { approvalSettings, disposableRun, poolModes, runTitle, settledAt, SquadC
 import { readClaudeQuota } from './account-usage';
 import { allEnvFiles, envFilesFor, loadEnv } from './squad-env';
 import { mcpControl, mcpServerName, onMcpChanged } from './mcp-control';
+import { artifactContentLimit, artifactKinds, artifactLink, SquadArtifacts } from './squad-artifacts';
 import { readMcpGrants, readProjectMcp, workerMcp, type McpGrant } from './squad-mcp';
 import { folderSize, formatBytes, freeBytes, removeFolders, sessionFolder, sessionFolders } from './squad-storage';
 import { FileMemento, workspaceKey } from './squad-state';
@@ -323,7 +324,9 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
         await removeFolders(accounts.flatMap(account => paths.map(path => sessionFolder(account.configDir, path))));
       }
     };
-    this.teamChat = new SquadChat(state, accounts, this.store, () => void this.refresh(), host);
+    const artifacts = new SquadArtifacts(key ? join(context.globalStorageUri.fsPath, 'squad-artifacts', key)
+      : join((context.storageUri ?? context.globalStorageUri).fsPath, 'squad-artifacts'));
+    this.teamChat = new SquadChat(state, accounts, this.store, () => void this.refresh(), host, artifacts);
     // Runs whose work is merged or pushed are cleaned up after xdevAi.squad.cleanupAfterDays.
     const prune = () => {
       try {
@@ -801,6 +804,7 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
         teamChat,
         customizations: this.teamChat.customizations.read(),
         mcp: mcpControl()?.state(),
+        artifacts: await this.teamChat.artifacts?.list() ?? [],
         memory: this.teamChat.memory.read(),
         sync: {
           folder: this.syncFolderPath() ?? '',
@@ -1070,6 +1074,39 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
       case 'removeMemory':
         await squad.memory.remove(id);
         return;
+      case 'openArtifact': {
+        const artifact = await this.requireArtifacts().read(id);
+        await vscode.window.showTextDocument(vscode.Uri.file(this.requireArtifacts().file(artifact)), { preview: true });
+        return;
+      }
+      case 'openArtifactLink': {
+        const link = artifactLink((await this.requireArtifacts().read(id)).link);
+        if (!link) throw new Error('This artifact has no claude.ai link.');
+        await vscode.env.openExternal(vscode.Uri.parse(link));
+        return;
+      }
+      case 'removeArtifact': {
+        const artifact = await this.requireArtifacts().read(id);
+        const remove = 'Remove Artifact';
+        if (await vscode.window.showWarningMessage(`Remove “${artifact.name}”?`, {
+          modal: true, detail: `Every account of this project loses it. Saved last by ${artifact.author}.${artifact.link ? ' The page on claude.ai is not changed.' : ''}`
+        }, remove) === remove) await this.requireArtifacts().remove(artifact.id);
+        return;
+      }
+      case 'addArtifact': {
+        const picked = await vscode.window.showOpenDialog({
+          canSelectMany: false, openLabel: 'Add as Artifact', title: 'Share a file with every account of this project',
+          filters: { Documents: ['md', 'markdown', 'html', 'htm', 'txt', 'json'], 'All files': ['*'] }
+        });
+        if (!picked?.length) return;
+        const bytes = await vscode.workspace.fs.readFile(picked[0]);
+        if (bytes.byteLength > artifactContentLimit * 4) throw new Error('This file is too large to share as an artifact.');
+        const file = basename(picked[0].fsPath);
+        const extension = file.includes('.') ? file.slice(file.lastIndexOf('.') + 1).toLowerCase() : '';
+        const kind = ({ md: 'markdown', markdown: 'markdown', html: 'html', htm: 'html', json: 'json' } as Record<string, typeof artifactKinds[number]>)[extension] ?? 'text';
+        await this.requireArtifacts().save({ name: file, kind, content: new TextDecoder('utf-8', { fatal: true }).decode(bytes) }, 'You');
+        return;
+      }
       case 'setTool': return squad.customizations.setTool(id, message.enabled);
       case 'manageMcp': return vscode.commands.executeCommand('xdevAi.manageMcp');
       case 'nativeTools':
@@ -1326,6 +1363,12 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
       results.push(`${tree.target}: ${status || 'no answer'}`);
     }
     if (report) void vscode.window.showInformationMessage(`Health: ${results.join(' · ')}`);
+  }
+
+  private requireArtifacts(): SquadArtifacts {
+    const artifacts = this.teamChat.artifacts;
+    if (!artifacts) throw new Error('Shared artifacts are not available in this window.');
+    return artifacts;
   }
 
   private async resumeSession(id: unknown, sessionId: unknown): Promise<void> {

@@ -84,10 +84,14 @@ test('worker environment points at the profile and drops other credentials', () 
 
 test('worker output is parsed from the structured result', () => {
   const parsed = parseWorkerOutput(result({
-    structured_output: { status: 'done', summary: ' Added the endpoint ', files_changed: ['src/a.ts', 3], tests: 'npm test passed', memory: ['Use zod for input', ''] }
+    structured_output: {
+      status: 'done', summary: ' Added the endpoint ', files_changed: ['src/a.ts', 3], tests: 'npm test passed', memory: ['Use zod for input', ''],
+      artifacts: [{ name: 'API design', content: '# Design' }, 'not an object', null]
+    }
   }));
   assert.deepEqual(parsed, {
     status: 'done', summary: 'Added the endpoint', filesChanged: ['src/a.ts'], tests: 'npm test passed', memory: ['Use zod for input'],
+    artifacts: [{ name: 'API design', content: '# Design' }],
     sessionId: 'session-1', costUsd: 0.25, turns: 4, denied: ['Bash: curl https://example.com']
   });
   assert.throws(() => parseWorkerOutput(result({ subtype: 'error_max_budget_usd', is_error: true })), /budget limit/);

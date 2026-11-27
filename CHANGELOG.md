@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Shared artifacts** (**xDev Squad → Memory & Artifacts**): documents every account of a project can read and write, such as a design, a report, or a spec. A worker returns them with its result and later steps under any account can read them. AI clients use `xdev_artifacts_list`, `xdev_artifact_read`, and `xdev_artifact_save`. **Add file…** shares a file from disk.
+- An artifact can carry the address of the page it was published as on claude.ai. The page stays with the account that made it; the content is what the other accounts read.
+
+### Changed
+
+- The Memory tab is named **Memory & Artifacts**.
+- xDev AI MCP accepts requests of up to 1 MB, so a client can save an artifact in one call. The limit was 64 KB.
+
 ## 0.18.1 - 2026-11-27
 
 ### Fixed

@@ -25,7 +25,7 @@ export function squadPage({ cspSource, nonce, script, chatScript, workspaceScrip
       <button type="button" id="show-roles" aria-pressed="false">Roles</button>
       <button type="button" id="show-workflow" aria-pressed="false">Workflow</button>
       <button type="button" id="show-customizations" aria-pressed="false">Skills &amp; Tools</button>
-      <button type="button" id="show-memory" aria-pressed="false">Memory</button>
+      <button type="button" id="show-memory" aria-pressed="false">Memory &amp; Artifacts</button>
       <button type="button" id="show-project" aria-pressed="false">Project</button>
       <button type="button" id="show-mcp" aria-pressed="false">MCP</button>
     </nav>
@@ -208,6 +208,11 @@ export function squadPage({ cspSource, nonce, script, chatScript, workspaceScrip
         <button type="submit" id="memory-submit" class="primary">Add</button>
       </form>
       <ul id="memory-list" class="workspace-list"></ul>
+    </section>
+    <section class="detail">
+      <div class="workspace-heading"><h2>Shared artifacts</h2><button type="button" id="artifact-add">Add file…</button></div>
+      <p class="subtle">Documents every account of this project can read and write, such as a design, a report, or a spec. Workers return them with their result, and AI clients save and read them through MCP. A page published on claude.ai belongs to the account that made it: its content is kept here, and its link opens only for people it is shared with on claude.ai.</p>
+      <ul id="artifact-list" class="workspace-list artifact-list"></ul>
     </section>
     <p id="memory-notice" class="workspace-notice" role="status"></p>
   </main>

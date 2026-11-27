@@ -5,6 +5,7 @@ import { Accounts, type Account } from './accounts';
 import { chat } from './core';
 import { isRole, roles, SquadStore, type Role } from './squad';
 import { SquadCustomizations, type Skill } from './squad-customizations';
+import type { SquadArtifacts } from './squad-artifacts';
 import { SquadMemory } from './squad-memory';
 import { suggestRepository } from './squad-codegraph';
 import {
@@ -325,6 +326,8 @@ export function gateChanges(changes: readonly FileChange[], limit = gatePatchLim
 const textOnly = 'You are using a text API. You cannot access the workspace, edit files, or run commands. Do not claim that you did.';
 const headless = 'You are a headless Claude Code worker in xDev Squad. Nobody can answer questions during the run: decide reasonably, or report status "blocked" with what you need. Do not commit, push, or change git remotes; xDev commits the worktree for the user. Shell commands are checked against an allowed list ("allowed_commands" when given, plus read-only git), and a command with pipes, redirects, ";", "&&", or "cd" is denied even when each part is allowed: run each allowed command on its own from the working directory, and create or edit files with the Write and Edit tools, not the shell. Use available skills when they apply. Report through the required JSON fields and keep the summary short, because other agents read it.';
 
+const artifactNote = ' "artifacts" lists documents that every account of this project shares; read an entry\'s "file" when it helps your task. Return in your report\'s "artifacts" any document teammates under other accounts should read later, such as a design, a report, or a spec, with its full content.';
+
 function shorten(text: string, limit: number): string {
   return text.length <= limit ? text : text.slice(0, limit) + '\n[Truncated]';
 }
@@ -440,7 +443,9 @@ export class SquadChat {
     private readonly accounts: Accounts,
     private readonly squad: SquadStore,
     private readonly changed: () => void,
-    private readonly host?: WorkerHost
+    private readonly host?: WorkerHost,
+    /** Documents shared by every account of the project. Absent in windows without a place to keep them. */
+    readonly artifacts?: SquadArtifacts
   ) {
     this.customizations = new SquadCustomizations(storage);
     this.memory = new SquadMemory(storage);
@@ -999,6 +1004,7 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
           ? await this.host!.worktrees.changedFiles?.(tree).catch(() => []) ?? [] : [];
         const graph = await this.host!.codegraphRoot?.().catch(() => undefined);
         const settings = this.host!.settings(step.role, tree.target);
+        const shared = await this.artifacts?.context().catch(() => []) ?? [];
         const environment = settings.env && Object.keys(settings.env).length
           ? { note: 'Already set for your commands from the project\'s .env files. Do not look for, read, or print .env files.', names: Object.keys(settings.env).slice(0, 100) }
           : undefined;
@@ -1009,9 +1015,10 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
             allowed_commands: step.role === 'Review' ? undefined : settings.allowedCommands,
             // Names only: the values reach the worker's commands as environment variables, never the prompt.
             environment_variables: environment,
-            previous: context.previous.length ? context.previous : undefined, changed_files: changed.length ? changed : undefined, memory: context.memory
+            previous: context.previous.length ? context.previous : undefined, changed_files: changed.length ? changed : undefined, memory: context.memory,
+            artifacts: shared.length ? shared : undefined
           }),
-          system: `${headless} You are ${step.role}. ${workerInstructions[step.role]}${target ? ` Your working directory is the root of the repository "${target}"; read a leading "${target}/" in a path as this directory.` : ''}${others.length ? ' Other steps of this run work in the other repositories; change only this one, and read "previous" for what they did.' : ''}${graph ? ` A CodeGraph index of the workspace is at ${graph}: run \`codegraph explore -p ${graph} "<symbols or question>"\` to locate code before searching files. Its paths point to the main checkout; edit the matching files in this worktree.` : ''} Reply in the user's language.`,
+          system: `${headless}${this.artifacts ? artifactNote : ''} You are ${step.role}. ${workerInstructions[step.role]}${target ? ` Your working directory is the root of the repository "${target}"; read a leading "${target}/" in a path as this directory.` : ''}${others.length ? ' Other steps of this run work in the other repositories; change only this one, and read "previous" for what they did.' : ''}${graph ? ` A CodeGraph index of the workspace is at ${graph}: run \`codegraph explore -p ${graph} "<symbols or question>"\` to locate code before searching files. Its paths point to the main checkout; edit the matching files in this worktree.` : ''} Reply in the user's language.`,
           settings: graph ? { ...settings, codegraph: true } : settings, signal: run.signal, onActivity: this.track(run, step.role, agent.name)
         };
         let stdout: string | undefined;
@@ -1037,6 +1044,9 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
         run.live = undefined;
         const result = parseWorkerOutput(stdout);
         await this.memory.add(result.memory, step.role);
+        // Saved under the account that wrote them, so every other account can read them later.
+        const documents = result.artifacts.length ? await this.artifacts?.saveAll(result.artifacts, agent.name, id).catch(() => []) ?? [] : [];
+        const reported = documents.length ? `${workerText(result)}\nArtifacts: ${documents.map(item => item.name).join(', ')}` : workerText(result);
         await this.updateRun(id, (saved, state) => {
           saved.costUsd += result.costUsd;
           if (result.sessionId) saved.sessions.push({ role: step.role, profileId: agent.id, profile: agent.name, sessionId: result.sessionId, repo: tree.target });
@@ -1046,7 +1056,7 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
             status: result.status, summary: result.summary, files: result.filesChanged, ms: elapsed(current),
             costUsd: (current.costUsd ?? 0) + result.costUsd, problems: (current.problems ?? 0) + problems
           });
-          state.entries.push({ ...this.reply(step.role, agent, workerText(result), result.costUsd), run: id });
+          state.entries.push({ ...this.reply(step.role, agent, reported, result.costUsd), run: id });
           if (result.status === 'blocked') {
             state.entries.push({ author: 'Squad', run: id, text: `${step.role} is blocked. Edit the brief and run the step again, continue it in a terminal, skip it, or finish the run.` });
           }

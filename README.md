@@ -234,6 +234,20 @@ Each account's own plan and usage limits apply. Squad runs one step at a time, o
 
 Open **xDev Squad → Memory** or run **xDev AI: Open Squad Memory**. Memory holds short notes, such as conventions, decisions, and pitfalls, that every Lead, worker, and SDLC draft receives with its task. Workers add up to five notes after a run when they learn something durable. Add, edit, pin, or delete notes yourself. Pinned notes are always included. Other notes are included newest first within a fixed budget of about 3,000 characters, so memory does not grow every prompt.
 
+### Share artifacts between accounts
+
+Open **xDev Squad → Memory & Artifacts**. **Shared artifacts** holds documents that every account of the project can read and write, such as a design, a report, or a spec. Memory is for short facts; artifacts are whole documents.
+
+- **Workers.** A headless worker returns documents with its result, and Squad saves them under that worker's account. Every later step, under any account, gets the list with a file it can read. The step's reply in Chat names the artifacts it saved.
+- **AI clients.** A client connected through MCP lists and reads artifacts with `xdev_artifacts_list` and `xdev_artifact_read` (Squad control `read`), and saves one with `xdev_artifact_save` (Squad control `run`). This is how an interactive session under one account hands a document to the others.
+- **You.** **Add file…** shares a file from disk. **Open** shows an artifact in the editor, and **Remove** deletes it for every account after you confirm. Clients cannot remove artifacts.
+
+Saving under an existing name replaces that artifact and records who saved it last. A project keeps up to 100 artifacts of up to 200,000 characters each, as Markdown, HTML, text, or JSON. They live in the extension's storage on the workspace host, not in the repository, and every window that opens the project sees the same ones.
+
+**Pages published on claude.ai.** A page that Claude Code publishes with its Artifact tool belongs to the account that made it, and xDev AI cannot share it for you. Save the page's content as a shared artifact and give its address as `link`: the other accounts read the content from the shared store, and **claude.ai page** opens the link for people it is shared with on claude.ai. Only `https://claude.ai/…` addresses are accepted.
+
+Workers and clients that can read artifacts see everything in them, so do not put secrets in an artifact.
+
 ### Manage Skills and Tools
 
 - Under **xDev Squad → Skills & Tools**, add, edit, disable, or delete workspace skills. A skill is a named set of instructions with an optional one-line **When to use** description. Enabled skills are included in SDLC drafting.
@@ -289,8 +303,8 @@ A connected client can act as the Squad lead: it plans the work, hands each task
 | Level | Tools |
 | --- | --- |
 | `off` (default) | No Squad tools. |
-| `read` | `xdev_squad_status` (the running step with its live activity, pending plan, role accounts, and every kept run with its status), `xdev_squad_run` (steps, results, AI reviews, branch, worktree, session ids, and diffs with `changes`), `xdev_squad_wait`. |
-| `run` | Also `xdev_squad_submit_plan`, `xdev_squad_approve_plan`, `xdev_squad_discard_plan`, `xdev_squad_run_step`, `xdev_squad_skip_step`, `xdev_squad_request_changes`, `xdev_squad_finish_run`, `xdev_squad_stop`, and `xdev_squad_ask` (a message to Squad's own Lead or a role). |
+| `read` | `xdev_squad_status` (the running step with its live activity, pending plan, role accounts, and every kept run with its status), `xdev_squad_run` (steps, results, AI reviews, branch, worktree, session ids, and diffs with `changes`), `xdev_squad_wait`, `xdev_artifacts_list`, `xdev_artifact_read`. |
+| `run` | Also `xdev_squad_submit_plan`, `xdev_squad_approve_plan`, `xdev_squad_discard_plan`, `xdev_squad_run_step`, `xdev_squad_skip_step`, `xdev_squad_request_changes`, `xdev_squad_finish_run`, `xdev_squad_stop`, `xdev_squad_ask` (a message to Squad's own Lead or a role), and `xdev_artifact_save`. |
 
 A plan has one to eight tasks. Each task names a role (Implement, Review, Tests), a brief, and optionally an `account` id from `xdev_accounts_list`; without one the task uses the account pool or the role's account. Tasks run in the order given, one at a time, and a role may appear more than once. The plan and every step also show in **xDev Squad → Chat**, where you can take over at any point: **Worker runs** lists each run with the state of its steps and a live feed of the step that is running, and **Resume … session** opens a finished headless step as an interactive Claude Code session under its account.
 

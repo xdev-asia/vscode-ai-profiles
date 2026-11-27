@@ -17,6 +17,8 @@ export interface WorkerReport {
   filesChanged: string[];
   tests: string;
   memory: string[];
+  /** Documents for the project's shared artifacts; checked when they are saved. */
+  artifacts: Record<string, unknown>[];
 }
 
 export interface WorkerResult extends WorkerReport {
@@ -96,6 +98,21 @@ const reportSchema = {
     memory: {
       type: 'array', maxItems: 5, items: { type: 'string' },
       description: 'Durable facts teammates need later (conventions, decisions, pitfalls). Empty if none.'
+    },
+    artifacts: {
+      type: 'array', maxItems: 3,
+      items: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'A short title. Saving under an existing name replaces that artifact.' },
+          kind: { type: 'string', enum: ['markdown', 'html', 'text', 'json'] },
+          description: { type: 'string', description: 'One line on what it is.' },
+          content: { type: 'string', description: 'The full document.' },
+          link: { type: 'string', description: 'The claude.ai address when you also published it there.' }
+        },
+        required: ['name', 'content']
+      },
+      description: 'Documents teammates under other accounts should read later: a design, a report, a spec. Not code that is already in the worktree. Omit when there are none.'
     }
   },
   required: ['status', 'summary', 'files_changed', 'tests', 'memory']
@@ -365,6 +382,8 @@ export function parseWorkerOutput(stdout: string): WorkerResult {
     filesChanged: strings(report.files_changed, 300, 100),
     tests: typeof report.tests === 'string' ? report.tests.trim().slice(0, 1_000) : '',
     memory: strings(report.memory, memoryNoteLimit, 5),
+    artifacts: Array.isArray(report.artifacts)
+      ? report.artifacts.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object' && !Array.isArray(item)).slice(0, 3) : [],
     sessionId: typeof message.session_id === 'string' ? message.session_id : undefined,
     costUsd: typeof message.total_cost_usd === 'number' ? message.total_cost_usd : 0,
     turns: typeof message.num_turns === 'number' ? message.num_turns : 0,

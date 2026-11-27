@@ -198,6 +198,51 @@ function mountSquadWorkspace(vscode) {
     byId('skill-name').focus();
   }
 
+  function renderArtifacts() {
+    const artifacts = state.artifacts ?? [];
+    const list = byId('artifact-list');
+    const key = JSON.stringify(artifacts) + String(Boolean(pending));
+    byId('artifact-add').disabled = Boolean(pending);
+    if (key === list.dataset.key) return;
+    list.dataset.key = key;
+    if (!artifacts.length) {
+      const empty = document.createElement('li');
+      empty.textContent = 'No artifacts yet. Ask a worker for a design or a report, save one from an AI client with xdev_artifact_save, or add a file.';
+      list.replaceChildren(empty);
+      return;
+    }
+    list.replaceChildren(...artifacts.map(artifact => {
+      const row = document.createElement('li');
+      const text = document.createElement('div');
+      const title = document.createElement('strong');
+      const meta = document.createElement('small');
+      const actions = document.createElement('div');
+      title.textContent = artifact.name;
+      meta.textContent = [artifact.kind, `by ${artifact.author}`, new Date(artifact.updated).toLocaleString(), artifact.version > 1 ? `saved ${artifact.version} times` : '']
+        .filter(Boolean).join(' · ');
+      text.className = 'artifact-text';
+      text.append(title, meta);
+      if (artifact.description) {
+        const description = document.createElement('span');
+        description.textContent = artifact.description;
+        text.append(description);
+      }
+      actions.className = 'actions';
+      for (const [label, action, shown] of [['Open', 'openArtifact', true], ['claude.ai page', 'openArtifactLink', Boolean(artifact.link)], ['Remove', 'removeArtifact', true]]) {
+        if (!shown) continue;
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = label;
+        button.setAttribute('aria-label', `${label} ${artifact.name}`);
+        button.disabled = Boolean(pending);
+        button.addEventListener('click', () => send(action, { id: artifact.id }, 'memory'));
+        actions.append(button);
+      }
+      row.append(text, actions);
+      return row;
+    }));
+  }
+
   function renderMemory() {
     const notes = state.memory ?? [];
     const list = byId('memory-list');
@@ -362,6 +407,7 @@ function mountSquadWorkspace(vscode) {
     renderWorkflow();
     renderCustomizations();
     renderMemory();
+    renderArtifacts();
     renderProject();
     renderMcp();
   }
@@ -425,6 +471,7 @@ function mountSquadWorkspace(vscode) {
   for (const tool of tools) {
     tool.addEventListener('change', () => send('setTool', { id: tool.id, enabled: tool.checked }));
   }
+  byId('artifact-add').addEventListener('click', () => send('addArtifact', {}, 'memory'));
   byId('native-tools').addEventListener('click', () => send('nativeTools'));
   byId('manage-mcp').addEventListener('click', () => byId('show-mcp').click());
   const sendMcp = (action, args = {}) => send(action, args, 'mcp', 'mcp');

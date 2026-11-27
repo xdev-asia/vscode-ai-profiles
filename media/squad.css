@@ -425,3 +425,6 @@ button.link:hover { color: var(--vscode-textLink-activeForeground, var(--accent)
 .mcp-tools small.change { color: var(--vscode-editorWarning-foreground, var(--accent)); border-color: currentColor; }
 .mcp-port { display: flex; flex-wrap: wrap; align-items: end; gap: 6px; }
 .mcp-port input { width: 7em; font-weight: 400; }
+.artifact-list li { align-items: flex-start; min-width: 0; overflow-wrap: anywhere; }
+.artifact-text { display: grid; gap: 2px; min-width: 0; flex: 1 1 14em; }
+.artifact-text small, .artifact-text span { color: var(--muted); }

@@ -14,6 +14,7 @@ import {
   type McpControl, type McpPanelState, type McpSettingKey
 } from './mcp-control';
 import type { McpConnection, McpTool } from './mcp-transport';
+import { artifactContentLimit, artifactDescriptionLimit, artifactKinds, artifactNameLimit, type SquadArtifact } from './squad-artifacts';
 import { approvers, chatPromptLimit, poolModes, type PoolMode, type RunRecord, type RunStep, type SquadChat, type SquadChatEntry } from './squad-chat';
 import {
   maxNoteLength, maxTags, terminalProfileId, terminalProviderIds, type TerminalProfile, type TerminalProfiles, type TerminalProvider
@@ -544,6 +545,14 @@ export function xdevMcpTools(squad: SquadChat, accounts: Accounts, profiles: Ter
       ...(finished ? {} : { note: 'Still working. Call xdev_squad_wait, then xdev_squad_run for the result.' })
     };
   };
+  const artifacts = () => {
+    if (!squad.artifacts) throw new Error('Shared artifacts are not available in this window.');
+    return squad.artifacts;
+  };
+  const artifactView = (artifact: SquadArtifact) => ({
+    id: artifact.id, name: artifact.name, kind: artifact.kind, description: artifact.description || undefined, by: artifact.author,
+    updatedAt: iso(artifact.updated), version: artifact.version, characters: artifact.size, link: artifact.link, run: artifact.run
+  });
   const waitArg = { waitSeconds: { type: 'integer', minimum: 0, maximum: maxWaitSeconds, description: 'How long to wait for the result before returning. The work continues after that.' } };
   const runArg = { runId: { type: 'string', maxLength: 64, description: 'Run id from xdev_squad_status or xdev_squad_approve_plan.' } };
   const squadReadTool = (name: string, description: string, properties: Properties, run: McpTool['run'], required?: string[]): McpTool =>
@@ -589,7 +598,16 @@ export function xdevMcpTools(squad: SquadChat, accounts: Accounts, profiles: Ter
     }, ['runId']),
     squadReadTool('squad_wait', 'Wait until the running Squad step or request ends, then return what Squad is doing. Use after a tool returned finished false.', {
       seconds: { type: 'integer', minimum: 1, maximum: maxWaitSeconds }, runId: runArg.runId
-    }, async ({ seconds, runId }, signal) => outcome(await settle(seconds, signal, 300), runId), [])
+    }, async ({ seconds, runId }, signal) => outcome(await settle(seconds, signal, 300), runId), []),
+    squadReadTool('artifacts_list', 'List the documents every account of this project shares, such as designs, reports, and specs: name, kind, description, who saved each one last, and its claude.ai page if it has one. Read one with xdev_artifact_read.', {}, async () => ({
+      artifacts: (await artifacts().list()).map(artifactView)
+    })),
+    squadReadTool('artifact_read', 'Read one shared artifact with its full content, by name or id from xdev_artifacts_list.', {
+      name: { type: 'string', maxLength: artifactNameLimit, description: 'The artifact’s name or id.' }
+    }, async ({ name }) => {
+      const { content, ...artifact } = await artifacts().read(name);
+      return { ...artifactView(artifact), content };
+    })
   ];
 
   const taskSchema = {
@@ -654,7 +672,18 @@ export function xdevMcpTools(squad: SquadChat, accounts: Accounts, profiles: Ter
     squadRunTool('squad_stop', 'Stop the Squad step or request that is running now.', {}, () => {
       squad.cancel();
       return activity();
-    })
+    }),
+    squadRunTool('artifact_save', 'Share a document with every account of this project: a design, a report, a spec. Saving under an existing name replaces that artifact. A page you published on claude.ai belongs to your account alone, so give its full content here and its address as link; other accounts then read the content with xdev_artifact_read.', {
+      name: { type: 'string', maxLength: artifactNameLimit, description: 'A short title.' },
+      content: { type: 'string', maxLength: artifactContentLimit, description: 'The full document.' },
+      kind: { type: 'string', enum: [...artifactKinds], description: 'markdown when omitted.' },
+      description: { type: 'string', maxLength: artifactDescriptionLimit, description: 'One line on what it is.' },
+      link: { type: 'string', maxLength: 500, description: 'The https://claude.ai/… address of the published page, if any.' },
+      by: { type: 'string', maxLength: 60, description: 'Your account name, shown as the author.' }
+    }, async ({ name, content, kind, description, link, by }) => {
+      const author = typeof by === 'string' && by.trim() ? `${by.trim()} (MCP)` : 'MCP client';
+      return { saved: artifactView(await artifacts().save({ name, content, kind, description, link }, author)) };
+    }, ['name', 'content'])
   ];
 
   return [
