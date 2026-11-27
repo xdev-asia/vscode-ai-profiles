@@ -120,6 +120,68 @@ function mountSquadWorkspace(vscode) {
     }
   }
 
+  const mcpHints = {
+    accountControl: {
+      off: 'Clients get no account tools.',
+      read: 'Clients list accounts, sign-in state, and quota, and ask which account has the most quota left.',
+      manage: 'Clients also rename, tag, disable, and open accounts and set the Squad pool. Sign-in, bypass sessions, and deletion ask you first.'
+    },
+    squadControl: {
+      off: 'Clients get no Squad tools.',
+      read: 'Clients see the plan, runs, results, and diffs.',
+      run: 'Clients act as the lead: they hand tasks to your Claude Code accounts and run worker steps. Merging, pushing, and deploying stay in VS Code.'
+    },
+    confirmIn: {
+      vscode: 'A dialog in VS Code asks you. A client cannot answer it, so choose this when you sit here.',
+      client: 'The AI client asks you, and a notification in VS Code also works. Keep permission prompts on in that client.'
+    }
+  };
+
+  function renderMcp() {
+    const mcp = state.mcp;
+    const busy = Boolean(pending);
+    const usable = Boolean(mcp?.ready);
+    byId('mcp-status').textContent = !mcp ? '' : mcp.running ? 'Running' : 'Stopped';
+    byId('mcp-status').classList.toggle('on', Boolean(mcp?.running));
+    byId('mcp-summary').textContent = !mcp ? 'xDev AI MCP is not available in this window.'
+      : !mcp.ready ? 'Open a trusted workspace folder to use xDev AI MCP.'
+        : mcp.running ? `Running at ${mcp.url}. ${mcp.tools.length} tools are available to connected clients.`
+          : 'Stopped. AI clients cannot reach xDev AI.';
+    byId('mcp-folder').textContent = !usable ? ''
+      : mcp.folderSetUp ? `.mcp.json in ${mcp.folder} has the xDev AI server. Claude Code sessions that xDev AI opens in this folder connect by themselves; the file holds no token.`
+        : `Not set up for ${mcp.folder} yet. Set up asks what clients may do, keeps a fixed port, starts the server, and adds it to .mcp.json without the token.`;
+    byId('mcp-setup').textContent = mcp?.folderSetUp ? 'Set up again' : 'Set up for this folder';
+    byId('mcp-toggle').textContent = mcp?.running ? 'Stop' : 'Start';
+    byId('mcp-setup').disabled = byId('mcp-toggle').disabled = busy || !usable;
+    byId('mcp-copy').disabled = busy || !mcp?.running;
+    for (const key of Object.keys(mcpHints)) {
+      const select = byId(`mcp-${key}`);
+      if (mcp && document.activeElement !== select) select.value = mcp[key];
+      select.disabled = busy || !mcp;
+      byId(`mcp-${key}-hint`).textContent = mcpHints[key][select.value] ?? '';
+    }
+    byId('mcp-autoStart').checked = Boolean(mcp?.autoStart);
+    byId('mcp-autoStart').disabled = busy || !mcp;
+    byId('mcp-port').textContent = !mcp ? '' : mcp.port
+      ? `Port ${mcp.port}, kept across restarts, so client configuration keeps working.`
+      : 'Port: a free one on every start, so copied configuration stops working after a restart. Set up for this folder keeps one port.';
+    for (const id of ['mcp-rotate', 'mcp-audit', 'mcp-more']) byId(id).disabled = busy || !mcp;
+    const tools = mcp?.tools ?? [];
+    byId('mcp-tools-title').textContent = `Tools (${tools.length})`;
+    byId('mcp-tools').replaceChildren(...tools.map(tool => {
+      const row = document.createElement('li');
+      const name = document.createElement('code');
+      const summary = document.createElement('span');
+      const kind = document.createElement('small');
+      name.textContent = tool.name;
+      summary.textContent = tool.summary;
+      kind.textContent = tool.kind === 'read' ? 'read' : 'change';
+      kind.className = tool.kind;
+      row.append(name, kind, summary);
+      return row;
+    }));
+  }
+
   function editSkill(skill) {
     skillId = skill?.id;
     byId('skill-name').value = skill?.name ?? '';
@@ -295,6 +357,7 @@ function mountSquadWorkspace(vscode) {
     renderCustomizations();
     renderMemory();
     renderProject();
+    renderMcp();
   }
 
   function send(action, args, notice = 'customizations', type = 'workspace') {
@@ -314,7 +377,7 @@ function mountSquadWorkspace(vscode) {
     if (!pending) return;
     const { action, notice } = pending;
     pending = undefined;
-    byId(`${notice}-notice`).textContent = error ?? (action === 'copy' ? 'Stage brief copied.' : '');
+    byId(`${notice}-notice`).textContent = error ?? (action === 'copy' && notice === 'workflow' ? 'Stage brief copied.' : '');
     if (!error && action === 'saveSkill') skillForm.hidden = true;
     if (!error && (action === 'addMemory' || action === 'editMemory')) {
       byId('memory-text').value = '';
@@ -357,7 +420,18 @@ function mountSquadWorkspace(vscode) {
     tool.addEventListener('change', () => send('setTool', { id: tool.id, enabled: tool.checked }));
   }
   byId('native-tools').addEventListener('click', () => send('nativeTools'));
-  byId('manage-mcp').addEventListener('click', () => send('manageMcp'));
+  byId('manage-mcp').addEventListener('click', () => byId('show-mcp').click());
+  const sendMcp = (action, args = {}) => send(action, args, 'mcp', 'mcp');
+  byId('mcp-setup').addEventListener('click', () => sendMcp('setup'));
+  byId('mcp-toggle').addEventListener('click', () => sendMcp(state?.mcp?.running ? 'stop' : 'start'));
+  byId('mcp-copy').addEventListener('click', () => sendMcp('copy'));
+  byId('mcp-rotate').addEventListener('click', () => sendMcp('rotate'));
+  byId('mcp-audit').addEventListener('click', () => sendMcp('audit'));
+  byId('mcp-more').addEventListener('click', () => sendMcp('more'));
+  for (const key of Object.keys(mcpHints)) {
+    byId(`mcp-${key}`).addEventListener('change', event => sendMcp('set', { key, value: event.target.value }));
+  }
+  byId('mcp-autoStart').addEventListener('change', event => sendMcp('set', { key: 'autoStart', value: event.target.checked }));
   byId('native-skills').addEventListener('click', () => send('nativeSkills'));
   for (const [id, action] of [['project-edit', 'editSettings'], ['project-add-mcp', 'addMcp'], ['project-mcp-file', 'openMcpFile'],
     ['project-check', 'checkStorage'], ['project-clean', 'cleanStorage']]) {
@@ -368,5 +442,6 @@ function mountSquadWorkspace(vscode) {
     byId('customizations-notice').textContent = error;
     byId('memory-notice').textContent = error;
     byId('project-notice').textContent = error;
+    byId('mcp-notice').textContent = error;
   } };
 }

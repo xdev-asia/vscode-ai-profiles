@@ -1,10 +1,18 @@
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { writeFile } from 'node:fs/promises';
+import { createServer as createProbe, type AddressInfo } from 'node:net';
+import { join } from 'node:path';
 import * as vscode from 'vscode';
 import { type Accounts } from './accounts';
 import type { AccountUsage } from './account-usage';
 import type { AuditLog } from './audit';
 import type { TerminalAccounts } from './ai-terminal';
 import { providers, type Provider } from './core';
+import {
+  hasXdevServer, mcpSettingKeys, mcpTokenVariable, mcpUrlVariable, notifyMcpChanged, setMcpControl, withXdevServer,
+  type McpControl, type McpPanelState, type McpSettingKey
+} from './mcp-control';
 import type { McpConnection, McpTool } from './mcp-transport';
 import { approvers, chatPromptLimit, poolModes, type PoolMode, type RunRecord, type RunStep, type SquadChat, type SquadChatEntry } from './squad-chat';
 import {
@@ -633,6 +641,43 @@ export interface XdevMcpOptions {
   removeApiProfile?(id: string, confirmed?: boolean): Promise<boolean>;
 }
 
+/** What a quick setup lets AI clients do. The user picks one in VS Code; a client can never raise these. */
+const setupPresets = [
+  {
+    label: 'Full control', description: 'For an AI lead you talk to away from VS Code',
+    detail: 'Manage accounts, plan and run Squad work, and confirm changes in the AI client.',
+    values: { accountControl: 'manage', squadControl: 'run', confirmIn: 'client' }
+  },
+  {
+    label: 'Lead Squad', description: 'Plan and run work',
+    detail: 'Read accounts and quota, plan and run Squad work. Confirmations stay in VS Code.',
+    values: { accountControl: 'read', squadControl: 'run', confirmIn: 'vscode' }
+  },
+  {
+    label: 'Read only', description: 'Watch',
+    detail: 'See accounts, quota, and Squad runs. No changes.',
+    values: { accountControl: 'read', squadControl: 'read', confirmIn: 'vscode' }
+  }
+] as const;
+
+/** The preferred port when it is free, else the next one, else any free port. */
+function freePort(preferred: number): Promise<number> {
+  const attempt = (port: number) => new Promise<number>((resolve, reject) => {
+    const probe = createProbe();
+    probe.once('error', reject);
+    probe.listen(port, '127.0.0.1', () => {
+      const chosen = (probe.address() as AddressInfo).port;
+      probe.close(() => resolve(chosen));
+    });
+  });
+  return attempt(preferred).catch(() => attempt(preferred + 1)).catch(() => attempt(0));
+}
+
+function firstSentence(text: string): string {
+  const end = text.search(/[.:](\s|$)/);
+  return end < 0 ? text : text.slice(0, end + 1).replace(/:$/, '.');
+}
+
 function mcpSettings() {
   const config = vscode.workspace.getConfiguration('xdevAi.mcp');
   const level = config.get<string>('accountControl', 'read');
@@ -654,6 +699,8 @@ export function registerXdevMcp(
   let starting: Promise<void> | undefined;
   let manageOpen = false;
   let disposed = false;
+  /** Set while a setup changes several settings, so the server restarts once at the end. */
+  let configuring = false;
   let dialogs: Promise<unknown> = Promise.resolve();
   const changed = new vscode.EventEmitter<void>();
   const stop = () => {
@@ -661,7 +708,7 @@ export function registerXdevMcp(
     connection = undefined;
     changed.fire();
   };
-  context.subscriptions.push({ dispose() { disposed = true; stop(); } }, changed);
+  context.subscriptions.push({ dispose() { disposed = true; setMcpControl(undefined); stop(); } }, changed, changed.event(notifyMcpChanged));
   const version = String(context.extension.packageJSON.version);
   const { audit, terminals } = options;
 
@@ -743,6 +790,115 @@ export function registerXdevMcp(
   }
 
   const ready = () => vscode.workspace.isTrusted && Boolean(vscode.workspace.workspaceFolders?.length);
+
+  const folderFile = () => {
+    const folder = vscode.workspace.workspaceFolders?.[0];
+    return folder && join(folder.uri.fsPath, '.mcp.json');
+  };
+  const readFolderFile = () => {
+    try {
+      const file = folderFile();
+      return file ? readFileSync(file, 'utf8') : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const copyConfiguration = async () => {
+    if (!connection) throw new Error('Start xDev AI MCP first.');
+    const client = await vscode.window.showQuickPick(['Claude Code', 'Claude Code (command)', 'Codex', 'Gemini CLI', 'VS Code'], {
+      title: 'Copy xDev AI MCP Configuration', placeHolder: 'The copied configuration includes a private token'
+    });
+    if (!client || !connection) return;
+    await vscode.env.clipboard.writeText(clientConfig(client, connection));
+    void vscode.window.showInformationMessage(mcpSettings().port
+      ? 'xDev AI MCP configuration copied. Keep it private; it keeps working until you rotate the token or change the port.'
+      : 'xDev AI MCP configuration copied. Keep it private. The port changes when MCP restarts; set xdevAi.mcp.port to keep it.');
+  };
+  let toolCache: { key: string; tools: McpPanelState['tools'] } | undefined;
+  let fileCache: { time: number; setUp: boolean } | undefined;
+  const control: McpControl = {
+    state() {
+      const settings = mcpSettings();
+      const key = `${settings.level}|${settings.squadLevel}|${settings.confirmIn}`;
+      if (toolCache?.key !== key) {
+        toolCache = {
+          key, tools: xdevMcpTools(squad, accounts, profiles, host).map(({ name, description, annotations }) => ({
+            name, summary: firstSentence(description ?? ''), kind: annotations?.readOnlyHint ? 'read' as const : 'change' as const
+          }))
+        };
+      }
+      // The panel refreshes often while a worker runs; the file is read at most every two seconds.
+      if (!fileCache || Date.now() - fileCache.time > 2_000) fileCache = { time: Date.now(), setUp: hasXdevServer(readFolderFile()) };
+      return {
+        ready: ready(), running: Boolean(connection), url: connection?.url, port: settings.port, autoStart: settings.autoStart,
+        accountControl: settings.level, squadControl: settings.squadLevel, confirmIn: settings.confirmIn,
+        folder: vscode.workspace.workspaceFolders?.[0]?.name, folderSetUp: fileCache.setUp, tools: toolCache.tools
+      };
+    },
+    async start() {
+      if (!ready()) throw new Error('Open a trusted workspace folder to start xDev AI MCP.');
+      await start();
+    },
+    stop,
+    async set(key, value) {
+      const allowed: Record<McpSettingKey, readonly unknown[]> = {
+        accountControl: accountControlLevels, squadControl: squadControlLevels, confirmIn: confirmModes, autoStart: [true, false]
+      };
+      const name = mcpSettingKeys.find(candidate => candidate === key);
+      if (!name || !allowed[name].includes(value)) throw new Error('Unknown MCP setting.');
+      await vscode.workspace.getConfiguration('xdevAi.mcp').update(name, value, vscode.ConfigurationTarget.Global);
+      void audit?.record('user', 'mcp_setting', true, { key: name, value });
+    },
+    copyConfiguration,
+    async setUpFolder() {
+      const folder = vscode.workspace.workspaceFolders?.[0];
+      const file = folderFile();
+      if (!ready() || !folder || !file) throw new Error('Open a trusted workspace folder to set up xDev AI MCP.');
+      const settings = mcpSettings();
+      const keep = 'Keep current settings';
+      const pick = await vscode.window.showQuickPick([
+        ...setupPresets.map(({ label, description, detail }) => ({ label, description, detail })),
+        { label: keep, detail: `Accounts: ${settings.level} · Squad: ${settings.squadLevel} · Confirm in: ${settings.confirmIn === 'client' ? 'the AI client' : 'VS Code'}` }
+      ], { title: `Set up xDev AI MCP for ${folder.name}`, placeHolder: 'What may AI clients connected to this folder do?' });
+      if (!pick || disposed) return;
+      const preset = setupPresets.find(candidate => candidate.label === pick.label);
+      const config = vscode.workspace.getConfiguration('xdevAi.mcp');
+      const port = settings.port || await freePort(7788);
+      configuring = true;
+      try {
+        for (const [key, value] of Object.entries(preset?.values ?? {})) await config.update(key, value, vscode.ConfigurationTarget.Global);
+        // A fixed port and automatic start keep the folder's configuration working after VS Code restarts.
+        if (port !== settings.port) await config.update('port', port, vscode.ConfigurationTarget.Global);
+        if (!settings.autoStart) await config.update('autoStart', true, vscode.ConfigurationTarget.Global);
+      } finally {
+        configuring = false;
+      }
+      await restart();
+      await writeFile(file, withXdevServer(readFolderFile(), port));
+      fileCache = undefined;
+      void audit?.record('user', 'mcp_setup_folder', true, { folder: folder.name, preset: pick.label, port });
+      notifyMcpChanged();
+      const open = 'Open AI Terminal';
+      const show = 'Show .mcp.json';
+      void vscode.window.showInformationMessage(
+        `xDev AI MCP is set up for ${folder.name} (${pick.label}). Claude Code sessions that xDev AI opens in this folder find the server in .mcp.json and ask once to use it. Reopen AI terminals that were already open.`, open, show
+      ).then(choice => {
+        if (choice === open) return vscode.commands.executeCommand('xdevAi.openTerminal');
+        if (choice === show) return vscode.window.showTextDocument(vscode.Uri.file(file));
+      });
+    },
+    async environment(): Promise<Record<string, string>> {
+      const settings = mcpSettings();
+      if (!ready()) return {};
+      // With a fixed port and automatic start the address is known before the server is up.
+      const url = connection?.url ?? (settings.port && settings.autoStart ? `http://127.0.0.1:${settings.port}/mcp` : undefined);
+      return url ? { [mcpUrlVariable]: url, [mcpTokenVariable]: await token() } : {};
+    }
+  };
+  setMcpControl(control);
+  const runSetup = () => control.setUpFolder().catch(error =>
+    void vscode.window.showErrorMessage(`xDev AI MCP could not be set up. ${error instanceof Error ? error.message : ''}`));
+  context.subscriptions.push(vscode.commands.registerCommand('xdevAi.initMcp', runSetup));
   const autoStart = () => {
     if (disposed || connection || !ready() || !mcpSettings().autoStart) return;
     start().catch(error => {
@@ -755,6 +911,8 @@ export function registerXdevMcp(
     vscode.workspace.onDidChangeWorkspaceFolders(autoStart),
     vscode.workspace.onDidChangeConfiguration(event => {
       if (!event.affectsConfiguration('xdevAi.mcp')) return;
+      notifyMcpChanged();
+      if (configuring) return;
       if (connection) {
         // Tools and their access level are fixed for a running server, so restart it with the new settings.
         restart().catch(error => void vscode.window.showErrorMessage(`xDev AI MCP could not restart. ${error instanceof Error ? error.message : ''}`));
@@ -782,6 +940,7 @@ export function registerXdevMcp(
     manageOpen = true;
     try {
       const settings = mcpSettings();
+      const setupLabel = 'Set Up for This Folder';
       const startLabel = 'Start MCP';
       const stopLabel = 'Stop MCP';
       const restartLabel = 'Restart MCP';
@@ -793,6 +952,7 @@ export function registerXdevMcp(
       const autoLabel = `Start Automatically: ${settings.autoStart ? 'on' : 'off'}`;
       const auditLabel = 'Show Audit Log';
       const items: vscode.QuickPickItem[] = [
+        { label: setupLabel, detail: 'Choose what AI clients may do, keep a fixed port, start the server, and add it to the .mcp.json of this folder.' },
         ...(connection ? [{ label: copyLabel }, { label: restartLabel }, { label: stopLabel }] : [{ label: startLabel }]),
         { label: '', kind: vscode.QuickPickItemKind.Separator },
         { label: levelLabel, description: 'off · read · manage', detail: 'What AI clients may do with your accounts. Changes always ask you first when they delete, sign in, or bypass.' },
@@ -807,6 +967,7 @@ export function registerXdevMcp(
         placeHolder: connection ? 'Connect a client or change the server' : 'Enable local MCP access for this workspace window'
       }))?.label;
       if (disposed || !action) return;
+      if (action === setupLabel) await control.setUpFolder();
       if (action === stopLabel) stop();
       if (action === startLabel || action === restartLabel) {
         await (action === startLabel ? start() : restart());
@@ -854,16 +1015,7 @@ export function registerXdevMcp(
       }
       if (action === rotateLabel) await vscode.commands.executeCommand('xdevAi.rotateMcpToken');
       if (action === auditLabel) await vscode.commands.executeCommand('xdevAi.showAuditLog');
-      if (action === copyLabel && connection) {
-        const client = await vscode.window.showQuickPick(['Claude Code', 'Claude Code (command)', 'Codex', 'Gemini CLI', 'VS Code'], {
-          title: 'Copy xDev AI MCP Configuration', placeHolder: 'The copied configuration includes a private token'
-        });
-        if (!client || !connection) return;
-        await vscode.env.clipboard.writeText(clientConfig(client, connection));
-        void vscode.window.showInformationMessage(settings.port
-          ? 'xDev AI MCP configuration copied. Keep it private; it keeps working until you rotate the token or change the port.'
-          : 'xDev AI MCP configuration copied. Keep it private. The port changes when MCP restarts; set xdevAi.mcp.port to keep it.');
-      }
+      if (action === copyLabel && connection) await copyConfiguration();
     } catch (error) {
       void vscode.window.showErrorMessage(`xDev AI MCP could not complete the operation. ${error instanceof Error ? error.message : ''}`);
     } finally {

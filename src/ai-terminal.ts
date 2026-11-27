@@ -11,6 +11,7 @@ import {
 } from './terminal-profiles';
 import { highestUse, planLabel, registerUsageStatus, type UsageStatus } from './usage-status';
 import type { AuditLog } from './audit';
+import { mcpControl } from './mcp-control';
 
 type Action = 'add' | 'open' | 'bypass' | 'signIn' | 'usage' | 'rename' | 'remove' | 'edit';
 
@@ -236,6 +237,8 @@ export function registerAiTerminals(context: vscode.ExtensionContext, profiles: 
     const remote = Boolean(vscode.env.remoteName) || vscode.env.uiKind === vscode.UIKind.Web;
     const args = terminalArguments(provider, signIn ? 'signIn' : bypass ? 'bypass' : 'open', remote);
     const env = terminalProfileEnv(profile);
+    // The address and token of xDev AI MCP, which a .mcp.json written by "Set up for this folder" refers to.
+    Object.assign(env, await mcpControl()?.environment().catch(() => ({})));
     const document = vscode.window.activeTextEditor?.document.uri;
     const folder = (document && vscode.workspace.getWorkspaceFolder(document)) ?? vscode.workspace.workspaceFolders?.[0];
     if (provider === 'claude' && signIn) await unlink(join(profile.configDir, claudeQuotaFile)).catch(() => undefined);

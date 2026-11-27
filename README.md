@@ -241,6 +241,18 @@ Open **xDev Squad → Memory** or run **xDev AI: Open Squad Memory**. Memory hol
 - To share skills and memory across machines and teammates, click **Sync with folder** (or run **xDev AI: Sync Squad Skills and Memory**) and choose a folder, usually a clone of your team docs repository (`xdevAi.squad.syncFolder`). Skills are stored as `skills/<name>/SKILL.md` and memory as `memory/squad-memory.json`. In a git folder, xDev pulls with `--ff-only`, merges, commits locally, and asks before pushing. When the same skill changed on both sides, your version stays and the folder version is added as a disabled “(sync copy)” skill.
 - Use the tool switches to control Copilot access to **Ask xDev Squad**, **Manage xDev Squad Plan**, and **xDev SDLC Workflow** in this workspace. The SDLC switch also controls MCP access to the workflow. In supported VS Code versions, use the panel shortcuts to open native **Agent Skills** and **Tools & MCP** management. [VS Code agent customizations](https://code.visualstudio.com/docs/agent-customization/overview)
 
+### Set up MCP for a folder
+
+Open **xDev Squad → MCP** (or run **xDev AI: Open MCP Settings**) to see whether the server runs, what connected clients may do, and every tool they can call. Click **Set up for this folder**, or run **xDev AI: Set Up MCP for This Folder**:
+
+1. Choose what AI clients may do: **Full control** (manage accounts, lead Squad, confirm in the client), **Lead Squad**, **Read only**, or keep your current settings.
+2. xDev AI keeps a fixed port (7788 when it is free), turns on automatic start, and starts the server.
+3. It adds the `xdev_ai` server to the folder's `.mcp.json`; other servers in the file are kept.
+
+The file names two variables, `XDEV_AI_MCP_URL` and `XDEV_AI_MCP_TOKEN`, instead of the token, so it holds no secret. xDev AI sets them in every AI terminal it opens while the server runs or starts automatically. Open a Claude Code terminal from xDev AI in the folder; Claude Code asks once to use the server from `.mcp.json`. Reopen terminals that were open before the setup or before a token rotation. In a session started elsewhere the variables are missing: the server shows as failed and the rest of the session works. For such sessions, and for Codex and Gemini CLI, copy the client configuration as described below.
+
+The variables are visible to programs that run in those terminals. Stop the server, or do not start it automatically, when you do not want that.
+
 ### Control the workflow through MCP
 
 1. In a trusted workspace, open **xDev Squad → Skills & Tools → Manage MCP** or run **xDev AI: Manage MCP**. Choose **Start MCP**.
@@ -271,7 +283,7 @@ Try “Use xDev AI to tag my Claude accounts by team and put the ones with the m
 A connected client can act as the Squad lead: it plans the work, hands each task to one of your Claude Code accounts, runs the steps, and reads the results. This also works from a Claude Code session you control remotely (Remote Control), because that session runs on the workspace host. The account of that session plans; your other accounts do the work.
 
 1. Under **Manage MCP → Squad Control**, choose `run` (`xdevAi.mcp.squadControl`, user or remote settings only; `off` by default). Keep `xdevAi.mcp.accountControl` at `read` or higher so the client can list accounts.
-2. Connect the client (see [Control the workflow through MCP](#control-the-workflow-through-mcp)). For remote use, set a fixed `xdevAi.mcp.port` and turn on `xdevAi.mcp.autoStart`.
+2. Connect the client. **Set up for this folder** with **Full control** or **Lead Squad** does steps 1 and 2 at once (see [Set up MCP for a folder](#set-up-mcp-for-a-folder)); otherwise copy the client configuration and, for remote use, set a fixed `xdevAi.mcp.port` and turn on `xdevAi.mcp.autoStart`.
 3. Ask, for example: “Use xDev AI to add a health endpoint: give the implementation to the account with the most quota left and the review to another account, then show me the result.”
 
 | Level | Tools |

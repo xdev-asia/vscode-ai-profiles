@@ -215,6 +215,18 @@
         "icon": "$(output)"
       },
       {
+        "command": "xdevAi.initMcp",
+        "title": "Set Up MCP for This Folder",
+        "category": "xDev AI",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "xdevAi.squad.mcp",
+        "title": "Open MCP Settings",
+        "category": "xDev AI",
+        "icon": "$(plug)"
+      },
+      {
         "command": "xdevAi.rotateMcpToken",
         "title": "Rotate MCP Token",
         "category": "xDev AI",
@@ -322,6 +334,16 @@
           "command": "xdevAi.manageMcp",
           "when": "view == xdevAi.claude.accounts || view == xdevAi.squad",
           "group": "1_workspace@3"
+        },
+        {
+          "command": "xdevAi.initMcp",
+          "when": "view == xdevAi.claude.accounts || view == xdevAi.squad",
+          "group": "1_workspace@4"
+        },
+        {
+          "command": "xdevAi.squad.mcp",
+          "when": "view == xdevAi.claude.accounts || view == xdevAi.squad",
+          "group": "1_workspace@5"
         },
         {
           "command": "xdevAi.checkAccountHealth",
