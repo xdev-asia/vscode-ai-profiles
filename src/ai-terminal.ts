@@ -22,9 +22,10 @@ export interface TerminalAccounts {
   changed(): void;
   /**
    * Runs an account action for the account id without asking which account. `remove` and `bypass` still ask the
-   * user to confirm. Resolves false when the user cancels; throws when the action fails.
+   * user to confirm, unless `confirmed` says the user already did so elsewhere. Resolves false when the user
+   * cancels; throws when the action fails.
    */
-  perform(action: 'open' | 'bypass' | 'signIn' | 'remove', id: string): Promise<boolean>;
+  perform(action: 'open' | 'bypass' | 'signIn' | 'remove', id: string, confirmed?: boolean): Promise<boolean>;
 }
 type AccountTarget = TerminalAccountItem | string;
 type AccountTreeItem = TerminalAccountItem | UsageWindowItem;
@@ -184,7 +185,8 @@ export function registerAiTerminals(context: vscode.ExtensionContext, profiles: 
     action: Exclude<Action, 'rename' | 'remove' | 'edit'>,
     target?: AccountTarget,
     token?: vscode.CancellationToken,
-    provider?: TerminalProvider
+    provider?: TerminalProvider,
+    confirmed = false
   ): Promise<{ options: vscode.TerminalOptions; provider: TerminalProvider; signIn: boolean } | undefined> {
     const bypass = action === 'bypass';
     if (bypass && !vscode.workspace.isTrusted) throw new Error('Trust this workspace before opening a bypass session.');
@@ -222,7 +224,7 @@ export function registerAiTerminals(context: vscode.ExtensionContext, profiles: 
     }
     if (token?.isCancellationRequested) return;
 
-    if (bypass) {
+    if (bypass && !confirmed) {
       const open = 'Open with Bypass';
       if (await vscode.window.showWarningMessage(`Open ${name} for “${profile.name}” with bypass permissions?`, {
         modal: true,
@@ -272,12 +274,14 @@ export function registerAiTerminals(context: vscode.ExtensionContext, profiles: 
   }
 
   /** Runs an action and resolves false when the user cancels. Errors are thrown to the caller. */
-  async function perform(action: Action, provider?: TerminalProvider, target?: AccountTarget, source: 'user' | 'mcp' = 'user'): Promise<boolean> {
+  async function perform(
+    action: Action, provider?: TerminalProvider, target?: AccountTarget, source: 'user' | 'mcp' = 'user', confirmed = false
+  ): Promise<boolean> {
     if (action === 'remove') {
       const profile = (await selectProfile(action, provider, target))?.profile;
       if (!profile) return false;
       const choice = 'Delete Account';
-      if (await vscode.window.showWarningMessage(`Delete “${profile.name}” (${terminalProviders[profile.provider].name})?`, {
+      if (!confirmed && await vscode.window.showWarningMessage(`Delete “${profile.name}” (${terminalProviders[profile.provider].name})?`, {
         modal: true,
         detail: `${source === 'mcp' ? 'An AI client connected through xDev AI MCP asked for this. ' : ''}This closes its terminals and deletes the local profile, sign-in data, and CLI history stored in its directory.`
       }, choice) !== choice) return false;
@@ -305,7 +309,7 @@ export function registerAiTerminals(context: vscode.ExtensionContext, profiles: 
       return true;
     }
     if (action === 'edit') return false;
-    const terminal = await prepareTerminal(action, target, undefined, provider);
+    const terminal = await prepareTerminal(action, target, undefined, provider, confirmed);
     if (!terminal) return false;
     vscode.window.createTerminal(terminal.options).show();
     return true;
@@ -531,6 +535,6 @@ export function registerAiTerminals(context: vscode.ExtensionContext, profiles: 
     onDidChange: accountsChanged.event,
     usage: usageStatus,
     changed: () => accountsChanged.fire(),
-    perform: (action, id) => perform(action, undefined, id, 'mcp')
+    perform: (action, id, confirmed) => perform(action, undefined, id, 'mcp', confirmed === true)
   };
 }

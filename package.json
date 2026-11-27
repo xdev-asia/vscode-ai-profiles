@@ -612,6 +612,36 @@
           ],
           "markdownDescription": "What AI clients connected to xDev AI MCP may do with your accounts. MCP never returns API keys, sign-in files, or account directories. Changes are listed in **xDev AI: Show Audit Log**. Set only in user or remote settings, not by a workspace."
         },
+        "xdevAi.mcp.squadControl": {
+          "type": "string",
+          "enum": [
+            "off",
+            "read",
+            "run"
+          ],
+          "default": "off",
+          "scope": "machine",
+          "enumDescriptions": [
+            "MCP clients get no Squad tools.",
+            "MCP clients may see the pending plan, runs, steps, results, and diffs.",
+            "MCP clients may also act as the lead: submit a plan that hands tasks to your Claude Code accounts, approve it, run and skip steps, request changes, and commit a run to its local branch. Merging, pushing, and deploying stay in VS Code."
+          ],
+          "markdownDescription": "What AI clients connected to xDev AI MCP may do with Squad. With `run`, a client such as a Claude Code session you control remotely plans the work and runs worker steps under your accounts, without a VS Code dialog; the client's own permission prompt is the check. Every call is listed in **xDev AI: Show Audit Log**. Set only in user or remote settings, not by a workspace."
+        },
+        "xdevAi.mcp.confirmIn": {
+          "type": "string",
+          "enum": [
+            "vscode",
+            "client"
+          ],
+          "default": "vscode",
+          "scope": "machine",
+          "enumDescriptions": [
+            "A dialog in VS Code confirms sign-in, bypass sessions, deletions, and SDLC stage approval. The AI client cannot answer it.",
+            "The tool returns a confirmation id and makes no change. The AI client asks you and calls `xdev_confirm`; a VS Code notification can approve the same request. Use it when you are away from VS Code."
+          ],
+          "markdownDescription": "Where xDev AI MCP confirms changes that need your yes. With `client`, keep permission prompts on in the AI client: a client that skips its prompts can confirm for you. Adding an API profile always needs VS Code, where you type the key. Set only in user or remote settings, not by a workspace."
+        },
         "xdevAi.mcp.autoStart": {
           "type": "boolean",
           "default": false,

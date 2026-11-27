@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Lead Squad from an MCP client** (`xdevAi.mcp.squadControl`: `off`, `read`, `run`; `off` by default). With `run`, a connected client, such as a Claude Code session you control remotely, submits a plan that hands each task to a Claude Code account (`xdev_squad_submit_plan`), approves it, runs and skips steps, requests changes, and commits the run to its local branch. `read` shows the plan, runs, results, and diffs. Merging, pushing, and deploying stay in VS Code.
+- **Confirm changes in the client** (`xdevAi.mcp.confirmIn`: `vscode`, `client`). With `client`, sign-in, bypass sessions, deletions, and SDLC stage approval return a confirmation id and change nothing until the client calls `xdev_confirm`; a VS Code notification can approve the same request. Use it when you cannot reach the VS Code dialog.
+- **Manage MCP** has **Squad Control** and **Confirm Changes In** entries.
+
+### Changed
+
+- A plan from an MCP client keeps the order of its tasks and may use a role more than once, each with its own account.
+- Requested changes on a run whose Implement role has no assigned account go back to the account that implemented the change.
+
 ## 0.17.0 - 2026-11-26
 
 ### Added

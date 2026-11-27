@@ -248,7 +248,7 @@ Open **xDev Squad → Memory** or run **xDev AI: Open Squad Memory**. Memory hol
 3. For a terminal client, reopen **Manage MCP** and choose **Copy Client Configuration**, then choose Claude Code, Codex, or Gemini CLI. Merge the snippet into the client's private config on the workspace host. For an xDev terminal profile, use `$CODEX_HOME/config.toml` for Codex or `$GEMINI_CLI_HOME/.gemini/settings.json` for Gemini CLI. In Claude Code, you can use `claude mcp add-json xdev_ai '<server definition>'` with the `mcpServers.xdev_ai` object from the snippet. Restart the client or refresh its MCP connections. [Claude Code configuration](https://code.claude.com/docs/en/mcp) · [Codex configuration](https://developers.openai.com/codex/config-reference/) · [Gemini CLI configuration](https://geminicli.com/docs/tools/mcp-server/)
 4. Ask your agent to “Use xDev AI to show the current SDLC stage and submit a draft for review.” The draft appears in **Workflow**. Approve it there, or ask the agent to request approval in a VS Code dialog.
 
-The MCP server exposes workflow status, start, stage context, draft submission, approval requests, and the account tools described below. It shares the same workspace state as the Squad panel. A confirmed approval advances the current stage. The server exposes no account credentials or shell execution tools. Stage context includes the project brief, excerpts of approved results, and enabled skills, so only connect clients you trust with that context.
+The MCP server exposes workflow status, start, stage context, draft submission, approval requests, and the account and Squad tools described below. It shares the same workspace state as the Squad panel. A confirmed approval advances the current stage. The server exposes no account credentials or shell execution tools. Stage context includes the project brief, excerpts of approved results, and enabled skills, so only connect clients you trust with that context.
 
 MCP listens on a loopback address on the workspace host, including on code-server. The client must run on that same host. Keep the copied configuration private and out of source control. **Stop MCP** ends access. The token is saved in VS Code SecretStorage and stays the same until you run **xDev AI: Rotate MCP Token**.
 
@@ -262,9 +262,39 @@ MCP listens on a loopback address on the workspace host, including on code-serve
 | --- | --- |
 | `off` | No account tools. |
 | `read` (default) | `xdev_accounts_list` (tags, note, disabled flag, plan, sign-in state, quota), `xdev_account_usage`, `xdev_accounts_pick` (the enabled, signed-in account with the most quota left, by provider or tag). |
-| `manage` | Also `xdev_account_rename`, `xdev_account_set_tags`, `xdev_account_set_note`, `xdev_account_set_disabled`, `xdev_account_refresh_usage`, `xdev_terminal_open`, `xdev_api_profile_select`, `xdev_squad_set_pool`. These always ask you in a VS Code dialog: `xdev_terminal_sign_in`, `xdev_terminal_open_bypass`, `xdev_account_remove`, `xdev_api_profile_add` (you type the key; the client never sees it), `xdev_api_profile_remove`. |
+| `manage` | Also `xdev_account_rename`, `xdev_account_set_tags`, `xdev_account_set_note`, `xdev_account_set_disabled`, `xdev_account_refresh_usage`, `xdev_terminal_open`, `xdev_api_profile_select`, `xdev_squad_set_pool`. These always ask you to confirm (in a VS Code dialog, or in the client with `xdevAi.mcp.confirmIn`): `xdev_terminal_sign_in`, `xdev_terminal_open_bypass`, `xdev_account_remove`, `xdev_api_profile_add` (you type the key; the client never sees it), `xdev_api_profile_remove`. |
 
 Try “Use xDev AI to tag my Claude accounts by team and put the ones with the most quota in the Squad pool.” MCP never returns API keys, sign-in files, or account directories. Every change and failed attempt is written to the audit log.
+
+### Lead Squad from an MCP client
+
+A connected client can act as the Squad lead: it plans the work, hands each task to one of your Claude Code accounts, runs the steps, and reads the results. This also works from a Claude Code session you control remotely (Remote Control), because that session runs on the workspace host. The account of that session plans; your other accounts do the work.
+
+1. Under **Manage MCP → Squad Control**, choose `run` (`xdevAi.mcp.squadControl`, user or remote settings only; `off` by default). Keep `xdevAi.mcp.accountControl` at `read` or higher so the client can list accounts.
+2. Connect the client (see [Control the workflow through MCP](#control-the-workflow-through-mcp)). For remote use, set a fixed `xdevAi.mcp.port` and turn on `xdevAi.mcp.autoStart`.
+3. Ask, for example: “Use xDev AI to add a health endpoint: give the implementation to the account with the most quota left and the review to another account, then show me the result.”
+
+| Level | Tools |
+| --- | --- |
+| `off` (default) | No Squad tools. |
+| `read` | `xdev_squad_status` (the running step with its live activity, pending plan, role accounts, and every kept run with its status), `xdev_squad_run` (steps, results, AI reviews, branch, worktree, session ids, and diffs with `changes`), `xdev_squad_wait`. |
+| `run` | Also `xdev_squad_submit_plan`, `xdev_squad_approve_plan`, `xdev_squad_discard_plan`, `xdev_squad_run_step`, `xdev_squad_skip_step`, `xdev_squad_request_changes`, `xdev_squad_finish_run`, `xdev_squad_stop`, and `xdev_squad_ask` (a message to Squad's own Lead or a role). |
+
+A plan has one to eight tasks. Each task names a role (Implement, Review, Tests), a brief, and optionally an `account` id from `xdev_accounts_list`; without one the task uses the account pool or the role's account. Tasks run in the order given, one at a time, and a role may appear more than once. The plan and every step also show in **xDev Squad → Chat**, where you can take over at any point: **Worker runs** lists each run with the state of its steps and a live feed of the step that is running, and **Resume … session** opens a finished headless step as an interactive Claude Code session under its account.
+
+Workers follow the same rules as a run started in the panel: a git worktree on a local branch `xdev/squad/<id>`, the allowed commands, the spending cap, and the MCP servers granted in project settings. A long step returns `finished: false` after its wait time and keeps working; the client calls `xdev_squad_wait`. `xdev_squad_finish_run` commits to the local branch. Merging, pushing, and deploying stay in VS Code.
+
+These tools show no VS Code dialog, so the client's own permission prompt is the check on each call. Give `run` only to clients you would let start workers under your accounts. Every call is written to the audit log.
+
+### Confirm changes away from VS Code
+
+Signing in, bypass sessions, deletions, and SDLC stage approval ask for your yes. By default that is a VS Code dialog, which you cannot answer when you work through a remote client. Under **Manage MCP → Confirm Changes In**, choose `client` (`xdevAi.mcp.confirmIn`, user or remote settings only):
+
+1. The tool makes no change. It returns a confirmation id with the title and detail of the request.
+2. The client shows you the request and, after your yes, calls `xdev_confirm`. Its permission prompt for that call is your confirmation. A notification in VS Code can approve the same request when you are at your desk.
+3. A confirmation works once and expires after 10 minutes.
+
+Keep permission prompts on in a client you use this way: a client that skips its prompts can call `xdev_confirm` without you. Adding an API profile still needs VS Code, where you type the key.
 
 ### Manage a role manually
 
