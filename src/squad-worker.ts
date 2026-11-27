@@ -30,7 +30,7 @@ export interface WorkerResult extends WorkerReport {
 
 export interface PlanReport {
   reply: string;
-  tasks: { role: string; brief: string; repo?: string }[];
+  tasks: { role: string; brief: string; repo?: string; model?: string }[];
   sessionId?: string;
 }
 
@@ -130,7 +130,8 @@ const planSchema = {
         properties: {
           role: { type: 'string' },
           brief: { type: 'string' },
-          repo: { type: 'string', description: 'The repository from "repositories" this task works in. Empty when there is only one.' }
+          repo: { type: 'string', description: 'The repository from "repositories" this task works in. Empty when there is only one.' },
+          model: { type: 'string', description: 'Optional, for Claude Code workers: "haiku" for simple mechanical work, "sonnet" for most coding, "opus" for the hardest tasks. Omit to use the configured default.' }
         },
         required: ['role', 'brief']
       }
@@ -171,6 +172,12 @@ export function workerTools(
     tools: [...readTools, 'Edit', 'Write', 'Bash'],
     allowed: [...reads, 'Edit', 'Write', ...commands]
   };
+}
+
+/** A Claude Code model alias (haiku, sonnet, opus) or model id for one task, or nothing when the text is not one. */
+export function workerModel(input: unknown): string | undefined {
+  const model = typeof input === 'string' ? input.trim() : '';
+  return /^[\w.:[\]-]{1,80}$/.test(model) ? model : undefined;
 }
 
 export function validCommand(command: unknown): command is string {
@@ -402,7 +409,8 @@ export function parsePlanOutput(stdout: string): PlanReport & { costUsd: number 
     tasks: plan.tasks.map(task => ({
       role: typeof task?.role === 'string' ? task.role : '',
       brief: typeof task?.brief === 'string' ? task.brief : '',
-      ...(typeof task?.repo === 'string' && task.repo.trim() ? { repo: task.repo.trim() } : {})
+      ...(typeof task?.repo === 'string' && task.repo.trim() ? { repo: task.repo.trim() } : {}),
+      ...(workerModel(task?.model) ? { model: workerModel(task?.model) } : {})
     })),
     costUsd: typeof message.total_cost_usd === 'number' ? message.total_cost_usd : 0,
     ...(typeof message.session_id === 'string' ? { sessionId: message.session_id } : {})

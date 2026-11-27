@@ -486,7 +486,7 @@ export function xdevMcpTools(squad: SquadChat, accounts: Accounts, profiles: Ter
   // Squad control: the connected client acts as the lead. It plans, hands tasks to accounts, and reads results.
   const squadLevel = () => host?.squadLevel?.() ?? 'off';
   const stepView = (step: RunStep, index: number, brief: boolean) => ({
-    index, role: step.role, account: step.profile, kind: step.kind ?? 'api', repo: step.repo, status: step.status,
+    index, role: step.role, account: step.profile, kind: step.kind ?? 'api', repo: step.repo, model: step.model, status: step.status,
     ...(brief ? {} : {
       brief: clip(step.brief, 1_000), summary: step.summary === undefined ? undefined : clip(step.summary, 4_000),
       files: step.files?.slice(0, 80), review: step.gate && { verdict: step.gate.verdict, reason: step.gate.reason, by: step.gate.by },
@@ -509,7 +509,7 @@ export function xdevMcpTools(squad: SquadChat, accounts: Accounts, profiles: Ter
   });
   const planView = () => {
     const plan = squad.pendingPlan();
-    return plan ? { id: plan.id, tasks: plan.jobs.map(({ role, brief, profile, kind, repo }) => ({ role, account: profile, kind, repo, brief })) } : null;
+    return plan ? { id: plan.id, tasks: plan.jobs.map(({ role, brief, profile, kind, repo, model }) => ({ role, account: profile, kind, repo, model, brief })) } : null;
   };
   const entryView = ({ author, profile, text }: SquadChatEntry) => ({ author, account: profile, text: clip(text, 2_000) });
   const activity = () => {
@@ -616,11 +616,12 @@ export function xdevMcpTools(squad: SquadChat, accounts: Accounts, profiles: Ter
       role: { type: 'string', enum: ['Implement', 'Review', 'Tests'], description: 'Implement edits files, Review reads the diff, Tests adds and runs tests.' },
       brief: { type: 'string', maxLength: 4_000, description: 'What to do, written so the worker can act without this conversation: files, symbols, and the expected result.' },
       account: { type: 'string', maxLength: 200, description: 'Claude Code account id from xdev_accounts_list that does this task. Without it the task uses the account pool or the role’s account.' },
-      repo: { type: 'string', maxLength: 300, description: 'The repository the task works in, when the workspace holds several.' }
+      repo: { type: 'string', maxLength: 300, description: 'The repository the task works in, when the workspace holds several.' },
+      model: { type: 'string', maxLength: 80, description: 'The Claude Code model for this task, to match cost to difficulty: haiku for simple mechanical work (renames, small edits, running tests), sonnet for most coding, opus only for the hardest tasks. Without it the task uses the model configured for its role.' }
     }
   };
   const squadRunTools = [
-    squadRunTool('squad_submit_plan', 'Hand out work as the lead: save a plan of one to eight tasks for Squad workers. Each task names a worker role, a brief, and optionally the Claude Code account that does it. Tasks run in the order given, one at a time, in a git worktree on a new local branch. Nothing runs until xdev_squad_approve_plan.', {
+    squadRunTool('squad_submit_plan', 'Hand out work as the lead: save a plan of one to eight tasks for Squad workers. Each task names a worker role, a brief, and optionally the Claude Code account that does it and the model it uses; choose the cheapest model that can do each task. Tasks run in the order given, one at a time, in a git worktree on a new local branch. Nothing runs until xdev_squad_approve_plan.', {
       request: { type: 'string', maxLength: chatPromptLimit, description: 'The user’s request the plan answers.' },
       summary: { type: 'string', maxLength: 4_000, description: 'A short summary of the plan, shown in the Squad chat.' },
       tasks: { type: 'array', minItems: 1, maxItems: 8, items: taskSchema }

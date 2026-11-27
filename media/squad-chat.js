@@ -50,7 +50,7 @@ function mountSquadChat(vscode, roles) {
     byId('chat-jobs').replaceChildren(...(plan?.jobs ?? []).map((job, index) => {
       const row = document.createElement('li');
       const label = document.createElement('strong');
-      label.textContent = `${job.role} · ${job.profile}`;
+      label.textContent = `${job.role} · ${job.profile}${job.model ? ` · ${job.model}` : ''}`;
       const badge = document.createElement('span');
       badge.className = `badge ${job.kind}`;
       badge.textContent = job.kind === 'claude'
@@ -429,7 +429,7 @@ function mountSquadChat(vscode, roles) {
       run.steps.forEach((step, index) => {
         const row = element('li', undefined, `step ${step.status}${index === current ? ' current' : ''}`);
         const facts = [
-          step.role + (step.feedback ? ' (feedback)' : ''), multiple && step.repo ? step.repo : '', step.profile, stepLabels[step.status] ?? step.status,
+          step.role + (step.feedback ? ' (feedback)' : ''), multiple && step.repo ? step.repo : '', step.profile, step.model ?? '', stepLabels[step.status] ?? step.status,
           step.ms ? duration(step.ms) : '', step.attempts > 1 ? `${step.attempts} tries` : '', step.costUsd ? money(step.costUsd) : ''
         ].filter(Boolean);
         row.append(element('span', facts.join(' · ')));

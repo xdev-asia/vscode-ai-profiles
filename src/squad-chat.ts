@@ -9,7 +9,7 @@ import type { SquadArtifacts } from './squad-artifacts';
 import { SquadMemory } from './squad-memory';
 import { suggestRepository } from './squad-codegraph';
 import {
-  parseGateOutput, parsePlanOutput, parseWorkerOutput, type ActivityKind, type WorkerActivity, type WorkerMode, type WorkerRequest,
+  parseGateOutput, parsePlanOutput, parseWorkerOutput, workerModel, type ActivityKind, type WorkerActivity, type WorkerMode, type WorkerRequest,
   type WorkerResult, type WorkerSettings
 } from './squad-worker';
 import type { FileChange, PushResult, RunWorktree, Worktrees } from './squad-worktree';
@@ -47,6 +47,8 @@ interface Job {
   pooled?: boolean;
   /** A worker session this step continues (`--resume`), such as Implement applying review feedback. */
   resume?: string;
+  /** The model the lead chose for this Claude Code step, instead of the role's configured one. */
+  model?: string;
 }
 
 interface Plan {
@@ -488,7 +490,9 @@ export class SquadChat {
     return plan && {
       id: plan.id,
       repos: plan.repos,
-      jobs: plan.jobs.map(({ role, brief, profile, kind, repo }) => ({ role, brief, profile, kind: kind ?? 'api' as AgentKind, ...(repo ? { repo } : {}) }))
+      jobs: plan.jobs.map(({ role, brief, profile, kind, repo, model }) => ({
+        role, brief, profile, kind: kind ?? 'api' as AgentKind, ...(repo ? { repo } : {}), ...(model ? { model } : {})
+      }))
     };
   }
 
@@ -572,7 +576,7 @@ export class SquadChat {
         ? `${worker} (Claude Code worker: reads the repository, ${worker === 'Review' ? 'reviews the diff' : 'edits files and runs allowed commands'} in a git worktree)`
         : `${worker} (text API: proposes text only)`);
       const leadSystem = `${roleInstructions.Lead} ${agent.kind === 'api' ? textOnly : 'You may read the repository (read-only) to answer or to make briefs concrete; do not change files. Start from "code" when given, and keep reading short.'} Available worker roles: ${capabilities.join(', ') || 'none'}.
-Return only a JSON object with a "reply" string and a "tasks" array. Each task has a "role" from the available worker roles and a "brief" string${multiple ? ' and a "repo"' : ''}. Use each role at most once${multiple ? ' per repository' : ''}. Use an empty tasks array for questions, summaries, or when no workers are available. Write briefs that a worker can act on without the chat history. Reply in the user's language. ${options.planApproval === 'auto' ? 'Proposed tasks start as soon as you return them, so propose tasks only when the request asks for a change; keep the reply to a short summary of the plan (at most 80 words).' : 'The user reviews proposed tasks in the xDev Squad panel and approves them with a button, then starts each step there, so keep the reply to a short summary of the plan (at most 80 words) and do not ask the user to reply to start it.'}${multiple ? ' Each Claude Code task runs in one git repository from "repositories": set its "repo" to that entry exactly. A change that spans repositories, such as a backend API and the frontend screen that calls it, gets one Implement task per repository, listed so that dependencies come first. Write file paths relative to the task\'s repository root.' : ''}${allowedCommands?.includes('*') ? ' Claude Code workers may run any shell command.' : allowedCommands ? ` Claude Code workers may only run "allowed_commands"${perRepository ? ' plus, in a repository listed in "repository_commands", the commands listed for it' : ''} and read-only git; do not ask them to run anything else, and do not tell them a command is not allowed.` : ''} When given, "code" is a CodeGraph excerpt of the relevant symbols and call paths: name concrete files and symbols in each brief so workers do not have to search.${keepLead ? ' Later turns of this chat continue this session: they send only the new request, "history" since your last reply, and "memory", "allowed_commands", "repository_commands", or "repositories" when they changed.' : ''}`;
+Return only a JSON object with a "reply" string and a "tasks" array. Each task has a "role" from the available worker roles and a "brief" string${multiple ? ' and a "repo"' : ''}. Use each role at most once${multiple ? ' per repository' : ''}.${claudeWorkers ? ' To save cost, a task for a Claude Code worker may set "model": "haiku" for simple mechanical work such as renames, small edits, or running tests; "sonnet" for most coding; "opus" only for the hardest tasks. Omit "model" to use the configured default.' : ''} Use an empty tasks array for questions, summaries, or when no workers are available. Write briefs that a worker can act on without the chat history. Reply in the user's language. ${options.planApproval === 'auto' ? 'Proposed tasks start as soon as you return them, so propose tasks only when the request asks for a change; keep the reply to a short summary of the plan (at most 80 words).' : 'The user reviews proposed tasks in the xDev Squad panel and approves them with a button, then starts each step there, so keep the reply to a short summary of the plan (at most 80 words) and do not ask the user to reply to start it.'}${multiple ? ' Each Claude Code task runs in one git repository from "repositories": set its "repo" to that entry exactly. A change that spans repositories, such as a backend API and the frontend screen that calls it, gets one Implement task per repository, listed so that dependencies come first. Write file paths relative to the task\'s repository root.' : ''}${allowedCommands?.includes('*') ? ' Claude Code workers may run any shell command.' : allowedCommands ? ` Claude Code workers may only run "allowed_commands"${perRepository ? ' plus, in a repository listed in "repository_commands", the commands listed for it' : ''} and read-only git; do not ask them to run anything else, and do not tell them a command is not allowed.` : ''} When given, "code" is a CodeGraph excerpt of the relevant symbols and call paths: name concrete files and symbols in each brief so workers do not have to search.${keepLead ? ' Later turns of this chat continue this session: they send only the new request, "history" since your last reply, and "memory", "allowed_commands", "repository_commands", or "repositories" when they changed.' : ''}`;
       const standing = {
         memory: memory.length ? memory : undefined, allowed_commands: allowedCommands,
         repository_commands: perRepository ? repositoryCommands : undefined,
@@ -772,9 +776,13 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
         if (named && !repositories.includes(named)) throw new Error(`${label}: unknown repository ${shorten(named, 80)}. Choose from: ${repositories.slice(0, 40).join(', ')}.`);
         repo = named || suggestRepository(repositories, [brief]);
       }
+      const wanted = (task as { model?: unknown }).model;
+      const model = wanted === undefined || wanted === null || wanted === '' ? undefined : workerModel(wanted);
+      if (wanted !== undefined && wanted !== null && wanted !== '' && !model) throw new Error(`${label}: the model is an alias such as haiku, sonnet, or opus, or a model id.`);
+      if (model && agent.kind !== 'claude') throw new Error(`${label}: a model can be chosen only for a Claude Code account; ${agent.name} is an API profile with its own model.`);
       jobs.push({
         role, brief, profile: agent.name, kind: agent.kind, accountId: agent.id, revision: agent.revision,
-        ...(repo ? { repo } : {}), ...(pooled ? { pooled } : {})
+        ...(repo ? { repo } : {}), ...(pooled ? { pooled } : {}), ...(model ? { model } : {})
       });
     }
     // Tasks without their own account share the pool, in turn or by quota, like a plan from Lead.
@@ -1003,7 +1011,8 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
         const changed = step.role !== 'Implement'
           ? await this.host!.worktrees.changedFiles?.(tree).catch(() => []) ?? [] : [];
         const graph = await this.host!.codegraphRoot?.().catch(() => undefined);
-        const settings = this.host!.settings(step.role, tree.target);
+        const configured = this.host!.settings(step.role, tree.target);
+        const settings = step.model ? { ...configured, model: step.model } : configured;
         const shared = await this.artifacts?.context().catch(() => []) ?? [];
         const environment = settings.env && Object.keys(settings.env).length
           ? { note: 'Already set for your commands from the project\'s .env files. Do not look for, read, or print .env files.', names: Object.keys(settings.env).slice(0, 100) }
@@ -1809,7 +1818,9 @@ function parsePlan(
         : typeof task.repo === 'string' && repositories.includes(task.repo.trim().replace(/\/+$/, '')) ? task.repo.trim().replace(/\/+$/, '') : undefined;
     const duplicate = jobs.some(job => job.role === role && (repositories.length < 2 || (repo !== undefined && job.repo === repo)));
     if (!agent || !brief || brief.length > 4_000 || duplicate || jobs.length >= 8) return { reply, jobs: [], invalid: true };
-    jobs.push({ role, brief, profile: agent.name, kind: agent.kind, accountId: agent.id, revision: agent.revision, ...(repo ? { repo } : {}) });
+    // Lead may pick a cheaper or stronger model per task; a value that is not a model name is dropped.
+    const model = agent.kind === 'claude' ? workerModel(task.model) : undefined;
+    jobs.push({ role, brief, profile: agent.name, kind: agent.kind, accountId: agent.id, revision: agent.revision, ...(repo ? { repo } : {}), ...(model ? { model } : {}) });
   }
   // Implement steps come first, then Review, then Tests; Lead's order is kept within a role.
   jobs.sort((a, b) => workerRoles.indexOf(a.role) - workerRoles.indexOf(b.role));

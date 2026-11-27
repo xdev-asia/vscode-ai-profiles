@@ -6,6 +6,7 @@
 
 - **Shared artifacts** (**xDev Squad → Memory & Artifacts**): documents every account of a project can read and write, such as a design, a report, or a spec. A worker returns them with its result and later steps under any account can read them. AI clients use `xdev_artifacts_list`, `xdev_artifact_read`, and `xdev_artifact_save`. **Add file…** shares a file from disk.
 - An artifact can carry the address of the page it was published as on claude.ai. The page stays with the account that made it; the content is what the other accounts read.
+- **A model per task.** The lead may choose the Claude Code model of each task (`model` in `xdev_squad_submit_plan`, and in plans from Squad's own Lead): for example `haiku` for simple work and `opus` only for the hardest. Tasks without a choice use the role's model from `xdevAi.squad.workerModels`. The plan, the run, and `xdev_squad_run` show the model of each step.
 
 ### Changed
 
