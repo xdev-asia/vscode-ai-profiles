@@ -16,7 +16,8 @@
 
 - A plan from an MCP client keeps the order of its tasks and may use a role more than once, each with its own account.
 - Requested changes on a run whose Implement role has no assigned account go back to the account that implemented the change.
-- AI terminals opened by xDev AI get `XDEV_AI_MCP_URL` and `XDEV_AI_MCP_TOKEN` while the MCP server runs or starts automatically on a fixed port.
+- AI terminals opened by xDev AI get `XDEV_AI_MCP_URL` and `XDEV_AI_MCP_TOKEN` while the MCP server of their window runs.
+- When another window holds the fixed MCP port, a window starts its server on a free port instead of reporting that the port is in use. The MCP tab shows which port the window uses.
 - The **Manage MCP** button under Skills & Tools opens the MCP tab. The `xdev_ai` server in `.mcp.json` is not offered to Squad workers.
 
 ## 0.17.0 - 2026-11-26

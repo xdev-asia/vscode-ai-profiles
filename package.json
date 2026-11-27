@@ -668,7 +668,7 @@
           "type": "boolean",
           "default": false,
           "scope": "machine",
-          "markdownDescription": "Start xDev AI MCP when a trusted workspace folder opens. With several windows, set this together with `xdevAi.mcp.port` only if one window should serve MCP: the others report that the port is in use."
+          "markdownDescription": "Start xDev AI MCP when a trusted workspace folder opens. With several windows and a fixed `xdevAi.mcp.port`, the first window gets that port and each other window serves its own workspace on a free port."
         },
         "xdevAi.mcp.port": {
           "type": "number",

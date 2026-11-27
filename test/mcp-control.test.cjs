@@ -116,6 +116,14 @@ test('the MCP tab shows the server, sets what clients may do, and sets up the fo
   assert.equal(ui.$('#mcp-autoStart').checked, true);
   assert.deepEqual([...ui.$('#mcp-tools').querySelectorAll('small')].map(node => node.textContent), ['read', 'change']);
 
+  assert.match(ui.$('#mcp-port').textContent, /^Port 7788, kept across restarts/);
+
+  // A second window cannot have the fixed port; it says which port it uses instead.
+  ui.post(state({ ...running, url: 'http://127.0.0.1:51234/mcp', portBusy: true }));
+  assert.match(ui.$('#mcp-port').textContent, /Port 7788 is used by another window, so this window uses 51234/);
+  assert.match(ui.$('#mcp-summary').textContent, /Running at http:\/\/127\.0\.0\.1:51234\/mcp/);
+  ui.post(state(running));
+
   ui.$('#mcp-squadControl').value = 'read';
   ui.$('#mcp-squadControl').dispatchEvent(new ui.window.Event('change'));
   assert.deepEqual(ui.sent.at(-1), { type: 'mcp', action: 'set', key: 'squadControl', value: 'read' });

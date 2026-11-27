@@ -249,7 +249,7 @@ Open **xDev Squad → MCP** (or run **xDev AI: Open MCP Settings**) to see wheth
 2. xDev AI keeps a fixed port (7788 when it is free), turns on automatic start, and starts the server.
 3. It adds the `xdev_ai` server to the folder's `.mcp.json`; other servers in the file are kept.
 
-The file names two variables, `XDEV_AI_MCP_URL` and `XDEV_AI_MCP_TOKEN`, instead of the token, so it holds no secret. xDev AI sets them in every AI terminal it opens while the server runs or starts automatically. Open a Claude Code terminal from xDev AI in the folder; Claude Code asks once to use the server from `.mcp.json`. Reopen terminals that were open before the setup or before a token rotation. In a session started elsewhere the variables are missing: the server shows as failed and the rest of the session works. For such sessions, and for Codex and Gemini CLI, copy the client configuration as described below.
+The file names two variables, `XDEV_AI_MCP_URL` and `XDEV_AI_MCP_TOKEN`, instead of the token, so it holds no secret. xDev AI sets them in every AI terminal it opens while the server of that window runs. Open a Claude Code terminal from xDev AI in the folder; Claude Code asks once to use the server from `.mcp.json`. Reopen terminals that were open before the setup or before a token rotation. In a session started elsewhere the variables are missing: the server shows as failed and the rest of the session works. For such sessions, and for Codex and Gemini CLI, copy the client configuration as described below.
 
 The variables are visible to programs that run in those terminals. Stop the server, or do not start it automatically, when you do not want that.
 
@@ -264,7 +264,7 @@ The MCP server exposes workflow status, start, stage context, draft submission, 
 
 MCP listens on a loopback address on the workspace host, including on code-server. The client must run on that same host. Keep the copied configuration private and out of source control. **Stop MCP** ends access. The token is saved in VS Code SecretStorage and stays the same until you run **xDev AI: Rotate MCP Token**.
 
-**Keep the connection across restarts.** Set `xdevAi.mcp.port` to a fixed port such as `7788` and turn on `xdevAi.mcp.autoStart` (both under **Manage MCP**, or in user settings). Copy the client configuration once; it keeps working after VS Code restarts. For Claude Code, **Copy Client Configuration → Claude Code (command)** copies a ready `claude mcp add --transport http …` line. Only one window can use a fixed port; other windows report that it is in use.
+**Keep the connection across restarts.** Set `xdevAi.mcp.port` to a fixed port such as `7788` and turn on `xdevAi.mcp.autoStart` (both under **Manage MCP**, or in user settings). Copy the client configuration once; it keeps working after VS Code restarts. For Claude Code, **Copy Client Configuration → Claude Code (command)** copies a ready `claude mcp add --transport http …` line. Only one window can have a fixed port. Each window serves its own workspace, so another window takes a free port instead and says so on the MCP tab: AI terminals opened from that window connect to it, and configuration copied with the fixed port reaches the window that holds the port.
 
 ### Manage accounts through MCP
 

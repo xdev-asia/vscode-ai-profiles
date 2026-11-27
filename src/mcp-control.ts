@@ -17,6 +17,8 @@ export interface McpPanelState {
   url?: string;
   /** 0 picks a free port on every start. */
   port: number;
+  /** Another program, usually xDev AI MCP in another window, holds the fixed port, so this window uses a free one. */
+  portBusy: boolean;
   autoStart: boolean;
   accountControl: string;
   squadControl: string;

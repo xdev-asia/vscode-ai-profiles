@@ -162,8 +162,10 @@ function mountSquadWorkspace(vscode) {
     }
     byId('mcp-autoStart').checked = Boolean(mcp?.autoStart);
     byId('mcp-autoStart').disabled = busy || !mcp;
-    byId('mcp-port').textContent = !mcp ? '' : mcp.port
-      ? `Port ${mcp.port}, kept across restarts, so client configuration keeps working.`
+    const actual = mcp?.url ? new URL(mcp.url).port : '';
+    byId('mcp-port').textContent = !mcp ? '' : mcp.portBusy
+      ? `Port ${mcp.port} is used by another window, so this window uses ${actual} until it restarts. AI terminals opened here connect to this window. Configuration copied with port ${mcp.port} reaches the other window.`
+      : mcp.port ? `Port ${mcp.port}, kept across restarts, so client configuration keeps working.`
       : 'Port: a free one on every start, so copied configuration stops working after a restart. Set up for this folder keeps one port.';
     for (const id of ['mcp-rotate', 'mcp-audit', 'mcp-more']) byId(id).disabled = busy || !mcp;
     const tools = mcp?.tools ?? [];

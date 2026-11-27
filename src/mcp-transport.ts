@@ -126,7 +126,7 @@ export async function startMcp(version: string, tools: readonly McpTool[], optio
 
   await new Promise<void>((resolve, reject) => {
     const failed = (error: NodeJS.ErrnoException) => reject(error.code === 'EADDRINUSE'
-      ? new Error(`Port ${port} is in use, perhaps by xDev AI MCP in another window. Stop it there or change xdevAi.mcp.port.`)
+      ? Object.assign(new Error(`Port ${port} is in use, perhaps by xDev AI MCP in another window. Stop it there or change xdevAi.mcp.port.`), { code: 'EADDRINUSE' })
       : error);
     listener.once('error', failed);
     listener.listen(port, host, () => {
