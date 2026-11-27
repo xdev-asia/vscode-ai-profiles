@@ -303,7 +303,7 @@ These tools show no VS Code dialog, so the client's own permission prompt is the
 Signing in, bypass sessions, deletions, and SDLC stage approval ask for your yes. By default that is a VS Code dialog, which you cannot answer when you work through a remote client. On the MCP tab, under **Confirm changes in**, choose `client` (`xdevAi.mcp.confirmIn`, user or remote settings only):
 
 1. The tool makes no change. It returns a confirmation id with the title and detail of the request.
-2. The client shows you the request and, after your yes, calls `xdev_confirm`. Its permission prompt for that call is your confirmation. A notification in VS Code can approve the same request when you are at your desk.
+2. The client shows you the request and, after your yes, calls `xdev_confirm`. Its permission prompt for that call is your confirmation. While the request waits, VS Code shows a notice and a status bar entry (**MCP: 1 to confirm**): **Review** opens a dialog where you approve or decline, and **Cancel** on the notice declines. The notice closes by itself when the request is answered, in the client or in VS Code, or expires.
 3. A confirmation works once and expires after 10 minutes.
 
 Keep permission prompts on in a client you use this way: a client that skips its prompts can call `xdev_confirm` without you. Adding an API profile still needs VS Code, where you type the key.
