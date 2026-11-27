@@ -86,9 +86,11 @@ test('the MCP tab shows the server, sets what clients may do, and sets up the fo
   assert.equal(ui.$('#mcp-setup').textContent, 'Set up for this folder');
   assert.equal(ui.$('#mcp-toggle').textContent, 'Start');
   assert.equal(ui.$('#mcp-copy').disabled, true, 'nothing to copy while stopped');
+  assert.equal(ui.$('#mcp-restart').hidden, true, 'nothing to restart while stopped');
+  assert.equal(ui.$('#mcp-port-input').value, '0');
   assert.equal(ui.$('#mcp-squadControl').value, 'off');
   assert.match(ui.$('#mcp-squadControl-hint').textContent, /no Squad tools/);
-  assert.match(ui.$('#mcp-port').textContent, /free one on every start/);
+  assert.match(ui.$('#mcp-port').textContent, /0 takes a free port on every start/);
   assert.equal(ui.$('#mcp-tools-title').textContent, 'Tools (1)');
 
   ui.click(ui.$('#mcp-setup'));
@@ -116,6 +118,14 @@ test('the MCP tab shows the server, sets what clients may do, and sets up the fo
   assert.equal(ui.$('#mcp-autoStart').checked, true);
   assert.deepEqual([...ui.$('#mcp-tools').querySelectorAll('small')].map(node => node.textContent), ['read', 'change']);
 
+  assert.match(ui.$('#mcp-port').textContent, /^Port 7788 is kept across restarts/);
+
+  // A second window cannot have the fixed port; it says which port it uses instead.
+  ui.post(state({ ...running, url: 'http://127.0.0.1:51234/mcp', portBusy: true }));
+  assert.match(ui.$('#mcp-port').textContent, /Port 7788 is used by another window, so this window uses 51234/);
+  assert.match(ui.$('#mcp-summary').textContent, /Running at http:\/\/127\.0\.0\.1:51234\/mcp/);
+  ui.post(state(running));
+
   ui.$('#mcp-squadControl').value = 'read';
   ui.$('#mcp-squadControl').dispatchEvent(new ui.window.Event('change'));
   assert.deepEqual(ui.sent.at(-1), { type: 'mcp', action: 'set', key: 'squadControl', value: 'read' });
@@ -127,6 +137,26 @@ test('the MCP tab shows the server, sets what clients may do, and sets up the fo
   assert.deepEqual(ui.sent.at(-1), { type: 'mcp', action: 'copy' });
   ui.settle();
   assert.equal(ui.$('#mcp-notice').textContent, '', 'copying the configuration is not the workflow brief');
+
+  // Everything the Manage MCP menu offers is on the tab: restart and the port too.
+  assert.equal(ui.$('#mcp-restart').hidden, false);
+  ui.click(ui.$('#mcp-restart'));
+  assert.deepEqual(ui.sent.at(-1), { type: 'mcp', action: 'restart' });
+  ui.settle();
+  assert.equal(ui.$('#mcp-port-input').value, '7788');
+  ui.$('#mcp-port-input').value = '7790';
+  ui.$('#mcp-port-form').dispatchEvent(new ui.window.Event('submit', { cancelable: true }));
+  assert.deepEqual(ui.sent.at(-1), { type: 'mcp', action: 'set', key: 'port', value: 7790 });
+  ui.settle();
+  assert.equal(ui.$('#mcp-more'), null);
+
+  // The servers given to Squad workers are managed here as well, and the Project tab points here.
+  assert.ok(ui.$('#mcp-panel #project-mcp'));
+  assert.ok(ui.$('#mcp-panel #project-add-mcp'));
+  assert.equal(ui.$('#project-panel #project-mcp'), null);
+  ui.click(ui.$('#show-project'));
+  ui.click(ui.$('#project-open-mcp'));
+  assert.equal(ui.$('#mcp-panel').hidden, false);
 
   // The button on Skills & Tools leads here.
   ui.click(ui.$('#show-customizations'));

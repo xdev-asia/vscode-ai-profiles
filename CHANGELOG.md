@@ -4,7 +4,7 @@
 
 ### Added
 
-- **MCP tab** in the Squad panel (**xDev AI: Open MCP Settings**): whether the server runs and where, what clients may do with accounts and Squad, where changes are confirmed, automatic start, the port, and every tool a client can call with those settings. Start, stop, copy the client configuration, rotate the token, and open the audit log from there.
+- **MCP tab** in the Squad panel (**xDev AI: Open MCP Settings**): whether the server runs and where, what clients may do with accounts and Squad, where changes are confirmed, automatic start, the port, and every tool a client can call with those settings. Start, stop, restart, set the port, copy the client configuration, rotate the token, and open the audit log from there. **MCP servers for Squad workers** moved here from the Project tab, so all of MCP is in one place.
 - **Set up for this folder** (**xDev AI: Set Up MCP for This Folder**): choose a preset (Full control, Lead Squad, Read only, or your current settings), and xDev AI keeps a fixed port, starts the server automatically, and adds the `xdev_ai` server to the folder's `.mcp.json`. The file holds no token: it names `XDEV_AI_MCP_URL` and `XDEV_AI_MCP_TOKEN`, which xDev AI sets in the AI terminals it opens.
 
 - **Lead Squad from an MCP client** (`xdevAi.mcp.squadControl`: `off`, `read`, `run`; `off` by default). With `run`, a connected client, such as a Claude Code session you control remotely, submits a plan that hands each task to a Claude Code account (`xdev_squad_submit_plan`), approves it, runs and skips steps, requests changes, and commits the run to its local branch. `read` shows the plan, runs, results, and diffs. Merging, pushing, and deploying stay in VS Code.
@@ -16,7 +16,8 @@
 
 - A plan from an MCP client keeps the order of its tasks and may use a role more than once, each with its own account.
 - Requested changes on a run whose Implement role has no assigned account go back to the account that implemented the change.
-- AI terminals opened by xDev AI get `XDEV_AI_MCP_URL` and `XDEV_AI_MCP_TOKEN` while the MCP server runs or starts automatically on a fixed port.
+- AI terminals opened by xDev AI get `XDEV_AI_MCP_URL` and `XDEV_AI_MCP_TOKEN` while the MCP server of their window runs.
+- When another window holds the fixed MCP port, a window starts its server on a free port instead of reporting that the port is in use. The MCP tab shows which port the window uses.
 - The **Manage MCP** button under Skills & Tools opens the MCP tab. The `xdev_ai` server in `.mcp.json` is not offered to Squad workers.
 
 ## 0.17.0 - 2026-11-26

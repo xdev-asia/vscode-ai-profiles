@@ -221,7 +221,8 @@ test('MCP keeps a saved token and port, and reports a port in use', { timeout: 1
   t.after(() => first.dispose());
   assert.equal(first.headers.Authorization, `Bearer ${token}`);
   const port = Number(new URL(first.url).port);
-  await assert.rejects(startMcp('0.0.0', [], { port, token }), /in use/);
+  // The code lets a second window fall back to a free port.
+  await assert.rejects(startMcp('0.0.0', [], { port, token }), error => /in use/.test(error.message) && error.code === 'EADDRINUSE');
   await assert.rejects(startMcp('0.0.0', [], { token: 'short' }), /not valid/);
 });
 

@@ -701,11 +701,14 @@ export function registerXdevMcp(
   let disposed = false;
   /** Set while a setup changes several settings, so the server restarts once at the end. */
   let configuring = false;
+  /** The fixed port was taken when this window's server started, so it runs on a free port. */
+  let portBusy = false;
   let dialogs: Promise<unknown> = Promise.resolve();
   const changed = new vscode.EventEmitter<void>();
   const stop = () => {
     connection?.dispose();
     connection = undefined;
+    portBusy = false;
     changed.fire();
   };
   context.subscriptions.push({ dispose() { disposed = true; setMcpControl(undefined); stop(); } }, changed, changed.event(notifyMcpChanged));
@@ -759,8 +762,19 @@ export function registerXdevMcp(
   function start(): Promise<void> {
     starting ??= (async () => {
       const { startMcp } = await import('./mcp-transport.js');
-      const next = await startMcp(version, xdevMcpTools(squad, accounts, profiles, host), { port: mcpSettings().port, token: await token() });
+      const tools = xdevMcpTools(squad, accounts, profiles, host);
+      const port = mcpSettings().port;
+      const saved = await token();
+      let busy = false;
+      const next = await startMcp(version, tools, { port, token: saved }).catch(error => {
+        if (!port || (error as NodeJS.ErrnoException)?.code !== 'EADDRINUSE') throw error;
+        // Each window serves its own workspace. When another window holds the fixed port, this one takes a free
+        // port: the AI terminals it opens get its address, and clients configured for the fixed port reach the other window.
+        busy = true;
+        return startMcp(version, tools, { port: 0, token: saved });
+      });
       if (disposed) { next.dispose(); return; }
+      portBusy = busy;
       connection?.dispose();
       connection = next;
       changed.fire();
@@ -830,7 +844,7 @@ export function registerXdevMcp(
       // The panel refreshes often while a worker runs; the file is read at most every two seconds.
       if (!fileCache || Date.now() - fileCache.time > 2_000) fileCache = { time: Date.now(), setUp: hasXdevServer(readFolderFile()) };
       return {
-        ready: ready(), running: Boolean(connection), url: connection?.url, port: settings.port, autoStart: settings.autoStart,
+        ready: ready(), running: Boolean(connection), url: connection?.url, port: settings.port, portBusy, autoStart: settings.autoStart,
         accountControl: settings.level, squadControl: settings.squadLevel, confirmIn: settings.confirmIn,
         folder: vscode.workspace.workspaceFolders?.[0]?.name, folderSetUp: fileCache.setUp, tools: toolCache.tools
       };
@@ -840,12 +854,19 @@ export function registerXdevMcp(
       await start();
     },
     stop,
+    async restart() {
+      if (!ready()) throw new Error('Open a trusted workspace folder to start xDev AI MCP.');
+      await restart();
+    },
     async set(key, value) {
-      const allowed: Record<McpSettingKey, readonly unknown[]> = {
+      const allowed: Record<Exclude<McpSettingKey, 'port'>, readonly unknown[]> = {
         accountControl: accountControlLevels, squadControl: squadControlLevels, confirmIn: confirmModes, autoStart: [true, false]
       };
       const name = mcpSettingKeys.find(candidate => candidate === key);
-      if (!name || !allowed[name].includes(value)) throw new Error('Unknown MCP setting.');
+      if (!name) throw new Error('Unknown MCP setting.');
+      if (name === 'port') {
+        if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > 65535) throw new Error('Enter a port from 0 to 65535. 0 takes a free port on every start.');
+      } else if (!allowed[name].includes(value)) throw new Error('Unknown MCP setting.');
       await vscode.workspace.getConfiguration('xdevAi.mcp').update(name, value, vscode.ConfigurationTarget.Global);
       void audit?.record('user', 'mcp_setting', true, { key: name, value });
     },
@@ -888,11 +909,10 @@ export function registerXdevMcp(
       });
     },
     async environment(): Promise<Record<string, string>> {
-      const settings = mcpSettings();
       if (!ready()) return {};
-      // With a fixed port and automatic start the address is known before the server is up.
-      const url = connection?.url ?? (settings.port && settings.autoStart ? `http://127.0.0.1:${settings.port}/mcp` : undefined);
-      return url ? { [mcpUrlVariable]: url, [mcpTokenVariable]: await token() } : {};
+      // A terminal opened while the server starts waits for its address, which may differ from the fixed port.
+      await starting?.catch(() => undefined);
+      return connection ? { [mcpUrlVariable]: connection.url, [mcpTokenVariable]: await token() } : {};
     }
   };
   setMcpControl(control);

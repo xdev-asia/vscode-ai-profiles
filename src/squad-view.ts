@@ -852,7 +852,7 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
         case 'set': return mcp.set(message.key, message.value);
         case 'rotate': return vscode.commands.executeCommand('xdevAi.rotateMcpToken');
         case 'audit': return vscode.commands.executeCommand('xdevAi.showAuditLog');
-        case 'more': return vscode.commands.executeCommand('xdevAi.manageMcp');
+        case 'restart': return mcp.restart();
         default: return;
       }
     }
