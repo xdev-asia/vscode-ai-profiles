@@ -119,6 +119,8 @@ Assign a **Claude Code** terminal account (instead of an API profile) to a role 
 6. Not right yet? Under **Changes**, write what to change in **Request changes** (click **Comment** on a file to start a line). Implement gets it as a new step in the same worktree; a finished run reopens and commits again on the same branch.
 7. Click **Push & MR** to push the branch of every committed repository. xDev asks for the target branch (default `xdevAi.squad.mergeRequestTarget`, else the remote's default branch) and shows the remote and the number of commits before pushing. On GitLab it opens or updates a merge request with git push options, so no API token is needed; **Open MR** opens it. Other remotes are only pushed (`xdevAi.squad.mergeRequests`).
 
+**What a worker can reach.** A worker reads its worktree, your checkout of the same repository, and the shared artifacts. It edits files only in its worktree. Reading or writing anywhere else is denied and shown in the run. No worker can read the folder of another account, or the sign-in files of its own. These rules cover Claude Code's file tools; a role you allow every shell command (`"*"`) can still reach other files through the shell, so allow only the commands the work needs.
+
 **Measure it.** Each step shows its time, cost, and retries, and each run its time to commit. Above Worker runs, a 30-day summary shows the number of runs, the median time to commit, the share of steps that passed first time, files changed, and cost.
 
 **See the squad at work.** The team board at the top of Chat shows each role's account and state: proposed, up next, working, done, blocked. While a headless step runs, a live feed lists the files it reads and edits and the commands it runs, with a timer. A short notice appears when a step ends.
@@ -141,6 +143,7 @@ Assign a **Claude Code** terminal account (instead of an API profile) to a role 
 - **Chat sessions.** Click **New chat** for a new topic. Each chat keeps its own entries and its own Lead session; switch chats from the list above the team board. Worker runs are shared by all chats.
 - **Lead keeps its session.** With a Claude Code account on Lead, later turns of a chat continue the same session (`xdevAi.squad.leadSessionTurns`, 20 by default). They send only the new message, what workers reported since Lead's last reply, and context that changed. `0` starts every turn fresh.
 - **One message can run the plan.** By default you approve each plan and start every step (`xdevAi.squad.planApproval`: `manual`, `xdevAi.squad.approver`: `human`). Set `planApproval` to `auto` and `approver` to `ai` in your user settings to have Lead's plan start at once and each passing AI review start the next step, up to a local commit. Blocked steps, requested changes, merging, and pushing still wait for you.
+- **Lead picks a model per task.** Squad's own Lead, and a lead that plans through MCP, may set a model on each Claude Code task: a cheaper one for simple work, a stronger one only where it is needed. Tasks without a choice use the role's configured model. Lead decides, so check the model shown on each task before you approve the plan.
 - **Spread steps over accounts.** Set `xdevAi.squad.accountPool` to `roundRobin` or `quota`, and list the accounts in `xdevAi.squad.poolAccounts` (empty uses every Claude Code account):
 
   ```json
@@ -234,6 +237,20 @@ Each account's own plan and usage limits apply. Squad runs one step at a time, o
 
 Open **xDev Squad → Memory** or run **xDev AI: Open Squad Memory**. Memory holds short notes, such as conventions, decisions, and pitfalls, that every Lead, worker, and SDLC draft receives with its task. Workers add up to five notes after a run when they learn something durable. Add, edit, pin, or delete notes yourself. Pinned notes are always included. Other notes are included newest first within a fixed budget of about 3,000 characters, so memory does not grow every prompt.
 
+### Share artifacts between accounts
+
+Open **xDev Squad → Memory & Artifacts**. **Shared artifacts** holds documents that every account of the project can read and write, such as a design, a report, or a spec. Memory is for short facts; artifacts are whole documents.
+
+- **Workers.** A headless worker returns documents with its result, and Squad saves them under that worker's account. Every later step, under any account, gets the list with a file it can read. The step's reply in Chat names the artifacts it saved.
+- **AI clients.** A client connected through MCP lists and reads artifacts with `xdev_artifacts_list` and `xdev_artifact_read` (Squad control `read`), and saves one with `xdev_artifact_save` (Squad control `run`). This is how an interactive session under one account hands a document to the others.
+- **You.** **Add file…** shares a file from disk. **Open** shows an artifact in the editor, and **Remove** deletes it for every account after you confirm. Clients cannot remove artifacts.
+
+Saving under an existing name replaces that artifact and records who saved it last. A project keeps up to 100 artifacts of up to 200,000 characters each, as Markdown, HTML, text, or JSON. They live in the extension's storage on the workspace host, not in the repository, and every window that opens the project sees the same ones.
+
+**Pages published on claude.ai.** A page that Claude Code publishes with its Artifact tool belongs to the account that made it, and xDev AI cannot share it for you. Save the page's content as a shared artifact and give its address as `link`: the other accounts read the content from the shared store, and **claude.ai page** opens the link for people it is shared with on claude.ai. Only `https://claude.ai/…` addresses are accepted.
+
+Workers and clients that can read artifacts see everything in them, so do not put secrets in an artifact.
+
 ### Manage Skills and Tools
 
 - Under **xDev Squad → Skills & Tools**, add, edit, disable, or delete workspace skills. A skill is a named set of instructions with an optional one-line **When to use** description. Enabled skills are included in SDLC drafting.
@@ -289,10 +306,10 @@ A connected client can act as the Squad lead: it plans the work, hands each task
 | Level | Tools |
 | --- | --- |
 | `off` (default) | No Squad tools. |
-| `read` | `xdev_squad_status` (the running step with its live activity, pending plan, role accounts, and every kept run with its status), `xdev_squad_run` (steps, results, AI reviews, branch, worktree, session ids, and diffs with `changes`), `xdev_squad_wait`. |
-| `run` | Also `xdev_squad_submit_plan`, `xdev_squad_approve_plan`, `xdev_squad_discard_plan`, `xdev_squad_run_step`, `xdev_squad_skip_step`, `xdev_squad_request_changes`, `xdev_squad_finish_run`, `xdev_squad_stop`, and `xdev_squad_ask` (a message to Squad's own Lead or a role). |
+| `read` | `xdev_squad_status` (the running step with its live activity, pending plan, role accounts, and every kept run with its status), `xdev_squad_run` (steps, results, AI reviews, branch, worktree, session ids, and diffs with `changes`), `xdev_squad_wait`, `xdev_artifacts_list`, `xdev_artifact_read`. |
+| `run` | Also `xdev_squad_submit_plan`, `xdev_squad_approve_plan`, `xdev_squad_discard_plan`, `xdev_squad_run_step`, `xdev_squad_skip_step`, `xdev_squad_request_changes`, `xdev_squad_finish_run`, `xdev_squad_stop`, `xdev_squad_ask` (a message to Squad's own Lead or a role), and `xdev_artifact_save`. |
 
-A plan has one to eight tasks. Each task names a role (Implement, Review, Tests), a brief, and optionally an `account` id from `xdev_accounts_list`; without one the task uses the account pool or the role's account. Tasks run in the order given, one at a time, and a role may appear more than once. The plan and every step also show in **xDev Squad → Chat**, where you can take over at any point: **Worker runs** lists each run with the state of its steps and a live feed of the step that is running, and **Resume … session** opens a finished headless step as an interactive Claude Code session under its account.
+A plan has one to eight tasks. Each task names a role (Implement, Review, Tests), a brief, and optionally an `account` id from `xdev_accounts_list`; without one the task uses the account pool or the role's account. A task for a Claude Code account may also name a `model`, so the lead matches cost to difficulty: `haiku` for simple mechanical work, `sonnet` for most coding, `opus` for the hardest tasks. Without it the task uses the model configured for its role (`xdevAi.squad.workerModels`). The plan and each step show the chosen model. Tasks run in the order given, one at a time, and a role may appear more than once. The plan and every step also show in **xDev Squad → Chat**, where you can take over at any point: **Worker runs** lists each run with the state of its steps and a live feed of the step that is running, and **Resume … session** opens a finished headless step as an interactive Claude Code session under its account.
 
 Workers follow the same rules as a run started in the panel: a git worktree on a local branch `xdev/squad/<id>`, the allowed commands, the spending cap, and the MCP servers granted in project settings. A long step returns `finished: false` after its wait time and keeps working; the client calls `xdev_squad_wait`. `xdev_squad_finish_run` commits to the local branch. Merging, pushing, and deploying stay in VS Code.
 
@@ -304,7 +321,7 @@ Signing in, bypass sessions, deletions, and SDLC stage approval ask for your yes
 
 1. The tool makes no change. It returns a confirmation id with the title and detail of the request.
 2. The client shows you the request and, after your yes, calls `xdev_confirm`. Its permission prompt for that call is your confirmation. While the request waits, VS Code shows a notice and a status bar entry (**MCP: 1 to confirm**): **Review** opens a dialog where you approve or decline, and **Cancel** on the notice declines. The notice closes by itself when the request is answered, in the client or in VS Code, or expires.
-3. A confirmation works once and expires after 10 minutes.
+3. A confirmation works once and expires after 10 minutes. It does not run if you lowered the access level while it waited.
 
 Keep permission prompts on in a client you use this way: a client that skips its prompts can call `xdev_confirm` without you. Adding an API profile still needs VS Code, where you type the key.
 

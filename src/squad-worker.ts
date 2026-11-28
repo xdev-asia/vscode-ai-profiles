@@ -1,9 +1,9 @@
 import { spawn as spawnProcess, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { isAbsolute, join, relative } from 'node:path';
+import { isAbsolute, join, relative, sep } from 'node:path';
 import type { Role } from './squad';
-import { envDenyRules } from './squad-env';
+import { envDenyRules, rulePath } from './squad-env';
 import type { WorkerMcp } from './squad-mcp';
 import { terminalProfileEnv, type TerminalProfile } from './terminal-profiles';
 
@@ -17,6 +17,8 @@ export interface WorkerReport {
   filesChanged: string[];
   tests: string;
   memory: string[];
+  /** Documents for the project's shared artifacts; checked when they are saved. */
+  artifacts: Record<string, unknown>[];
 }
 
 export interface WorkerResult extends WorkerReport {
@@ -28,7 +30,7 @@ export interface WorkerResult extends WorkerReport {
 
 export interface PlanReport {
   reply: string;
-  tasks: { role: string; brief: string; repo?: string }[];
+  tasks: { role: string; brief: string; repo?: string; model?: string }[];
   sessionId?: string;
 }
 
@@ -76,6 +78,10 @@ export interface WorkerRequest {
   resume?: string;
   /** Keep the session of a plan, ask, or gate run so a later run can resume it. Work runs always keep theirs. */
   persist?: boolean;
+  /** Folders outside `cwd` the worker may read, such as the main checkout its worktree links to. It edits none of them. */
+  readDirs?: readonly string[];
+  /** The folder of every account. No worker reads another account's folder, or the sign-in files of its own. */
+  accounts?: readonly string[];
   /** Called for each tool the worker uses, while it runs. */
   onActivity?: (activity: WorkerActivity) => void;
 }
@@ -96,6 +102,21 @@ const reportSchema = {
     memory: {
       type: 'array', maxItems: 5, items: { type: 'string' },
       description: 'Durable facts teammates need later (conventions, decisions, pitfalls). Empty if none.'
+    },
+    artifacts: {
+      type: 'array', maxItems: 3,
+      items: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'A short title. Saving under an existing name replaces that artifact.' },
+          kind: { type: 'string', enum: ['markdown', 'html', 'text', 'json'] },
+          description: { type: 'string', description: 'One line on what it is.' },
+          content: { type: 'string', description: 'The full document.' },
+          link: { type: 'string', description: 'The claude.ai address when you also published it there.' }
+        },
+        required: ['name', 'content']
+      },
+      description: 'Documents teammates under other accounts should read later: a design, a report, a spec. Not code that is already in the worktree. Omit when there are none.'
     }
   },
   required: ['status', 'summary', 'files_changed', 'tests', 'memory']
@@ -113,7 +134,8 @@ const planSchema = {
         properties: {
           role: { type: 'string' },
           brief: { type: 'string' },
-          repo: { type: 'string', description: 'The repository from "repositories" this task works in. Empty when there is only one.' }
+          repo: { type: 'string', description: 'The repository from "repositories" this task works in. Empty when there is only one.' },
+          model: { type: 'string', description: 'Optional, for Claude Code workers: "haiku" for simple mechanical work, "sonnet" for most coding, "opus" for the hardest tasks. Omit to use the configured default.' }
         },
         required: ['role', 'brief']
       }
@@ -132,6 +154,10 @@ const gateSchema = {
 } as const;
 
 const readTools = ['Read', 'Glob', 'Grep'];
+/** Lets Edit and Write change files in the working directory only. A bare "Edit" would allow any path on the machine. */
+const editHere = 'Edit(./**)';
+/** Files in an account's folder that hold its sign-in. */
+const signInFiles = ['.credentials.json', '.claude.json', 'auth.json', 'oauth_creds.json'];
 const gitRead = ['Bash(git status:*)', 'Bash(git diff:*)', 'Bash(git log:*)', 'Bash(git show:*)'];
 const codegraphRead = ['Bash(codegraph explore:*)', 'Bash(codegraph node:*)', 'Bash(codegraph query:*)'];
 
@@ -139,11 +165,15 @@ const codegraphRead = ['Bash(codegraph explore:*)', 'Bash(codegraph node:*)', 'B
  * Tools each role may use. Built-in tools outside `tools` are not loaded at all, which keeps
  * tool schemas out of the context. In print mode Claude Code denies anything not allowed
  * instead of prompting, and reports the denial in the result.
+ *
+ * Read, Glob and Grep are loaded but not in `allowed`: Claude Code then lets them read the working directory
+ * and the folders added with `--add-dir`, and denies every other path. Allowing them by name would open the
+ * whole machine, including the sign-in files of the other accounts.
  */
 export function workerTools(
   role: Role, mode: WorkerMode, allowedCommands: readonly string[], codegraph = false
 ): { tools: string[]; allowed: string[] } {
-  const reads = [...readTools, ...gitRead, ...(codegraph ? codegraphRead : [])];
+  const reads = [...gitRead, ...(codegraph ? codegraphRead : [])];
   // Lead plans and answers questions with read-only access, so it can check files instead of guessing.
   if (mode === 'plan' || mode === 'ask' || mode === 'gate' || role === 'Lead' || role === 'Review') {
     return { tools: [...readTools, 'Bash'], allowed: reads };
@@ -152,8 +182,27 @@ export function workerTools(
   const commands = allowedCommands.includes('*') ? ['Bash'] : allowedCommands.map(command => `Bash(${command}:*)`);
   return {
     tools: [...readTools, 'Edit', 'Write', 'Bash'],
-    allowed: [...reads, 'Edit', 'Write', ...commands]
+    allowed: [...reads, editHere, ...commands]
   };
+}
+
+/**
+ * Rules that keep a worker out of account folders: all of another account's folder, and the sign-in files of its
+ * own, which Claude Code itself reads without the worker's tools.
+ */
+export function accountDenyRules(accounts: readonly string[], own?: string, platform: NodeJS.Platform = process.platform): string[] {
+  const key = (path: string) => rulePath(path, platform).replace(/\/+$/, '');
+  const mine = own ? key(own) : undefined;
+  return [...new Set(accounts.map(key))]
+    // A rule cannot hold a comma or a parenthesis; such a folder is still outside every folder the worker may read.
+    .filter(path => !/[,()]/.test(path))
+    .flatMap(path => path === mine ? signInFiles.map(file => `Read(${path}/${file})`) : [`Read(${path}/**)`]);
+}
+
+/** A Claude Code model alias (haiku, sonnet, opus) or model id for one task, or nothing when the text is not one. */
+export function workerModel(input: unknown): string | undefined {
+  const model = typeof input === 'string' ? input.trim() : '';
+  return /^[\w.:[\]-]{1,80}$/.test(model) ? model : undefined;
 }
 
 export function validCommand(command: unknown): command is string {
@@ -177,8 +226,11 @@ export interface WorkerFiles {
  * applies, so the user's and the project's own MCP servers are not loaded; only the servers in `files.mcp` start,
  * and only their listed tools are allowed.
  */
-export function workerArguments(request: Omit<WorkerRequest, 'executable' | 'profile' | 'cwd' | 'signal'>, files: WorkerFiles): string[] {
+export function workerArguments(
+  request: Omit<WorkerRequest, 'executable' | 'profile' | 'cwd' | 'signal'> & { profile?: Pick<TerminalProfile, 'configDir'> }, files: WorkerFiles
+): string[] {
   const { role, mode, settings, resume, persist } = request;
+  const denied = [...envDenyRules(settings.denyRead ?? []), ...accountDenyRules(request.accounts ?? [], request.profile?.configDir)];
   const { tools, allowed } = workerTools(role, mode, settings.allowedCommands.filter(validCommand), settings.codegraph);
   const mcp = files.mcp ? runMcp(mode, settings) : undefined;
   if (mcp) allowed.push(...mcp.allowed);
@@ -193,7 +245,8 @@ export function workerArguments(request: Omit<WorkerRequest, 'executable' | 'pro
   ];
   if (mcp) args.push('--mcp-config', files.mcp!);
   if (allowed.length) args.push('--allowedTools', allowed.join(','));
-  if (settings.denyRead?.length) args.push('--disallowedTools', envDenyRules(settings.denyRead).join(','));
+  for (const dir of request.readDirs ?? []) args.push('--add-dir', dir);
+  if (denied.length) args.push('--disallowedTools', denied.join(','));
   if (settings.budgetUsd > 0) args.push('--max-budget-usd', String(settings.budgetUsd));
   if (settings.model) args.push('--model', settings.model);
   if (resume) args.push('--resume', resume);
@@ -264,7 +317,8 @@ const activityText = 160;
 function shortPath(value: unknown, cwd: string): string {
   if (typeof value !== 'string') return '';
   const path = isAbsolute(value) ? relative(cwd, value) : value;
-  return (path.startsWith('..') ? value : path || '.').slice(-activityText);
+  // Shown with forward slashes on every platform.
+  return (path.startsWith('..') ? value : path.split(sep).join('/') || '.').slice(-activityText);
 }
 
 /** Describes one tool call from the stream for the live activity feed. */
@@ -365,6 +419,8 @@ export function parseWorkerOutput(stdout: string): WorkerResult {
     filesChanged: strings(report.files_changed, 300, 100),
     tests: typeof report.tests === 'string' ? report.tests.trim().slice(0, 1_000) : '',
     memory: strings(report.memory, memoryNoteLimit, 5),
+    artifacts: Array.isArray(report.artifacts)
+      ? report.artifacts.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object' && !Array.isArray(item)).slice(0, 3) : [],
     sessionId: typeof message.session_id === 'string' ? message.session_id : undefined,
     costUsd: typeof message.total_cost_usd === 'number' ? message.total_cost_usd : 0,
     turns: typeof message.num_turns === 'number' ? message.num_turns : 0,
@@ -383,7 +439,8 @@ export function parsePlanOutput(stdout: string): PlanReport & { costUsd: number 
     tasks: plan.tasks.map(task => ({
       role: typeof task?.role === 'string' ? task.role : '',
       brief: typeof task?.brief === 'string' ? task.brief : '',
-      ...(typeof task?.repo === 'string' && task.repo.trim() ? { repo: task.repo.trim() } : {})
+      ...(typeof task?.repo === 'string' && task.repo.trim() ? { repo: task.repo.trim() } : {}),
+      ...(workerModel(task?.model) ? { model: workerModel(task?.model) } : {})
     })),
     costUsd: typeof message.total_cost_usd === 'number' ? message.total_cost_usd : 0,
     ...(typeof message.session_id === 'string' ? { sessionId: message.session_id } : {})

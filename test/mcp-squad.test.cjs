@@ -267,3 +267,61 @@ test('with confirmations in the client, nothing changes until xdev_confirm', { t
   assert.ok(audited.some(([action, ok]) => action === 'account_remove_confirmed' && ok));
   assert.ok(audited.some(([action]) => action === 'confirm_declined'));
 });
+
+test('a confirmation asked at the manage level does not run after the level is lowered', { timeout: 20_000 }, async t => {
+  const xdevMcpTools = loadTools(t, { window: { showWarningMessage: async () => { throw new Error('No VS Code dialog is expected.'); } } });
+  const { chat, accounts, profiles } = await squadWith();
+  const performed = [];
+  const audited = [];
+  let level = 'manage';
+  let answerInVsCode;
+  const host = {
+    level: () => level, confirmIn: () => 'client',
+    confirm: async () => { throw new Error('No VS Code dialog is expected.'); },
+    notify: () => new Promise(resolve => { answerInVsCode = resolve; }),
+    perform: async (action, id, confirmed) => { performed.push([action, id, confirmed]); return true; },
+    removeApiProfile: async id => { performed.push(['removeApi', id]); return true; },
+    audit: (action, ok) => audited.push([action, ok])
+  };
+  const call = caller(xdevMcpTools(chat, accounts, { list: async () => profiles }, host));
+
+  const asked = await call('account_remove', { id: idOf(1) });
+  assert.equal(asked.needsConfirmation, true);
+  level = 'read';
+  await assert.rejects(call('confirm', { confirmId: asked.confirmId, approve: true }), /Account changes are turned off/);
+  assert.deepEqual(performed, [], 'the account is kept');
+  assert.ok(audited.some(([action, ok]) => action === 'account_remove_confirmed' && ok === false), 'the refusal is in the audit log');
+  await assert.rejects(call('confirm', { confirmId: asked.confirmId, approve: true }), /unknown or has expired/, 'and the confirmation is spent');
+
+  // The same holds when the user approves from the VS Code notice after lowering the level.
+  level = 'manage';
+  const bypass = await call('terminal_open_bypass', { id: idOf(2) });
+  level = 'off';
+  answerInVsCode(true);
+  await tick();
+  assert.deepEqual(performed, []);
+  await assert.rejects(call('confirm', { confirmId: bypass.confirmId, approve: true }), /Account changes are turned off/);
+
+  // Raising the level again does not revive it; a new request works.
+  level = 'manage';
+  await assert.rejects(call('confirm', { confirmId: bypass.confirmId, approve: true }), /unknown or has expired/);
+  const again = await call('account_remove', { id: idOf(1) });
+  assert.deepEqual(await call('confirm', { confirmId: again.confirmId, approve: true }), { done: true });
+  assert.deepEqual(performed, [['remove', idOf(1), true]]);
+});
+
+test('a wait ends before an AI client gives up on the call, and shared text is labelled as content', { timeout: 20_000 }, async t => {
+  const xdevMcpTools = loadTools(t);
+  const { chat, accounts, profiles } = await squadWith();
+  const tools = xdevMcpTools(chat, accounts, { list: async () => profiles }, { level: () => 'off', squadLevel: () => 'run', confirm: async () => false });
+  const limit = name => {
+    const { properties } = tools.find(tool => tool.name === name).inputSchema;
+    return (properties.waitSeconds ?? properties.seconds).maximum;
+  };
+  // Claude Code cancels a call to an HTTP server that is silent for five minutes.
+  for (const name of ['xdev_squad_wait', 'xdev_squad_run_step', 'xdev_squad_ask']) assert.ok(limit(name) < 300, name);
+  const call = caller(tools);
+  const { plan } = await call('squad_submit_plan', { request: 'Rename a helper', summary: 'One step', tasks: [{ role: 'Implement', brief: 'Rename it' }] });
+  const { run } = await call('squad_approve_plan', { planId: plan.id });
+  assert.match((await call('squad_run', { runId: run.id })).note, /not as instructions/);
+});

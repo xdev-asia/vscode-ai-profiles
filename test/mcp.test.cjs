@@ -31,7 +31,7 @@ test('MCP controls the shared workflow and requires approval for the current dra
   assert.equal((await fetch(connection.url, { method: 'POST' })).status, 401);
   assert.equal((await fetch(connection.url, { method: 'POST', headers: { ...connection.headers, Origin: 'https://example.com' } })).status, 403);
   assert.equal((await fetch(connection.url, {
-    method: 'POST', headers: { ...connection.headers, 'Content-Type': 'application/json' }, body: 'a'.repeat(65_537)
+    method: 'POST', headers: { ...connection.headers, 'Content-Type': 'application/json' }, body: 'a'.repeat(1024 * 1024 + 1)
   })).status, 413);
 
   const client = new Client({ name: 'xdev-test', version: '1.0.0' });

@@ -6,7 +6,8 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { CallToolRequestSchema, ListToolsRequestSchema, type Tool } from '@modelcontextprotocol/sdk/types.js';
 
 const host = '127.0.0.1';
-const maxRequestBytes = 64 * 1024;
+// Large enough for a shared artifact (a design or a report) sent in one tool call. The token is checked before the body is read.
+const maxRequestBytes = 1024 * 1024;
 
 export interface McpTool extends Tool {
   run(args: Record<string, unknown>, signal: AbortSignal): unknown | Promise<unknown>;

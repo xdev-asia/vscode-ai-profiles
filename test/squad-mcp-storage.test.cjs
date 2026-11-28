@@ -121,7 +121,8 @@ test('storage helpers count files without following links and find worker transc
 
   const worktrees = '/home/u/.local/share/code-server/User/globalStorage/x.y/squad-worktrees/a1b2c3d4e5f60718';
   assert.equal(sessionFolder('/c', `${worktrees}/5e6f7a8b/1-billing-api`),
-    '/c/projects/-home-u--local-share-code-server-User-globalStorage-x-y-squad-worktrees-a1b2c3d4e5f60718-5e6f7a8b-1-billing-api');
+    join('/c', 'projects', '-home-u--local-share-code-server-User-globalStorage-x-y-squad-worktrees-a1b2c3d4e5f60718-5e6f7a8b-1-billing-api'));
+  assert.equal(sessionFolder('/c', String.raw`C:\Users\dev\work tree`), join('/c', 'projects', 'C--Users-dev-work-tree'), 'a Windows path is named the same way');
   const config = join(root, 'claude');
   await mkdir(sessionFolder(config, `${worktrees}/5e6f7a8b/1-api`), { recursive: true });
   await mkdir(sessionFolder(config, `${worktrees}0/5e6f7a8b/1-api`), { recursive: true });

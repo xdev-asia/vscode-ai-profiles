@@ -10,6 +10,9 @@ const { gateChanges, SquadChat } = require('../dist/squad-chat.js');
 const { SquadStore } = require('../dist/squad.js');
 const { Worktrees } = require('../dist/squad-worktree.js');
 
+// Keep line endings as the tests write them: git on a Windows machine may convert them on checkout.
+Object.assign(process.env, { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.autocrlf', GIT_CONFIG_VALUE_0: 'false' });
+
 const roleNames = ['Lead', 'Implement', 'Review', 'Tests'];
 
 function memento() {
@@ -409,7 +412,7 @@ test('Lead gets the code map and repositories, the plan suggests a repository, a
   assert.deepEqual(plan.repos, repos);
 
   await (await chat.approve(plan.id, undefined, 'human', 'services/billing-api')).finished;
-  assert.equal(worktrees.created[0].repo, '/repo/services/billing-api', 'the user can override the suggestion');
+  assert.equal(worktrees.created[0].repo, join('/repo', 'services', 'billing-api'), 'the user can override the suggestion');
   const runId = chat.snapshot().runs[0].id;
   assert.equal(chat.snapshot().runs[0].trees[0].target, 'services/billing-api');
   await (await chat.runStep(runId)).finished;
@@ -449,7 +452,7 @@ test('approving needs a repository when the workspace has several and the plan n
   await assert.rejects(chat.approve(plan.id), /Choose the repository/);
   await assert.rejects(chat.approve(plan.id, undefined, 'human', '../etc'), /Choose the repository/);
   await (await chat.approve(plan.id, undefined, 'human', 'b')).finished;
-  assert.equal(worktrees.created[0].repo, '/repo/b');
+  assert.equal(worktrees.created[0].repo, join('/repo', 'b'));
 });
 
 test('worktree changes list staged and new files, and discard restores or deletes them', async t => {
@@ -537,7 +540,7 @@ test('one run spans repositories: a worktree per repository, steps in their own,
   await (await chat.approve(plan.id, undefined, 'human', ['', '', 'api'])).finished;
 
   const [run] = chat.snapshot().runs;
-  assert.deepEqual(run.trees.map(tree => [tree.target, tree.path]), [['api', `/repo/api/.wt/${run.id.slice(0, 8)}/1-api`], ['web', `/repo/web/.wt/${run.id.slice(0, 8)}/2-web`]]);
+  assert.deepEqual(run.trees.map(tree => [tree.target, tree.path]), [['api', `${join('/repo', 'api')}/.wt/${run.id.slice(0, 8)}/1-api`], ['web', `${join('/repo', 'web')}/.wt/${run.id.slice(0, 8)}/2-web`]]);
   assert.match(chat.snapshot().entries.at(-1).text, /ready in 2 repositories \(api, web\)/);
   for (let step = 0; step < 3; step++) await (await chat.runStep(run.id)).finished;
   const [api, web, review] = runs.slice(1);
@@ -726,9 +729,12 @@ test('a new worktree gets submodules and linked node_modules, and never commits 
   const root = await mkdtemp(join(tmpdir(), 'xdev-setup-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   // Local submodules need the file protocol, which git disables by default.
-  const saved = { ...process.env };
-  Object.assign(process.env, { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'protocol.file.allow', GIT_CONFIG_VALUE_0: 'always' });
-  t.after(() => { for (const key of ['GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0']) if (saved[key] === undefined) delete process.env[key]; });
+  Object.assign(process.env, { GIT_CONFIG_COUNT: '2', GIT_CONFIG_KEY_1: 'protocol.file.allow', GIT_CONFIG_VALUE_1: 'always' });
+  t.after(() => {
+    process.env.GIT_CONFIG_COUNT = '1';
+    delete process.env.GIT_CONFIG_KEY_1;
+    delete process.env.GIT_CONFIG_VALUE_1;
+  });
   const run = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8' });
   const init = async (path, file) => {
     execFileSync('git', ['init', '-q', '-b', 'main', path]);

@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const { execFileSync } = require('node:child_process');
-const { mkdir, mkdtemp, readFile, rm, writeFile } = require('node:fs/promises');
+const { mkdir, mkdtemp, readFile, realpath, rm, writeFile } = require('node:fs/promises');
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 const { test } = require('node:test');
@@ -8,7 +8,8 @@ const { canCaptureClaudeQuota, claudeQuotaFile, readAccountUsage, readClaudeQuot
 const { TerminalProfiles } = require('../dist/terminal-profiles.js');
 
 test('Codex reads each profile through App Server and preserves zero usage and reset times', async t => {
-  const root = await mkdtemp(join(tmpdir(), 'xdev quota '));
+  // The real path: the fake server compares CODEX_HOME with its working directory, and a Windows temp path may be a short name.
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'xdev quota ')));
   t.after(() => rm(root, { recursive: true, force: true, maxRetries: 5 }));
   const profiles = new TerminalProfiles(root);
   const personal = await profiles.add('codex', 'Personal');
