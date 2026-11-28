@@ -81,13 +81,13 @@ function mountSquadChat(vscode, roles) {
       ai: 'You start the first step. Each passing AI review then starts the next step; a review asking for changes, a blocked step, or an error stops and waits for you. Merging always waits for you.'
     }[approver.value] ?? '';
     const parallelText = plan?.parallel
-      ? `Parallel plan: each task becomes its own run, with its own worktree and branch, and up to ${snapshot.maxParallel ?? 1} work at the same time. You review and merge each run on its own. `
+      ? `Parallel plan: each task becomes its own run, with its own worktree and branch, and ${(snapshot.maxParallel ?? 1) > 1 ? `up to ${snapshot.maxParallel} work at the same time` : 'they work one at a time'}. You review and merge each run on its own, or combine them when they are finished. `
       : '';
     byId('plan-cost').textContent = `${parallelText}${approverText}${headless
       ? ` Claude Code steps use a new git worktree from ${workers?.baseBranch || 'your current branch'}${workers?.budgetUsd ? `, each headless step capped at $${workers.budgetUsd}` : ''}. Allowed commands: ${commands}.` : ''}`;
     renderRuns(snapshot.runs ?? []);
     renderBoard(state);
-    renderLive(snapshot.working ?? (snapshot.live ? [{ live: snapshot.live }] : []), busy);
+    renderLive(snapshot.working ?? (snapshot.live ? [{ live: snapshot.live }] : []), busy, snapshot.runs ?? []);
     const profileFor = role => state.accounts.find(profile => profile.id === state.seats[role]?.account);
     const lead = profileFor('Lead');
     const leadUsable = lead?.kind === 'api' || (lead?.detail === 'Claude Code' && snapshot.workers);
@@ -182,10 +182,12 @@ function mountSquadChat(vscode, roles) {
     const seconds = Math.max(0, Math.round((Date.now() - since) / 1000));
     return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, '0')}s`;
   }
+  const clipped = (text, limit) => text.length > limit ? text.slice(0, limit) + '…' : text;
   // One feed per piece of work in flight; several runs may work at the same time.
-  function renderLive(jobs, busy) {
+  function renderLive(jobs, busy, runs = []) {
     const box = byId('chat-live');
-    const lives = busy ? jobs.map(job => job.live).filter(Boolean) : [];
+    const working = busy ? jobs.filter(job => job.live) : [];
+    const lives = working.map(job => job.live);
     box.hidden = !lives.length;
     liveSince = lives[0]?.since;
     if (box.hidden) { liveKey = undefined; return; }
@@ -196,20 +198,24 @@ function mountSquadChat(vscode, roles) {
       box.replaceChildren(...liveFeed(lives[0], true));
       return;
     }
-    box.replaceChildren(...lives.map((live, position) => {
+    box.replaceChildren(...working.map((job, position) => {
       const item = element('div', undefined, 'live-item');
-      item.append(...liveFeed(live, position === 0));
+      const run = runs.find(candidate => candidate.id === job.run);
+      const name = run && (run.title || run.prompt.split('\n', 1)[0]);
+      item.append(...liveFeed(job.live, position === 0, name));
       return item;
     }));
   }
-  function liveFeed(live, first) {
+  function liveFeed(live, first, runName) {
     const head = element('div', undefined, 'live-head');
     const dot = element('span', undefined, 'pulse');
     dot.setAttribute('aria-hidden', 'true');
     const timer = element('span', elapsed(live.since), 'live-time');
     timer.dataset.since = String(live.since);
     if (first) timer.id = 'live-time';
-    head.append(dot, element('strong', live.role), element('span', live.profile, 'subtle'), timer);
+    head.append(dot, element('strong', live.role), element('span', live.profile, 'subtle'));
+    if (runName) head.append(element('span', runName, 'subtle live-run'));
+    head.append(timer);
     const counts = [
       live.reads && `${live.reads} read${live.reads === 1 ? '' : 's'}`,
       live.edits && `${live.edits} edit${live.edits === 1 ? '' : 's'}`,
@@ -459,7 +465,7 @@ function mountSquadChat(vscode, roles) {
       run.steps.forEach((step, index) => {
         const row = element('li', undefined, `step ${step.status}${index === current ? ' current' : ''}`);
         const facts = [
-          step.role + (step.feedback ? ' (feedback)' : ''), multiple && step.repo ? step.repo : '', step.profile, step.model ?? '', stepLabels[step.status] ?? step.status,
+          step.role + (step.feedback ? ' (feedback)' : step.resolves ? ' (merge)' : ''), multiple && step.repo ? step.repo : '', step.profile, step.model ?? '', stepLabels[step.status] ?? step.status,
           step.ms ? duration(step.ms) : '', step.attempts > 1 ? `${step.attempts} tries` : '', step.costUsd ? money(step.costUsd) : ''
         ].filter(Boolean);
         row.append(element('span', facts.join(' · ')));
@@ -467,8 +473,11 @@ function mountSquadChat(vscode, roles) {
           row.append(element('p', `AI review (${step.gate.by}): ${step.gate.verdict === 'pass' ? 'pass' : 'changes requested'}. ${step.gate.reason}`,
             `gate ${step.gate.verdict}`));
         }
-        if (index === current) row.append(stepControls(run, step, index, busy));
-        else if (step.summary) row.append(element('p', step.summary.length > 240 ? step.summary.slice(0, 240) + '…' : step.summary, 'subtle'));
+        if (index === current) {
+          // Why the step stopped comes before what to do about it.
+          if (step.summary && (step.status === 'blocked' || step.status === 'failed')) row.append(element('p', clipped(step.summary, 600), 'subtle why'));
+          row.append(stepControls(run, step, index, busy));
+        } else if (step.summary) row.append(element('p', clipped(step.summary, 240), 'subtle'));
         steps.append(row);
       });
       item.append(steps);
@@ -524,12 +533,15 @@ function mountSquadChat(vscode, roles) {
         control.disabled = disabled;
         control.addEventListener('click', () => send(action, { id: run.id, ...args }));
         actions.append(control);
+        return control;
       };
       if (run.combined) {
         const list = element('ul', undefined, 'combined');
         for (const part of run.combined) {
           const row = element('li', undefined, part.merged ? 'merged' : 'left-out');
-          row.textContent = part.merged ? `Merged: ${part.title}` : `Left out: ${part.title} · conflicts in ${(part.conflicts ?? []).slice(0, 5).join(', ')}`;
+          row.textContent = part.merged
+            ? `Merged: ${part.title}${part.resolved?.length ? ` · conflicts resolved in ${part.resolved.slice(0, 5).join(', ')}` : ''}`
+            : `Left out: ${part.title} · conflicts in ${(part.conflicts ?? []).slice(0, 5).join(', ')}`;
           list.append(row);
         }
         item.append(list);
@@ -540,6 +552,11 @@ function mountSquadChat(vscode, roles) {
       // The finished runs of one parallel plan merge into one new run, where they are checked together.
       if (ready(run) && batchSize(run.batch) > 1) {
         button(`Combine ${batchSize(run.batch)} runs`, 'runCombine', {}, blocked || Boolean(snapshot.chatBusy), 'accent');
+      }
+      // A combined run can have Implement merge what it left out, one step per run.
+      const merging = new Set(run.steps.filter(step => step.resolves && step.status !== 'done' && step.status !== 'skipped').map(step => step.resolves));
+      if (run.combined?.some(part => !part.merged && !merging.has(part.run)) && !trees.some(tree => tree.merged)) {
+        button('Resolve conflicts', 'runResolve', {}, busy, 'accent').title = 'Adds an Implement step for each run that was left out: it merges that run and resolves the conflicts.';
       }
       // With several runs working, each can be stopped on its own.
       if (working && (snapshot.working ?? []).length > 1) button('Stop this run', 'stop', {}, Boolean(pending));

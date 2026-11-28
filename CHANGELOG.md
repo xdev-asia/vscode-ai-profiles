@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.23.0 - 2026-11-28
+
+### Added
+
+- **Resolve the conflicts of a run that was left out.** **Resolve conflicts** on a combined run, or `xdev_squad_resolve` for an AI client, adds an Implement step for each run that was left out. The step opens the merge in the combined worktree and the worker resolves the conflicting files. Squad commits the merge only when no conflict marker is left; otherwise it undoes the merge and the run stays left out.
+
+### Changed
+
+- A step that is blocked or failed shows why above its controls. Before, the reason was only in the chat.
+- When several runs work at the same time, each live feed names its run.
+- The note on a parallel plan mentions combining, and reads correctly when `xdevAi.squad.maxParallelRuns` is 1.
+
 ## 0.22.0 - 2026-11-28
 
 ### Added

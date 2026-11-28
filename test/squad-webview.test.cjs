@@ -395,3 +395,59 @@ test('finished runs of one parallel plan offer to combine, and a combined run sa
   assert.match(cards[1].textContent, /Merged into a combined run/);
   assert.ok(!cards.some(card => buttons(card).some(text => /^Combine/.test(text))), 'one run alone is not offered');
 });
+
+test('with several runs working each feed names its run, and a stopped step says why above its controls', () => {
+  const ui = mount();
+  const run = (id, title, step) => ({
+    id, prompt: `Implement: ${title}`, request: 'Endpoints', title, time: 0, status: 'active', approver: 'human', costUsd: 0, sessions: [],
+    steps: [{ ...job('Implement', undefined, title), ...step }], trees: [{ target: '.', repo: '/w', path: `/t/${id}`, branch: `xdev/squad/${id}`, base: 'b' }]
+  });
+  const live = profile => ({ role: 'Implement', profile, since: Date.now() - 5_000, items: [], reads: 0, edits: 0, commands: 0 });
+  const runs = [run('a', 'Add orders', { status: 'running' }), run('b', 'Add invoices', { status: 'running' }),
+    run('c', 'Add refunds', { status: 'failed', summary: 'The worker reached its budget limit.' }), run('d', 'Add carts', { status: 'pending', summary: 'An older note' })];
+  const working = [{ run: 'a', status: 'Implement is working…', live: live('dev-1') }, { run: 'b', status: 'Implement is working…', live: live('dev-2') }];
+  ui.post(state({ runs, busy: true, chatBusy: false, maxParallel: 3, busyRuns: ['a', 'b'], working }));
+  assert.deepEqual(ui.$$('#chat-live .live-item .live-run').map(node => node.textContent), ['Add orders', 'Add invoices']);
+  const cards = ui.$$('#run-list li.run');
+  assert.equal(cards[2].querySelector('.step .why').textContent, 'The worker reached its budget limit.');
+  assert.ok(cards[2].querySelector('.step .why').compareDocumentPosition(cards[2].querySelector('.step-controls')) & ui.window.Node.DOCUMENT_POSITION_FOLLOWING, 'the reason comes before the controls');
+  assert.equal(cards[3].querySelector('.step .why'), null, 'a step that has not stopped shows no reason');
+
+  // One run alone needs no name on its feed.
+  ui.post(state({ runs, busy: true, chatBusy: false, busyRuns: ['a'], working: working.slice(0, 1) }));
+  assert.equal(ui.$('#chat-live .live-run'), null);
+});
+
+test('a parallel plan under a limit of one says the runs work one at a time', () => {
+  const ui = mount();
+  ui.post(state({ maxParallel: 1, plan: { id: 'p1', parallel: true, repos: ['.'], jobs: [{ ...job('Implement'), repo: '.' }, { ...job('Implement'), repo: '.' }] } }));
+  assert.match(ui.$('#plan-cost').textContent, /^Parallel plan: each task becomes its own run, with its own worktree and branch, and they work one at a time\. You review and merge each run on its own, or combine them when they are finished\./);
+});
+
+test('a combined run offers to resolve the conflicts of what it left out, and says what was resolved', () => {
+  const tree = { target: '.', repo: '/w', path: '/t/z', branch: 'xdev/squad/z', base: 'b' };
+  const combined = (steps, parts) => ({
+    id: 'z', prompt: 'Combined: task a', request: 'Combine: task a; task b', title: 'Combine 1 changes', time: 2, status: 'active', approver: 'human', costUsd: 0, sessions: [], steps, trees: [tree],
+    combined: [{ run: 'a', title: 'task a', branch: 'xdev/squad/a', merged: true }, ...parts]
+  });
+  const left = { run: 'b', title: 'task b', branch: 'xdev/squad/b', merged: false, conflicts: ['README.md'] };
+  const actions = ui => ui.$$('#run-list li.run .actions button').map(node => node.textContent);
+
+  const ui = mount();
+  ui.post(state({ runs: [combined([{ ...job('Review'), status: 'pending' }], [left])], busyRuns: [], working: [] }));
+  const button = ui.$$('#run-list li.run .actions button').find(node => node.textContent === 'Resolve conflicts');
+  assert.match(button.title, /Implement step for each run that was left out/);
+  ui.click(button);
+  assert.deepEqual([ui.last('runResolve').action, ui.last('runResolve').id], ['runResolve', 'z']);
+
+  // While a step merges the run, the offer is gone and the step is marked.
+  const second = mount();
+  second.post(state({ runs: [combined([{ ...job('Implement'), status: 'pending', resolves: 'b' }, { ...job('Review'), status: 'pending' }], [left])], busyRuns: [], working: [] }));
+  assert.ok(!actions(second).includes('Resolve conflicts'));
+  assert.match(second.$('#run-list .step').textContent, /^Implement \(merge\) · alex/);
+
+  const third = mount();
+  third.post(state({ runs: [combined([{ ...job('Implement'), status: 'done', resolves: 'b' }, { ...job('Review'), status: 'pending' }], [{ ...left, merged: true, conflicts: undefined, resolved: ['README.md'] }])], busyRuns: [], working: [] }));
+  assert.ok(!actions(third).includes('Resolve conflicts'));
+  assert.deepEqual(third.$$('#run-list .combined li').map(row => row.textContent), ['Merged: task a', 'Merged: task b · conflicts resolved in README.md']);
+});

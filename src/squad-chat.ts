@@ -12,7 +12,7 @@ import { sessionFolder } from './squad-storage';
 import { readTranscript, type TranscriptItem } from './squad-transcript';
 import { suggestRepository } from './squad-codegraph';
 import {
-  parseGateOutput, parsePlanOutput, parseWorkerOutput, workerModel, type ActivityKind, type WorkerActivity, type WorkerMode, type WorkerRequest,
+  parseGateOutput, parsePlanOutput, parseWorkerOutput, summaryLimit, workerModel, type ActivityKind, type WorkerActivity, type WorkerMode, type WorkerRequest,
   type WorkerResult, type WorkerSettings
 } from './squad-worker';
 import type { FileChange, PushResult, RunWorktree, Worktrees } from './squad-worktree';
@@ -140,6 +140,8 @@ export interface RunStep extends Job {
   question?: string;
   /** The answer to that question, sent into the worker's session when the step continues. */
   answer?: string;
+  /** In a combined run: the left-out run whose branch this step merges, resolving its conflicts. */
+  resolves?: string;
 }
 
 /** One repository's worktree in a run. */
@@ -163,6 +165,8 @@ export interface CombinedRun {
   merged: boolean;
   /** Files changed by this run and by one merged before it; the merge was undone. */
   conflicts?: string[];
+  /** Files whose conflicts a worker resolved to merge this run after all. */
+  resolved?: string[];
 }
 
 export interface RunRecord {
@@ -293,7 +297,7 @@ export interface WorkerHost {
   /** Worker settings for a role, with the allowed commands of the repository the step works in. */
   settings(role: Role, repo?: string): WorkerSettings;
   run(request: WorkerRequest): Promise<string>;
-  worktrees: Pick<Worktrees, 'create' | 'commit' | 'remove' | 'changes' | 'changedFiles' | 'discard'> & Partial<Pick<Worktrees, 'setup' | 'mergeBranch'>>;
+  worktrees: Pick<Worktrees, 'create' | 'commit' | 'remove' | 'changes' | 'changedFiles' | 'discard'> & Partial<Pick<Worktrees, 'setup' | 'mergeBranch' | 'mergedInto' | 'startMerge' | 'finishMerge' | 'abortMerge'>>;
   /** Paths, such as node_modules, linked from the main checkout into each new worktree. */
   worktreeLinks?(): readonly string[];
   /** The branch new worktrees start from, such as origin/dev; HEAD when undefined. */
@@ -1131,7 +1135,7 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
         state.entries.push({
           author: 'Squad', run: runId,
           text: `Combined ${merged.length} of ${results.length} runs on branch ${trees[0].branch}, in a separate worktree; your checkout is not changed.${left.length
-            ? ` Left out because they change the same lines as a run merged before them: ${left.map(result => `“${result.title}” (${(result.conflicts ?? []).slice(0, 5).join(', ')})`).join('; ')}. Ask for those changes again on the combined run with Request changes.`
+            ? ` Left out because they change the same lines as a run merged before them: ${left.map(result => `“${result.title}” (${(result.conflicts ?? []).slice(0, 5).join(', ')})`).join('; ')}. Use Resolve conflicts on the combined run to have Implement merge them, or ask for those changes again with Request changes.`
             : ''} ${steps.length ? `Run ${steps.map(step => step.role).join(' and ')} under Worker runs to check the changes together, or finish the run.` : 'Finish the run to keep the branch.'}`
         });
       }, run);
@@ -1139,6 +1143,77 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
   }
 
   /** The worktree a step works in: its repository's, or the run's only one. */
+  /**
+   * Adds a step to a combined run for each run it left out: Implement merges that run's branch and resolves the
+   * conflicts. The steps go before the checks that are still to run. `sourceInput` names one left-out run, and
+   * `accountInput` the Claude Code account that merges. Without it: Implement's account, else the first account of
+   * the pool, else the account that implemented the run that was left out.
+   */
+  async resolveConflicts(id: unknown, sourceInput?: unknown, accountInput?: unknown): Promise<RunRecord> {
+    this.requireRunIdle(id);
+    const record = this.run(id);
+    if (!record?.combined) throw new Error('Only a combined run can merge the runs it left out.');
+    const worktrees = this.host?.worktrees;
+    if (!worktrees?.mergedInto || !worktrees.startMerge) throw new Error('This window cannot resolve conflicts.');
+    const one = typeof sourceInput === 'string' && sourceInput ? sourceInput : undefined;
+    const open = new Set(record.steps.filter(step => step.resolves && step.status !== 'done' && step.status !== 'skipped').map(step => step.resolves));
+    const left = record.combined.filter(part => !part.merged && !open.has(part.run) && (!one || part.run === one));
+    if (!left.length) throw new Error(one ? 'That run is not left out of this combined run, or a step already merges it.' : 'No run is left out of this combined run, or steps already merge them.');
+    const merged = (record.trees ?? []).find(tree => tree.merged);
+    if (merged) throw new Error(`${merged.branch} is already merged. Start a new request in chat instead.`);
+    const directory = await this.directory();
+    const enabled = directory.terminals.filter(profile => !profile.disabled);
+    const hasAccount = accountInput !== undefined && accountInput !== null && accountInput !== '';
+    const named = hasAccount ? enabled.find(profile => terminalProfileId(profile) === accountInput || profile.name === accountInput) : undefined;
+    if (hasAccount && !named) throw new Error('That is not an enabled Claude Code account here.');
+    const seat = this.agentFor('Implement', directory);
+    const preferred = named ?? (seat?.kind === 'claude' ? undefined : this.poolProfiles(directory, this.options())[0]);
+    const steps: RunStep[] = [];
+    for (const part of left) {
+      const source = this.run(part.run);
+      if (!source) throw new Error(`The run “${part.title}” was removed, so its branch can no longer be merged.`);
+      // A run planned with its own accounts may have no Implement seat: the account that made the change merges it.
+      const author = [...source.steps].reverse().find(step => step.role === 'Implement' && step.kind === 'claude');
+      const pooled = preferred ?? (seat?.kind === 'claude' ? undefined : author && enabled.find(profile => terminalProfileId(profile) === author.accountId));
+      const agent = pooled ? claudeAgent(pooled) : seat;
+      if (agent?.kind !== 'claude') throw new Error('Assign a Claude Code account to Implement under Roles to resolve conflicts.');
+      for (const tree of record.trees ?? []) {
+        const theirs = (source.trees ?? []).find(candidate => candidate.target === tree.target && candidate.commit);
+        if (!theirs || await worktrees.mergedInto(tree, theirs.branch)) continue;
+        const files = (part.conflicts ?? []).slice(0, 10).join(', ');
+        steps.push({
+          role: 'Implement', profile: agent.name, kind: 'claude', accountId: agent.id, revision: agent.revision, repo: tree.target, status: 'pending',
+          brief: `Merge the change “${part.title}” into this branch. It was left out because it and a change merged before it edit the same lines${files ? ` (${files})` : ''}. Resolve each conflict so that what both changes intend is kept.`,
+          resolves: part.run, ...(pooled ? { pooled: true } : {})
+        });
+      }
+    }
+    if (!steps.length) throw new Error('The branches of those runs are already merged into this run.');
+    await this.updateRun(record.id, (saved, state) => {
+      const next = saved.status === 'active' ? this.currentStep(saved) : -1;
+      saved.steps.splice(next < 0 ? saved.steps.length : next, 0, ...steps);
+      saved.status = 'active';
+      state.entries.push({ author: 'You', to: 'Implement', run: record.id, text: `Merge what was left out and resolve the conflicts: ${left.map(part => `“${part.title}”`).join(', ')}` });
+    });
+    return this.run(record.id)!;
+  }
+
+  /** Records that a step merged a left-out run. The run counts as merged once no other step still merges it in another repository. */
+  private recordResolved(saved: RunRecord, state: Thread, index: number, files: readonly string[]): void {
+    const source = saved.steps[index].resolves;
+    const part = saved.combined?.find(candidate => candidate.run === source);
+    if (!part) return;
+    if (files.length) part.resolved = [...new Set([...(part.resolved ?? []), ...files])].slice(0, 50);
+    if (saved.steps.some((other, position) => position !== index && other.resolves === source && other.status !== 'done')) return;
+    part.merged = true;
+    delete part.conflicts;
+    const done = saved.combined!.filter(candidate => candidate.merged);
+    saved.title = `Combine ${done.length} changes`;
+    saved.prompt = shorten(`Combined: ${done.map(candidate => candidate.title).join('; ')}`, 500);
+    const origin = state.runs?.find(candidate => candidate.id === source);
+    if (origin) origin.combinedInto = saved.id;
+  }
+
   treeFor(record: RunRecord, step: Pick<Job, 'repo'>): RunTree | undefined {
     const trees = record.trees ?? [];
     return trees.find(tree => tree.target === step.repo) ?? (trees.length === 1 ? trees[0] : undefined);
@@ -1248,11 +1323,41 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
     await this.updateRun(id, saved => Object.assign(saved.steps[index], { brief, status: 'running', gate: undefined, attempts: (saved.steps[index].attempts ?? 0) + 1 }), run);
     const context = this.stepContext(record, index);
     const elapsed = (saved: RunStep) => (saved.ms ?? 0) + Date.now() - started;
+    /** The merge this step has open in its worktree, until it is committed or undone. */
+    let merging: { tree: RunTree; change: string; branch: string; conflicts: string[] } | undefined;
+    const undoMerge = async () => {
+      const open = merging;
+      merging = undefined;
+      if (open) await this.host?.worktrees.abortMerge?.(open.tree).catch(() => undefined);
+    };
     try {
       if (agent.kind === 'claude') {
         await this.host!.checkDisk?.();
         await this.host!.prepare?.();
         const tree = this.treeFor(record, step)!;
+        if (step.resolves) {
+          const part = record.combined?.find(candidate => candidate.run === step.resolves);
+          const theirs = this.run(step.resolves)?.trees?.find(candidate => candidate.target === tree.target && candidate.commit);
+          const worktrees = this.host!.worktrees;
+          if (!part || !theirs || !worktrees.startMerge || !worktrees.finishMerge) throw new Error('The run this step merges is no longer available. Skip the step.');
+          run.status = `Merging ${part.title.slice(0, 60)}…`;
+          this.changed();
+          const { conflicts } = await worktrees.startMerge(tree, theirs.branch, `Merge ${part.title}`, `Changes before merging ${part.title}`);
+          if (!conflicts.length) {
+            await this.updateRun(id, (saved, state) => {
+              Object.assign(saved.steps[index], { status: 'done', summary: 'Merged without conflicts; no worker was needed.', question: undefined, answer: undefined, ms: elapsed(saved.steps[index]) });
+              this.recordResolved(saved, state, index, []);
+              state.entries.push({ author: 'Squad', run: id, text: `Merged “${part.title}” without conflicts.` });
+            }, run);
+            return 'done';
+          }
+          merging = { tree, change: part.title, branch: theirs.branch, conflicts };
+          run.status = `${step.role} is working…`;
+        }
+        const mergeNote = merging && {
+          change: merging.change, branch: merging.branch, conflicting_files: merging.conflicts,
+          note: 'A merge of this branch is open in your working directory and stopped on these files. Edit them so that no conflict marker (<<<<<<<, =======, >>>>>>>) is left and what both sides intend is kept; "git diff" shows both sides. Do not run git merge, commit, add, checkout, reset, restore, or stash: the merge is committed for you when you report "done". If you cannot tell what is right, report "blocked" with your question; the merge is then undone and opened again when you continue, with the conflict markers back.'
+        };
         const target = tree.target !== '.' ? tree.target : undefined;
         const others = (record.trees ?? []).filter(other => other !== tree).map(other => repoName(other.target));
         const changed = step.role !== 'Implement'
@@ -1269,7 +1374,7 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
           prompt: JSON.stringify({
             request: record.request, task: brief, repository: target, other_repositories: others.length ? others : undefined,
             // The step was blocked on a question; this is the answer.
-            your_question: step.answer ? step.question : undefined, answer: step.answer,
+            your_question: step.answer ? step.question : undefined, answer: step.answer, merge: mergeNote || undefined,
             allowed_commands: step.role === 'Review' ? undefined : settings.allowedCommands,
             // Names only: the values reach the worker's commands as environment variables, never the prompt.
             environment_variables: environment,
@@ -1289,6 +1394,7 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
                 ...(step.answer
                   ? { answer: step.answer, note: 'This answers the question you reported as "blocked". Continue your earlier session in this worktree and finish the task.' }
                   : { task: brief, note: 'Continue your earlier session in this worktree.' }),
+                merge: mergeNote || undefined,
                 allowed_commands: step.role === 'Review' ? undefined : settings.allowedCommands, environment_variables: environment,
                 changed_files: changed.length ? changed : undefined
               })
@@ -1302,7 +1408,25 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
         run.signal.throwIfAborted();
         const problems = run.live?.denied ?? 0;
         run.live = undefined;
-        const result = parseWorkerOutput(stdout);
+        let result = parseWorkerOutput(stdout);
+        let resolved: string[] | undefined;
+        if (merging) {
+          const open = merging;
+          const remaining = result.status === 'done' ? await this.host!.worktrees.finishMerge!(open.tree, open.conflicts) : undefined;
+          if (remaining && !remaining.length) {
+            merging = undefined;
+            resolved = open.conflicts;
+          } else {
+            // Not resolved: the worktree goes back to before the merge, and the run stays left out.
+            await undoMerge();
+            if (remaining) {
+              result = {
+                ...result, status: 'blocked', question: undefined,
+                summary: shorten(`Conflict markers remain in ${remaining.join(', ')}, so the merge was undone. ${result.summary}`, summaryLimit)
+              };
+            }
+          }
+        }
         await this.memory.add(result.memory, step.role);
         // Saved under the account that wrote them, so every other account can read them later.
         const documents = result.artifacts.length ? await this.artifacts?.saveAll(result.artifacts, agent.name, id).catch(() => []) ?? [] : [];
@@ -1318,6 +1442,10 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
             costUsd: (current.costUsd ?? 0) + result.costUsd, problems: (current.problems ?? 0) + problems
           });
           state.entries.push({ ...this.reply(step.role, agent, reported, result.costUsd), run: id });
+          if (resolved) {
+            this.recordResolved(saved, state, index, resolved);
+            state.entries.push({ author: 'Squad', run: id, text: `Merged “${saved.combined?.find(part => part.run === step.resolves)?.title ?? 'the run'}”: ${step.role} resolved the conflicts in ${resolved.slice(0, 5).join(', ')}. Review the result with Changes.` });
+          }
           if (result.status === 'blocked') {
             state.entries.push({ author: 'Squad', run: id, text: `${step.role} is blocked${result.question ? ` and asks: ${result.question}` : ''}. Answer it to continue its session, edit the brief and run the step again, continue it in a terminal, skip it, or finish the run.` });
           }
@@ -1344,6 +1472,7 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
       return 'done';
     } catch (error) {
       run.live = undefined;
+      await undoMerge();
       const detail = run.signal.aborted ? 'Step stopped.' : error instanceof Error ? error.message : 'The step failed.';
       await this.updateRun(id, saved => { Object.assign(saved.steps[index], { status: 'failed', ms: elapsed(saved.steps[index]) }); }).catch(() => undefined);
       throw new Error(`${step.role}: ${detail}`, { cause: error });
@@ -1477,8 +1606,11 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
     if (!record) return;
     const results = new Map<string, Awaited<ReturnType<WorkerHost['worktrees']['commit']>>>();
     const issues: string[] = [];
+    const interrupted = record.steps.some(step => step.resolves);
     for (const tree of record.trees ?? []) {
       try {
+        // A step that merges a left-out run closes or undoes its merge; one left open was interrupted.
+        if (interrupted) await this.host!.worktrees.abortMerge?.(tree);
         results.set(tree.target, await this.host!.worktrees.commit(tree, runName(record)));
       } catch (error) {
         issues.push(`${(record.trees?.length ?? 0) > 1 ? `${repoName(tree.target)}: ` : ''}${error instanceof Error ? error.message : 'Could not commit the worktree.'}`);

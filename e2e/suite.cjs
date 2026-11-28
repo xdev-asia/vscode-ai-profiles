@@ -225,6 +225,39 @@ exports.run = async () => {
     }
   });
 
+  await step('a run left out of a combined run is merged by a worker that resolves the conflict', async () => {
+    const { client: session, call } = await client();
+    try {
+      const { plan } = await call('xdev_squad_submit_plan', {
+        request: 'Trial: two changes to one file', summary: 'Two tasks that write the same file', parallel: true,
+        tasks: [{ role: 'Implement', brief: 'Set STATUS.md to red.', account }, { role: 'Implement', brief: 'Set STATUS.md to blue.', account }]
+      });
+      const approved = await within(call('xdev_squad_approve_plan', { planId: plan.id }), 60_000, 'Approving the plan');
+      for (const run of approved.runs) {
+        const state = await within(call('xdev_squad_run_step', { runId: run.id, waitSeconds: 60 }), 70_000, 'Running a step');
+        if (state.run.status !== 'done') throw new Error(`run ${run.id} did not finish: ${JSON.stringify(state.run)}`);
+      }
+      const { run } = await within(call('xdev_squad_combine', { runIds: approved.runs.map(item => item.id) }), 60_000, 'Combining the runs');
+      const left = run.combined.filter(part => !part.merged);
+      if (left.length !== 1 || left[0].conflicts?.[0] !== 'STATUS.md') throw new Error(`expected one run left out over STATUS.md: ${JSON.stringify(run.combined)}`);
+      const added = await call('xdev_squad_resolve', { runId: run.id });
+      if (added.run.steps[0]?.resolvesRunId !== left[0].runId) throw new Error(`no step merges the run that was left out: ${JSON.stringify(added.run.steps)}`);
+      const state = await within(call('xdev_squad_run_step', { runId: run.id, waitSeconds: 60 }), 70_000, 'Resolving the conflict');
+      if (state.run.steps[0].status !== 'done' || state.run.combined.some(part => !part.merged)) throw new Error(`the conflict was not resolved: ${JSON.stringify(state.run)}`);
+      const tree = state.run.repositories[0];
+      const content = readFileSync(join(tree.worktree, 'STATUS.md'), 'utf8');
+      if (!/red/.test(content) || !/blue/.test(content) || /^[<>=]{7}/m.test(content)) throw new Error(`STATUS.md does not hold both changes: ${JSON.stringify(content)}`);
+      // With no Review or Tests account here, the merge was the last step and the run has closed itself.
+      const closed = state.run.status === 'active'
+        ? (await within(call('xdev_squad_finish_run', { runId: run.id }), 60_000, 'Finishing the combined run')).run : state.run;
+      if (!closed.repositories[0].commit) throw new Error(`the combined branch has no commit: ${JSON.stringify(closed)}`);
+      if (existsSync(join(folder, 'STATUS.md'))) throw new Error('the main checkout was changed');
+      return `${tree.branch}: ${state.run.combined.map(part => `${part.task}${part.resolved ? ' (resolved)' : ''}`).join(' + ')}`;
+    } finally {
+      await session.close();
+    }
+  });
+
   await step('a blocked worker asks a question, and the answer continues its session', async () => {
     const { client: session, call } = await client();
     try {
