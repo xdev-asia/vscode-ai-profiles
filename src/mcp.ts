@@ -184,9 +184,18 @@ export function xdevMcpTools(squad: SquadChat, accounts: Accounts, profiles: Ter
   };
   const workflowTool = (name: string, description: string, readOnly: boolean,
     properties: Properties, run: McpTool['run']): McpTool =>
-    tool(`xdev_${name}`, description, readOnly, properties, (args, signal) => {
+    tool(`xdev_${name}`, description, readOnly, properties, async (args, signal) => {
       squad.customizations.requireTool('xdev_sdlc');
-      return run(args, signal);
+      if (readOnly) return run(args, signal);
+      // A change to the workflow is written to the audit log, like every other change made through MCP.
+      try {
+        const result = await run(args, signal);
+        host?.audit?.(name, true, args);
+        return result;
+      } catch (error) {
+        host?.audit?.(name, false, args, error);
+        throw error;
+      }
     });
 
   const findTerminal = async (id: unknown): Promise<TerminalProfile> => {
@@ -216,7 +225,10 @@ export function xdevMcpTools(squad: SquadChat, accounts: Accounts, profiles: Ter
       requireManage();
       try {
         const result = await run(args, signal);
-        host?.audit?.(name, true, args);
+        // A change the user declined did not happen; a request that waits for an answer is recorded when it is answered.
+        const outcome = result as { done?: unknown; needsConfirmation?: unknown } | undefined;
+        if (outcome?.done === false && !outcome.needsConfirmation) host?.audit?.(name, false, args, new Error('Declined by the user.'));
+        else host?.audit?.(name, true, args);
         return result;
       } catch (error) {
         host?.audit?.(name, false, args, error);

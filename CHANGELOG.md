@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.20.1 - 2026-11-28
+
+### Fixed
+
+- **Stop this run** stayed on a run after the other work had ended, and did not appear when a chat request and one run were in flight.
+- Two VS Code windows that saved shared artifacts at the same moment could lose one of them. The index is now changed by one window at a time.
+- An artifact that another account replaces no longer keeps the link to the first account's claude.ai page, which still shows the old document. The author's own saves keep the link.
+- The audit log recorded an account change that you declined in VS Code as made. It now says the change was declined.
+- A run that was reopened or started after a plan was approved is not cleaned up to make room for the new run.
+- `xdev_squad_wait` without a run id returned at once while another VS Code window was working.
+
+### Changed
+
+- Changes to the SDLC workflow made through MCP (`xdev_workflow_start`, `xdev_workflow_submit_draft`, and the others that write) are written to the audit log.
+
 ## 0.20.0 - 2026-11-28
 
 ### Added

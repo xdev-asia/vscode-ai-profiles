@@ -28,10 +28,15 @@ test('shared artifacts are saved, replaced by name, read, and removed', async t 
   assert.equal(await readFile(artifacts.file(first), 'utf8'), '# Design\n');
   assert.match(artifacts.file(first), /\.md$/);
 
-  // Another account saves under the same name: one artifact, new content and author, the page link kept.
+  // The author saves again without a link: the page it can update is kept.
+  const again = await artifacts.save({ name: 'API design', content: '# Design v2\n' }, 'dev-1');
+  assert.deepEqual([again.version, again.link], [2, 'https://claude.ai/artifact/abc']);
+
+  // Another account saves under the same name: one artifact, new content and author. The page belongs to the
+  // first account and still shows the old document, so the link goes.
   const second = await artifacts.save({ name: 'api DESIGN', content: '<h1>Design</h1>', kind: 'html' }, 'dev-2');
   assert.deepEqual([second.id, second.kind, second.author, second.version, second.link, second.run, second.description],
-    [first.id, 'html', 'dev-2', 2, 'https://claude.ai/artifact/abc', 'run-1', 'Endpoints and errors']);
+    [first.id, 'html', 'dev-2', 3, undefined, 'run-1', 'Endpoints and errors']);
   assert.equal(existsSync(artifacts.file(first)), false, 'the file of the old kind is gone');
   assert.equal((await artifacts.list()).length, 1);
   assert.equal((await artifacts.read('API DESIGN')).content, '<h1>Design</h1>');
@@ -216,4 +221,24 @@ test('the panel lists shared artifacts with their author and claude.ai page', ()
   window.dispatchEvent(new window.MessageEvent('message', { data: { type: 'workspaceSettled' } }));
   click($('#artifact-add'));
   assert.deepEqual(sent.at(-1), { type: 'workspace', action: 'addArtifact' });
+});
+
+test('two windows that save at the same time both keep their artifact', async t => {
+  const { dir } = await store(t);
+  const { SquadArtifacts } = require('../dist/squad-artifacts.js');
+  // Each window has its own store object on the same folder.
+  const windows = Array.from({ length: 4 }, () => new SquadArtifacts(join(dir, 'shared')));
+  await Promise.all(windows.flatMap((window, index) => [0, 1, 2].map(round =>
+    window.save({ name: `Doc ${index}-${round}`, content: `from window ${index}` }, `dev-${index}`))));
+  const names = (await windows[0].list()).map(item => item.name).sort();
+  assert.equal(names.length, 12, `every save is in the index: ${names.join(', ')}`);
+  assert.equal(existsSync(join(dir, 'shared', 'index.lock')), false, 'the lock is released');
+
+  // A lock left by a window that died is taken over after a while.
+  const { mkdirSync, utimesSync } = require('node:fs');
+  mkdirSync(join(dir, 'shared', 'index.lock'));
+  const old = new Date(Date.now() - 60_000);
+  utimesSync(join(dir, 'shared', 'index.lock'), old, old);
+  await windows[1].save({ name: 'After a crash', content: 'still works' }, 'dev-1');
+  assert.equal((await windows[2].list()).length, 13);
 });

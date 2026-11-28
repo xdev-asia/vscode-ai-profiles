@@ -295,7 +295,7 @@ MCP listens on a loopback address on the workspace host, including on code-serve
 | `read` (default) | `xdev_accounts_list` (tags, note, disabled flag, plan, sign-in state, quota), `xdev_account_usage`, `xdev_accounts_pick` (the enabled, signed-in account with the most quota left, by provider or tag). |
 | `manage` | Also `xdev_account_rename`, `xdev_account_set_tags`, `xdev_account_set_note`, `xdev_account_set_disabled`, `xdev_account_refresh_usage`, `xdev_terminal_open`, `xdev_api_profile_select`, `xdev_squad_set_pool`. These always ask you to confirm (in a VS Code dialog, or in the client with `xdevAi.mcp.confirmIn`): `xdev_terminal_sign_in`, `xdev_terminal_open_bypass`, `xdev_account_remove`, `xdev_api_profile_add` (you type the key; the client never sees it), `xdev_api_profile_remove`. |
 
-Try “Use xDev AI to tag my Claude accounts by team and put the ones with the most quota in the Squad pool.” MCP never returns API keys, sign-in files, or account directories. Every change and failed attempt is written to the audit log.
+Try “Use xDev AI to tag my Claude accounts by team and put the ones with the most quota in the Squad pool.” MCP never returns API keys, sign-in files, or account directories. A change you decline is recorded as declined. Every change and failed attempt is written to the audit log.
 
 ### Lead Squad from an MCP client
 

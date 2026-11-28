@@ -432,7 +432,7 @@ function mountSquadChat(vscode, roles) {
     for (const id of diffs.keys()) if (!runs.some(run => run.id === id)) diffs.delete(id);
     const deployTargets = lastState?.sync?.deploy ?? {};
     const deployFor = target => deployTargets[target] ?? deployTargets[target.split('/').at(-1)];
-    const key = JSON.stringify(runs) + String(blocked) + JSON.stringify([...busyRuns]) + JSON.stringify([...diffs]) + JSON.stringify(deployTargets);
+    const key = JSON.stringify(runs) + String(blocked) + JSON.stringify([...busyRuns]) + String((snapshot.working ?? []).length) + JSON.stringify([...diffs]) + JSON.stringify(deployTargets);
     if (key === runsKey) return;
     runsKey = key;
     byId('run-list').replaceChildren(...runs.map(run => {

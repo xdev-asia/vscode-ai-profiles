@@ -72,7 +72,7 @@ async function squadWith({ options = {}, plan, holdPlan = false } = {}) {
     waiting.get(task)();
     waiting.delete(task);
   };
-  return { chat, accounts, profiles, started, worktrees, release, until };
+  return { chat, accounts, profiles, started, worktrees, release, until, storage };
 }
 
 function leadTools(t, chat, accounts, profiles) {
@@ -277,4 +277,36 @@ test('a message through MCP returns with the answer of Lead and does not wait fo
   await release('alpha');
   await release('beta');
   await until(() => !chat.snapshot().busy, 'all work ends');
+});
+
+test('a wait goes on while another window works, and a run that was reopened is not cleaned up to make room', { timeout: 20_000 }, async t => {
+  const { chat, accounts, profiles, storage, worktrees } = await squadWith();
+  const call = leadTools(t, chat, accounts, profiles);
+  const key = 'squadChat.v1';
+
+  // Another window marks its work in the shared state.
+  await storage.update(key, { ...(storage.get(key) ?? { entries: [] }), inFlight: { owner: 'another-window', beat: Date.now(), status: 'Implement is working…' } });
+  assert.equal(chat.snapshot().remote, true);
+  const began = Date.now();
+  const waited = await call('squad_wait', { seconds: 1 });
+  assert.equal(waited.finished, false, 'nothing ended: the other window still works');
+  assert.ok(Date.now() - began >= 900, 'the call waited for its time');
+  await storage.update(key, { ...storage.get(key), inFlight: undefined });
+  assert.equal((await call('squad_wait', { seconds: 1 })).finished, true);
+
+  // Ten finished and merged runs fill the list; the oldest was reopened with feedback and is open again.
+  const merged = Array.from({ length: 10 }, (_, index) => ({
+    id: `0000000${index}-0000-0000-0000-000000000000`, request: `Old ${index}`, prompt: `Old ${index}`, time: index, finished: index + 1, status: 'done',
+    approver: 'human', costUsd: 0, sessions: [], steps: [{ role: 'Implement', brief: 'x', profile: 'Implement account', kind: 'claude', accountId: idOf(1), status: 'done' }],
+    trees: [{ target: '.', repo: '/repo', path: `/repo/.wt/old${index}`, branch: `xdev/squad/old${index}`, base: 'b', commit: 'c', files: 1, merged: 5 }]
+  })).reverse();
+  const oldest = merged.at(-1);
+  await storage.update(key, {
+    ...storage.get(key),
+    runs: merged.map(run => run.id === oldest.id ? { ...run, status: 'active', trees: [{ ...run.trees[0], merged: undefined }] } : run)
+  });
+  const { plan } = await call('squad_submit_plan', { request: 'One more', summary: 'One more', tasks: [{ role: 'Tests', brief: 'One more task' }] });
+  await assert.rejects(call('squad_approve_plan', { planId: plan.id }), /Squad keeps 10 runs per project/, 'an open run does not make room');
+  assert.ok(chat.run(oldest.id), 'the reopened run is kept');
+  assert.deepEqual(worktrees.removed, []);
 });
