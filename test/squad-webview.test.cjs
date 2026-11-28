@@ -331,3 +331,34 @@ test('one run can be stopped on its own while a chat request is also in flight',
   assert.ok(!buttons().includes('Stop this run'));
   assert.equal(ui.$('#stop-chat').textContent, 'Stop run');
 });
+
+test('a blocked step shows the question and sends the answer; a session opens as a transcript', () => {
+  const ui = mount();
+  const run = {
+    id: 'r1', prompt: 'Health endpoint', request: 'Health endpoint', time: 0, status: 'active', approver: 'human', costUsd: 0,
+    sessions: [{ role: 'Implement', profileId: 'claude:1', profile: 'alex', sessionId: 'sess-1', repo: '.' }],
+    steps: [{ ...job('Implement'), status: 'blocked', summary: 'Two routers exist', question: 'Which router: v1 or v2?' }],
+    trees: [{ target: '.', repo: '/w', path: '/t/a', branch: 'xdev/squad/r1', base: 'b' }]
+  };
+  ui.post(state({ runs: [run], busyRuns: [], working: [] }));
+  assert.equal(ui.$('#run-list .step-controls .question').textContent, 'Implement asks: Which router: v1 or v2?');
+  const answer = ui.$('#run-list .step-controls textarea[aria-label="Answer to Implement"]');
+  const button = ui.$$('#run-list .step-controls button').find(node => node.textContent === 'Send answer');
+  assert.equal(button.disabled, true, 'an empty answer is not sent');
+  answer.value = 'Use v2';
+  answer.dispatchEvent(new ui.window.Event('input'));
+  assert.equal(button.disabled, false);
+  ui.click(button);
+  assert.deepEqual([ui.last('stepAnswer').id, ui.last('stepAnswer').answer], ['r1', 'Use v2']);
+
+  const second = mount();
+  second.post(state({ runs: [run], busyRuns: [], working: [] }));
+  second.click(second.$$('#run-list li.run .actions button').find(node => node.textContent === 'Transcript Implement'));
+  assert.deepEqual([second.last('runTranscript').id, second.last('runTranscript').session], ['r1', 'sess-1']);
+
+  // A step that is not blocked has no answer box.
+  const third = mount();
+  third.post(state({ runs: [{ ...run, steps: [{ ...job('Implement'), status: 'pending' }] }], busyRuns: [], working: [] }));
+  assert.equal(third.$('#run-list .step-controls .question'), null);
+  assert.ok(!third.$$('#run-list .step-controls button').some(node => node.textContent === 'Send answer'));
+});

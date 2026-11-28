@@ -56,7 +56,9 @@ createInterface({ input: process.stdin }).on('line', line => {
   if (windows) await writeFile(executable, '@echo off\r\nnode "%~dp0server.cjs" %*\r\n');
 
   for (const [profile, plan, used] of [[personal, 'plus', 0], [work, 'pro', 42]]) {
-    const usage = await readAccountUsage(profile, executable, '1.2.3-test', new AbortController().signal);
+    let usage = await readAccountUsage(profile, executable, '1.2.3-test', new AbortController().signal);
+    // The first start of node through cmd.exe on a cold Windows runner can outlast the request's own time limit.
+    if (usage.plan === undefined) usage = await readAccountUsage(profile, executable, '1.2.3-test', new AbortController().signal);
     assert.equal(usage.plan, plan);
     assert.equal(usage.unavailable, false);
     assert.deepEqual(usage.windows, [

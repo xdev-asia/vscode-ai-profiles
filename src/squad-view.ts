@@ -14,6 +14,7 @@ import { readClaudeQuota } from './account-usage';
 import { allEnvFiles, envFilesFor, loadEnv } from './squad-env';
 import { mcpControl, mcpServerName, onMcpChanged } from './mcp-control';
 import { artifactContentLimit, artifactKinds, artifactLink, SquadArtifacts } from './squad-artifacts';
+import { transcriptMarkdown } from './squad-transcript';
 import { readMcpGrants, readProjectMcp, workerMcp, type McpGrant } from './squad-mcp';
 import { folderSize, formatBytes, freeBytes, removeFolders, sessionFolder, sessionFolders } from './squad-storage';
 import { FileMemento, workspaceKey } from './squad-state';
@@ -932,6 +933,10 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
           return;
         }
         case 'runResume': return this.resumeSession(message.id, message.session);
+        case 'runTranscript': return this.showTranscript(message.id, message.session);
+        case 'stepAnswer':
+          await this.teamChat.runStep(message.id, undefined, undefined, message.answer ?? '');
+          return;
         case 'runMerge': return this.mergeRun(message.id);
         case 'stepRun':
           await this.teamChat.runStep(message.id, message.brief);
@@ -1370,6 +1375,14 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
     const artifacts = this.teamChat.artifacts;
     if (!artifacts) throw new Error('Shared artifacts are not available in this window.');
     return artifacts;
+  }
+
+  /** Opens what a worker did in one session as a read-only Markdown document. */
+  private async showTranscript(id: unknown, sessionId: unknown): Promise<void> {
+    const { session, items } = await this.teamChat.transcript(id, sessionId);
+    const title = `${session.role} · ${session.profile}${session.repo && session.repo !== '.' ? ` · ${session.repo}` : ''}`;
+    const document = await vscode.workspace.openTextDocument({ language: 'markdown', content: transcriptMarkdown(title, items) });
+    await vscode.window.showTextDocument(document, { preview: true });
   }
 
   private async resumeSession(id: unknown, sessionId: unknown): Promise<void> {

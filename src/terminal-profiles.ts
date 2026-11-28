@@ -4,11 +4,15 @@ import { access, mkdir, readFile, readdir, realpath, rename, rm, stat, unlink, w
 import { homedir } from 'node:os';
 import { basename, delimiter, extname, isAbsolute, join } from 'node:path';
 
-export const terminalProviders = {
+export const terminalProviders: Record<'claude' | 'codex' | 'gemini', { name: string; bin: string; setup: string; usage: string; note?: string }> = {
   claude: { name: 'Claude Code', bin: 'claude', setup: 'https://code.claude.com/docs/en/setup', usage: '/usage' },
   codex: { name: 'Codex', bin: 'codex', setup: 'https://developers.openai.com/codex/cli', usage: '/status' },
-  gemini: { name: 'Gemini CLI', bin: 'gemini', setup: 'https://geminicli.com/docs/get-started/', usage: '/stats model' }
-} as const;
+  gemini: {
+    name: 'Gemini CLI', bin: 'gemini', setup: 'https://geminicli.com/docs/get-started/', usage: '/stats model',
+    // Since 18 June 2026 Google no longer serves Gemini CLI to free, AI Pro, and AI Ultra accounts.
+    note: 'Paid API key, Vertex AI, or Gemini Code Assist Standard/Enterprise only'
+  }
+};
 
 export type TerminalProvider = keyof typeof terminalProviders;
 export const terminalProviderIds = Object.keys(terminalProviders) as TerminalProvider[];

@@ -14,6 +14,8 @@ export type WorkerMode = 'plan' | 'ask' | 'work' | 'gate';
 export interface WorkerReport {
   status: WorkerStatus;
   summary: string;
+  /** What a blocked worker needs to know to continue. */
+  question?: string;
   filesChanged: string[];
   tests: string;
   memory: string[];
@@ -99,6 +101,7 @@ const reportSchema = {
   properties: {
     status: { type: 'string', enum: workerStatuses },
     summary: { type: 'string', description: 'What you did or found, for the Lead. Short.' },
+    question: { type: 'string', description: 'Only with status "blocked": the one question whose answer lets you continue. The answer comes back into this session.' },
     files_changed: { type: 'array', items: { type: 'string' } },
     tests: { type: 'string', description: 'Commands run and their outcome, or empty.' },
     memory: {
@@ -416,9 +419,11 @@ export function parseWorkerOutput(stdout: string): WorkerResult {
   const status = workerStatuses.find(candidate => candidate === report.status);
   const summary = typeof report.summary === 'string' ? report.summary.trim().slice(0, summaryLimit) : '';
   if (!status || !summary) throw new Error('The worker did not return a structured report.');
+  const question = status === 'blocked' && typeof report.question === 'string' ? report.question.trim().slice(0, 1_000) : '';
   return {
     status,
     summary,
+    ...(question ? { question } : {}),
     filesChanged: strings(report.files_changed, 300, 100),
     tests: typeof report.tests === 'string' ? report.tests.trim().slice(0, 1_000) : '',
     memory: strings(report.memory, memoryNoteLimit, 5),
