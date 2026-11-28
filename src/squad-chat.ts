@@ -1172,6 +1172,7 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
     for (const part of left) {
       const source = this.run(part.run);
       if (!source) throw new Error(`The run “${part.title}” was removed, so its branch can no longer be merged.`);
+      if (source.status === 'active' || this.busyRun(source.id)) throw new Error(`Finish the run “${runName(source)}” before merging it.`);
       // A run planned with its own accounts may have no Implement seat: the account that made the change merges it.
       const author = [...source.steps].reverse().find(step => step.role === 'Implement' && step.kind === 'claude');
       const pooled = preferred ?? (seat?.kind === 'claude' ? undefined : author && enabled.find(profile => terminalProfileId(profile) === author.accountId));
@@ -1190,6 +1191,8 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
     }
     if (!steps.length) throw new Error('The branches of those runs are already merged into this run.');
     await this.updateRun(record.id, (saved, state) => {
+      // A step of this run may have started while git was asked about the branches.
+      this.requireRunIdle(record.id);
       const next = saved.status === 'active' ? this.currentStep(saved) : -1;
       saved.steps.splice(next < 0 ? saved.steps.length : next, 0, ...steps);
       saved.status = 'active';
@@ -1198,13 +1201,23 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
     return this.run(record.id)!;
   }
 
-  /** Records that a step merged a left-out run. The run counts as merged once no other step still merges it in another repository. */
-  private recordResolved(saved: RunRecord, state: Thread, index: number, files: readonly string[]): void {
+  /** Whether the branch of a left-out run is now merged in every repository of the combined run that it changed. */
+  private async wholeMerged(record: RunRecord, source: string): Promise<boolean> {
+    const theirs = (this.run(source)?.trees ?? []).filter(tree => tree.commit);
+    for (const tree of record.trees ?? []) {
+      const branch = theirs.find(candidate => candidate.target === tree.target)?.branch;
+      if (branch && !(await this.host!.worktrees.mergedInto!(tree, branch))) return false;
+    }
+    return true;
+  }
+
+  /** Records that a step merged a left-out run. `whole` says that no repository still lacks it, so the run counts as merged. */
+  private recordResolved(saved: RunRecord, state: Thread, index: number, files: readonly string[], whole: boolean): void {
     const source = saved.steps[index].resolves;
     const part = saved.combined?.find(candidate => candidate.run === source);
     if (!part) return;
     if (files.length) part.resolved = [...new Set([...(part.resolved ?? []), ...files])].slice(0, 50);
-    if (saved.steps.some((other, position) => position !== index && other.resolves === source && other.status !== 'done')) return;
+    if (!whole) return;
     part.merged = true;
     delete part.conflicts;
     const done = saved.combined!.filter(candidate => candidate.merged);
@@ -1325,10 +1338,13 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
     const elapsed = (saved: RunStep) => (saved.ms ?? 0) + Date.now() - started;
     /** The merge this step has open in its worktree, until it is committed or undone. */
     let merging: { tree: RunTree; change: string; branch: string; conflicts: string[] } | undefined;
-    const undoMerge = async () => {
+    /** Undoes the open merge. Returns what to tell the user when that fails; the next run of the step, or finishing the run, tries again. */
+    const undoMerge = async (): Promise<string> => {
       const open = merging;
       merging = undefined;
-      if (open) await this.host?.worktrees.abortMerge?.(open.tree).catch(() => undefined);
+      if (!open) return '';
+      return this.host!.worktrees.abortMerge!(open.tree).then(() => '', (error: unknown) =>
+        ` The merge could not be undone (${error instanceof Error ? error.message.slice(0, 200) : 'unknown error'}); run the step again or finish the run to retry.`);
     };
     try {
       if (agent.kind === 'claude') {
@@ -1339,14 +1355,15 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
           const part = record.combined?.find(candidate => candidate.run === step.resolves);
           const theirs = this.run(step.resolves)?.trees?.find(candidate => candidate.target === tree.target && candidate.commit);
           const worktrees = this.host!.worktrees;
-          if (!part || !theirs || !worktrees.startMerge || !worktrees.finishMerge) throw new Error('The run this step merges is no longer available. Skip the step.');
+          if (!part || !theirs || !worktrees.startMerge || !worktrees.finishMerge || !worktrees.abortMerge) throw new Error('The run this step merges is no longer available. Skip the step.');
           run.status = `Merging ${part.title.slice(0, 60)}…`;
           this.changed();
           const { conflicts } = await worktrees.startMerge(tree, theirs.branch, `Merge ${part.title}`, `Changes before merging ${part.title}`);
           if (!conflicts.length) {
+            const whole = await this.wholeMerged(record, step.resolves);
             await this.updateRun(id, (saved, state) => {
               Object.assign(saved.steps[index], { status: 'done', summary: 'Merged without conflicts; no worker was needed.', question: undefined, answer: undefined, ms: elapsed(saved.steps[index]) });
-              this.recordResolved(saved, state, index, []);
+              this.recordResolved(saved, state, index, [], whole);
               state.entries.push({ author: 'Squad', run: id, text: `Merged “${part.title}” without conflicts.` });
             }, run);
             return 'done';
@@ -1355,7 +1372,8 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
           run.status = `${step.role} is working…`;
         }
         const mergeNote = merging && {
-          change: merging.change, branch: merging.branch, conflicting_files: merging.conflicts,
+          change: merging.change, branch: merging.branch, conflicting_files: merging.conflicts.slice(0, 50),
+          more_conflicting_files: merging.conflicts.length > 50 ? `${merging.conflicts.length - 50} more; "git diff --name-only --diff-filter=U" lists them all` : undefined,
           note: 'A merge of this branch is open in your working directory and stopped on these files. Edit them so that no conflict marker (<<<<<<<, =======, >>>>>>>) is left and what both sides intend is kept; "git diff" shows both sides. Do not run git merge, commit, add, checkout, reset, restore, or stash: the merge is committed for you when you report "done". If you cannot tell what is right, report "blocked" with your question; the merge is then undone and opened again when you continue, with the conflict markers back.'
         };
         const target = tree.target !== '.' ? tree.target : undefined;
@@ -1410,21 +1428,21 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
         run.live = undefined;
         let result = parseWorkerOutput(stdout);
         let resolved: string[] | undefined;
+        let whole = false;
         if (merging) {
           const open = merging;
-          const remaining = result.status === 'done' ? await this.host!.worktrees.finishMerge!(open.tree, open.conflicts) : undefined;
+          const remaining = result.status === 'done' ? await this.host!.worktrees.finishMerge!(open.tree, open) : undefined;
           if (remaining && !remaining.length) {
             merging = undefined;
             resolved = open.conflicts;
+            whole = await this.wholeMerged(record, step.resolves!);
           } else {
             // Not resolved: the worktree goes back to before the merge, and the run stays left out.
-            await undoMerge();
-            if (remaining) {
-              result = {
-                ...result, status: 'blocked', question: undefined,
-                summary: shorten(`Conflict markers remain in ${remaining.join(', ')}, so the merge was undone. ${result.summary}`, summaryLimit)
-              };
-            }
+            const trouble = await undoMerge();
+            result = remaining ? {
+              ...result, status: 'blocked', question: undefined,
+              summary: shorten(`Conflict markers remain in ${remaining.slice(0, 10).join(', ')}${trouble ? '.' : ', so the merge was undone.'}${trouble} ${result.summary}`, summaryLimit)
+            } : { ...result, summary: shorten(`${result.summary}${trouble || ' The merge was undone until the step continues.'}`, summaryLimit) };
           }
         }
         await this.memory.add(result.memory, step.role);
@@ -1443,7 +1461,7 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
           });
           state.entries.push({ ...this.reply(step.role, agent, reported, result.costUsd), run: id });
           if (resolved) {
-            this.recordResolved(saved, state, index, resolved);
+            this.recordResolved(saved, state, index, resolved, whole);
             state.entries.push({ author: 'Squad', run: id, text: `Merged “${saved.combined?.find(part => part.run === step.resolves)?.title ?? 'the run'}”: ${step.role} resolved the conflicts in ${resolved.slice(0, 5).join(', ')}. Review the result with Changes.` });
           }
           if (result.status === 'blocked') {
@@ -1472,9 +1490,10 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
       return 'done';
     } catch (error) {
       run.live = undefined;
-      await undoMerge();
-      const detail = run.signal.aborted ? 'Step stopped.' : error instanceof Error ? error.message : 'The step failed.';
-      await this.updateRun(id, saved => { Object.assign(saved.steps[index], { status: 'failed', ms: elapsed(saved.steps[index]) }); }).catch(() => undefined);
+      const trouble = await undoMerge();
+      const detail = `${run.signal.aborted ? 'Step stopped.' : error instanceof Error ? error.message : 'The step failed.'}${trouble}`;
+      // The reason replaces the summary of an earlier attempt, which no longer describes the step.
+      await this.updateRun(id, saved => { Object.assign(saved.steps[index], { status: 'failed', summary: shorten(detail, 600), ms: elapsed(saved.steps[index]) }); }).catch(() => undefined);
       throw new Error(`${step.role}: ${detail}`, { cause: error });
     }
   }
@@ -1549,6 +1568,7 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
     const agent = this.verify(step, await this.directory());
     const tree = this.treeFor(record, step);
     if (agent.kind !== 'claude' || !tree) throw new Error('Only Claude Code steps can continue in a terminal.');
+    if (step.resolves) throw new Error('A step that merges a left-out run works headless, because Squad opens and commits its merge. Run it headless, or skip it and merge the branch by hand.');
     await this.host?.prepare?.();
     const context = this.stepContext(record, index);
     const prompt = [

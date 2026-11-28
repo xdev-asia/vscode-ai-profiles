@@ -2,6 +2,7 @@
 const assert = require('node:assert/strict');
 const { execFileSync } = require('node:child_process');
 const Module = require('node:module');
+const { existsSync } = require('node:fs');
 const { mkdtemp, readFile, realpath, rm, writeFile } = require('node:fs/promises');
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
@@ -42,39 +43,132 @@ test('an open merge is committed once its conflicts are resolved, and undone oth
   for (const tree of [one, two]) await worktrees.commit(tree, `work on ${tree.branch}`);
   const combined = await worktrees.create(repo, 'cccccccc-0000', undefined, one.base);
   const inside = (...args) => execFileSync('git', args, { cwd: combined.path, encoding: 'utf8' });
+  const head = () => inside('rev-parse', 'HEAD').trim();
   assert.deepEqual(await worktrees.mergeBranch(combined, one.branch, 'Merge beta'), { merged: true, conflicts: [] });
   assert.equal(await worktrees.mergedInto(combined, one.branch), true);
   assert.equal(await worktrees.mergedInto(combined, two.branch), false);
+  assert.equal(await worktrees.abortMerge(combined), false, 'nothing to undo');
 
   // Work that is not committed yet is kept as a commit before the merge opens.
   await writeFile(join(combined.path, 'notes.txt'), 'from an earlier step\n');
-  assert.deepEqual(await worktrees.startMerge(combined, two.branch, 'Merge gamma', 'Changes before merging gamma'), { conflicts: ['README.md'] });
+  let merge = await worktrees.startMerge(combined, two.branch, 'Merge gamma', 'Changes before merging gamma');
+  assert.deepEqual(merge.conflicts, ['README.md']);
+  assert.equal(merge.before, head());
   assert.match(await readFile(join(combined.path, 'README.md'), 'utf8'), /^<<<<<<< /m);
   assert.equal(inside('log', '-1', '--format=%s').trim(), 'Changes before merging gamma');
+  // Looking at the changes does not stage the open merge, so git still shows both sides.
+  await worktrees.changes(combined);
+  assert.match(inside('status', '--porcelain'), /^UU README\.md$/m);
 
-  // Markers left in the file: nothing is committed.
-  assert.deepEqual(await worktrees.finishMerge(combined, ['README.md']), ['README.md']);
-  await worktrees.abortMerge(combined);
+  // Markers left in the file: nothing is committed. The undo also takes back what the worker did besides:
+  // an edit to a file the merge brought in cleanly, an edit elsewhere, and a new file.
+  assert.deepEqual(await worktrees.finishMerge(combined, { branch: two.branch, conflicts: merge.conflicts }), ['README.md']);
+  await writeFile(join(combined.path, 'g.txt'), 'gamma, edited\n');
+  await writeFile(join(combined.path, 'notes.txt'), 'changed by the worker\n');
+  await writeFile(join(combined.path, 'stray.txt'), 'new\n');
+  assert.equal(await worktrees.abortMerge(combined), true);
   assert.equal(inside('status', '--porcelain'), '', 'undoing the merge leaves the worktree clean');
+  assert.equal(head(), merge.before);
   assert.equal(await readFile(join(combined.path, 'README.md'), 'utf8'), status('beta'));
   assert.equal(await readFile(join(combined.path, 'notes.txt'), 'utf8'), 'from an earlier step\n', 'earlier work survives the undo');
-  await worktrees.abortMerge(combined);
-  await assert.rejects(worktrees.finishMerge(combined, ['README.md']), /no longer open/);
+  assert.equal(existsSync(join(combined.path, 'stray.txt')), false);
+  assert.equal(existsSync(join(combined.path, 'g.txt')), false);
+  assert.equal(await worktrees.abortMerge(combined), false);
+  await assert.rejects(worktrees.finishMerge(combined, { branch: two.branch, conflicts: ['README.md'] }), /no longer open/);
 
   // A merge an interrupted step left open is undone when the next one starts; resolved, it is committed.
   await worktrees.startMerge(combined, two.branch, 'Merge gamma', 'keep');
-  assert.deepEqual(await worktrees.startMerge(combined, two.branch, 'Merge gamma', 'keep'), { conflicts: ['README.md'] });
+  merge = await worktrees.startMerge(combined, two.branch, 'Merge gamma', 'keep');
+  assert.deepEqual(merge.conflicts, ['README.md']);
   await writeFile(join(combined.path, 'README.md'), status('beta and gamma'));
-  assert.deepEqual(await worktrees.finishMerge(combined, ['README.md']), []);
-  assert.equal(inside('log', '-1', '--format=%s').trim(), 'Merge gamma');
+  assert.deepEqual(await worktrees.finishMerge(combined, { branch: two.branch, conflicts: merge.conflicts }), []);
+  assert.equal(inside('log', '-1', '--format=%B').trim(), 'Merge gamma', 'the message has no list of conflicts left in it');
   assert.equal(inside('rev-list', '--parents', '-1', 'HEAD').trim().split(' ').length, 3, 'a merge commit with both parents');
   assert.equal(await worktrees.mergedInto(combined, two.branch), true);
   assert.equal(await readFile(join(combined.path, 'g.txt'), 'utf8'), 'gamma\n');
   assert.equal(inside('status', '--porcelain'), '');
+  assert.equal(await worktrees.abortMerge(combined), false, 'a merge that is committed is not undone');
   // A branch that is merged already opens nothing.
-  assert.deepEqual(await worktrees.startMerge(combined, two.branch, 'Merge gamma', 'keep'), { conflicts: [] });
+  assert.deepEqual((await worktrees.startMerge(combined, two.branch, 'Merge gamma', 'keep')).conflicts, []);
   assert.equal(git('status', '--porcelain'), '', 'the main checkout is not touched');
   await assert.rejects(worktrees.startMerge(combined, '--upload-pack=x', 'm', 'k'), /not a valid branch name/);
+});
+
+test('an open merge keeps its checks with many files, names outside ASCII, and a worker that commits by itself', async t => {
+  const { repo, worktrees } = await repository(t);
+  const names = ['a-tài-liệu.md', ...Array.from({ length: 55 }, (_, index) => `f${String(index).padStart(2, '0')}.txt`)];
+  const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8' });
+  for (const name of names) await writeFile(join(repo, name), 'base\n');
+  git(repo, 'add', '.');
+  git(repo, 'commit', '-q', '-m', 'files');
+  const one = await worktrees.create(repo, 'aaaaaaaa-0000');
+  const two = await worktrees.create(repo, 'bbbbbbbb-0000');
+  for (const name of names) {
+    await writeFile(join(one.path, name), 'one\n');
+    await writeFile(join(two.path, name), 'two\n');
+  }
+  for (const tree of [one, two]) await worktrees.commit(tree, `work on ${tree.branch}`);
+  const combined = await worktrees.create(repo, 'cccccccc-0000', undefined, one.base);
+  await worktrees.mergeBranch(combined, one.branch, 'Merge one');
+  assert.deepEqual((await worktrees.mergeBranch(combined, two.branch, 'Merge two')).conflicts.slice(0, 2), ['a-tài-liệu.md', 'f00.txt'], 'a name outside ASCII is reported as it is');
+
+  const merge = await worktrees.startMerge(combined, two.branch, 'Merge two', 'keep');
+  assert.deepEqual([...merge.conflicts].sort(), [...names].sort(), 'every conflicting file is known, not only the first fifty');
+  // All but the last two are resolved: the two left are found.
+  for (const name of names.slice(1, 55)) await writeFile(join(combined.path, name), 'both\n');
+  assert.deepEqual(await worktrees.finishMerge(combined, { branch: two.branch, conflicts: merge.conflicts }), ['a-tài-liệu.md', 'f54.txt']);
+
+  // A worker that may run git commits the merge itself with a marker left in: the check still finds it,
+  // and the undo goes back past that commit.
+  git(combined.path, 'add', '-A');
+  git(combined.path, 'commit', '-q', '--no-verify', '-m', 'by the worker');
+  assert.deepEqual(await worktrees.finishMerge(combined, { branch: two.branch, conflicts: merge.conflicts }), ['a-tài-liệu.md', 'f54.txt']);
+  assert.equal(await worktrees.abortMerge(combined), true);
+  assert.equal(git(combined.path, 'rev-parse', 'HEAD').trim(), merge.before);
+  assert.equal(await worktrees.mergedInto(combined, two.branch), false);
+
+  // Committed by the worker with everything resolved, the merge counts.
+  const again = await worktrees.startMerge(combined, two.branch, 'Merge two', 'keep');
+  for (const name of names) await writeFile(join(combined.path, name), 'both\n');
+  git(combined.path, 'add', '-A');
+  git(combined.path, 'commit', '-q', '--no-verify', '-m', 'by the worker');
+  assert.deepEqual(await worktrees.finishMerge(combined, { branch: two.branch, conflicts: again.conflicts }), []);
+  assert.equal(await worktrees.abortMerge(combined), false);
+  assert.equal(await worktrees.mergedInto(combined, two.branch), true);
+});
+
+test('a merge that editing text cannot settle is refused, and a merge the user opened is left alone', async t => {
+  const { repo, worktrees } = await repository(t);
+  const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8' });
+  await writeFile(join(repo, 'img.bin'), Buffer.from([0, 1, 2, 3]));
+  await writeFile(join(repo, 'old.txt'), 'old\n');
+  git(repo, 'add', '.');
+  git(repo, 'commit', '-q', '-m', 'files');
+  const make = async (id, change) => {
+    const tree = await worktrees.create(repo, id);
+    await change(tree.path);
+    await worktrees.commit(tree, `work on ${tree.branch}`);
+    return tree;
+  };
+  const binaryOne = await make('aaaaaaaa-0000', path => writeFile(join(path, 'img.bin'), Buffer.from([0, 9, 9])));
+  const binaryTwo = await make('bbbbbbbb-0000', path => writeFile(join(path, 'img.bin'), Buffer.from([0, 7, 7])));
+  const removes = await make('cccccccc-0000', path => rm(join(path, 'old.txt')));
+  const edits = await make('dddddddd-0000', path => writeFile(join(path, 'old.txt'), 'old, edited\n'));
+
+  const combined = await worktrees.create(repo, 'eeeeeeee-0000', undefined, binaryOne.base);
+  await worktrees.mergeBranch(combined, binaryOne.branch, 'Merge one');
+  await assert.rejects(worktrees.startMerge(combined, binaryTwo.branch, 'Merge two', 'keep'), /A worker cannot resolve this merge: img\.bin is a binary file\. Merge xdev\/squad\/bbbbbbbb by hand/);
+  assert.equal(git(combined.path, 'status', '--porcelain'), '', 'the refused merge is undone');
+  await worktrees.mergeBranch(combined, removes.branch, 'Merge removal');
+  await assert.rejects(worktrees.startMerge(combined, edits.branch, 'Merge edit', 'keep'), /old\.txt was deleted or renamed by one of the two changes/);
+  assert.equal(git(combined.path, 'status', '--porcelain'), '');
+
+  // A merge the user opened in a terminal is not the step's: nothing undoes it.
+  assert.throws(() => git(combined.path, 'merge', '--no-ff', '-q', '-m', 'by hand', binaryTwo.branch));
+  assert.match(git(combined.path, 'status', '--porcelain'), /^UU img\.bin$/m);
+  assert.equal(await worktrees.abortMerge(combined), false);
+  assert.match(git(combined.path, 'status', '--porcelain'), /^UU img\.bin$/m);
+  git(combined.path, 'merge', '--abort');
 });
 
 test('Implement merges a run that was left out of a combined run by resolving its conflicts', { timeout: 60_000 }, async t => {
@@ -98,6 +192,7 @@ test('Implement merges a run that was left out of a combined run by resolving it
       const task = prompt.task ?? '';
       let report = { status: 'done', summary: `${request.role} did: ${task.slice(0, 40)}` };
       if (prompt.merge) {
+        if (merge === 'throw') throw new Error('the CLI broke');
         const text = await readFile(join(request.cwd, 'README.md'), 'utf8');
         assert.match(text, /^<<<<<<< /m, 'the worker starts on the open merge');
         if (merge === 'resolve') await writeFile(join(request.cwd, 'README.md'), status('beta and gamma'));
@@ -149,22 +244,36 @@ test('Implement merges a run that was left out of a combined run by resolving it
   let step = outcome.run.steps[0];
   assert.equal(step.status, 'blocked');
   assert.match(step.summary, /^Conflict markers remain in README\.md, so the merge was undone\. Resolved\./);
+  await assert.rejects(call('squad_open_terminal', { runId: run.id }).catch(() => chat.startTerminalStep(run.id)), /works headless/);
   assert.equal(inside('status', '--porcelain'), '', 'the worktree is back to before the merge');
   assert.equal(await readFile(join(tree.worktree, 'README.md'), 'utf8'), status('beta'));
   assert.deepEqual(outcome.run.combined[1].merged, false);
   assert.deepEqual(prompts.at(-1).merge.conflicting_files, ['README.md']);
   assert.match(prompts.at(-1).merge.note, /Do not run git merge, commit/);
 
+  // Skipping the step and asking again makes a new step; the skipped one does not keep the run left out.
+  await call('squad_skip_step', { runId: run.id });
+  const again = await call('squad_resolve', { runId: run.id });
+  assert.deepEqual(again.run.steps.map(step => [step.role, step.status, step.resolvesRunId ?? null]),
+    [['Implement', 'skipped', ids[1]], ['Implement', 'pending', ids[1]], ['Review', 'pending', null], ['Tests', 'pending', null]]);
+
+  // A worker that fails: the reason replaces the summary of the earlier attempt, and the merge is undone.
+  merge = 'throw';
+  await assert.rejects(call('squad_run_step', { runId: run.id, waitSeconds: 20 }).then(result => { if (result.run.steps[1].status === 'failed') throw new Error(result.run.steps[1].summary); }), /the CLI broke/);
+  assert.equal(inside('status', '--porcelain'), '');
+  assert.match(chat.run(run.id).steps[1].summary, /the CLI broke/);
+
   // A worker that asks: the merge is undone, and the answer opens it again in the same session.
   merge = 'blocked';
   outcome = await call('squad_run_step', { runId: run.id, waitSeconds: 20 });
-  assert.equal(outcome.run.steps[0].question, 'Which status wins?');
+  assert.equal(outcome.run.steps[1].question, 'Which status wins?');
+  assert.match(outcome.run.steps[1].summary, /The merge was undone until the step continues\.$/);
   assert.equal(inside('status', '--porcelain'), '');
   merge = 'resolve';
   outcome = await call('squad_answer', { runId: run.id, answer: 'Keep both.', waitSeconds: 20 });
   assert.equal(prompts.at(-1).answer, 'Keep both.');
   assert.deepEqual(prompts.at(-1).merge.conflicting_files, ['README.md'], 'the reopened merge is described again');
-  step = outcome.run.steps[0];
+  step = outcome.run.steps[1];
   assert.equal(step.status, 'done');
   assert.deepEqual(outcome.run.combined.map(part => [part.merged, part.conflicts ?? null, part.resolved ?? null]), [[true, null, null], [true, null, ['README.md']]]);
   assert.equal(await readFile(join(tree.worktree, 'README.md'), 'utf8'), status('beta and gamma'));

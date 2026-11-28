@@ -8,6 +8,9 @@
 
 ### Changed
 
+- **Stop** ends every process of a worker on Windows, and a stopped or timed-out step is reported once its CLI has ended. Before, a Claude Code installed as a `.cmd` script could keep working after Stop.
+- A failed step keeps its reason as its summary, in place of the summary of an earlier attempt.
+- Conflicting files with characters outside ASCII are listed by their real names.
 - A step that is blocked or failed shows why above its controls. Before, the reason was only in the chat.
 - When several runs work at the same time, each live feed names its run.
 - The note on a parallel plan mentions combining, and reads correctly when `xdevAi.squad.maxParallelRuns` is 1.

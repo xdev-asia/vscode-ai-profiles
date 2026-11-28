@@ -451,3 +451,14 @@ test('a combined run offers to resolve the conflicts of what it left out, and sa
   assert.ok(!actions(third).includes('Resolve conflicts'));
   assert.deepEqual(third.$$('#run-list .combined li').map(row => row.textContent), ['Merged: task a', 'Merged: task b · conflicts resolved in README.md']);
 });
+
+test('a step that merges a left-out run has no Open in terminal', () => {
+  const ui = mount();
+  const run = {
+    id: 'z', prompt: 'Combined: task a', request: 'Combine', time: 2, status: 'active', approver: 'human', costUsd: 0, sessions: [],
+    steps: [{ ...job('Implement'), status: 'pending', resolves: 'b' }], trees: [{ target: '.', repo: '/w', path: '/t/z', branch: 'xdev/squad/z', base: 'b' }],
+    combined: [{ run: 'b', title: 'task b', branch: 'xdev/squad/b', merged: false, conflicts: ['README.md'] }]
+  };
+  ui.post(state({ runs: [run], busyRuns: [], working: [] }));
+  assert.deepEqual(ui.$$('#run-list .step-controls button').map(node => node.textContent), ['Run headless', 'Skip step']);
+});

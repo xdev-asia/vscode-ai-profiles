@@ -662,7 +662,8 @@ function mountSquadChat(vscode, roles) {
       }
       add(step.kind === 'claude' ? (again ? 'Run again' : 'Run headless') : (again ? 'Ask again' : 'Ask API'), 'stepRun',
         () => ({ brief: brief.value }), true);
-      if (step.kind === 'claude') add('Open in terminal', 'stepTerminal', () => ({ brief: brief.value }));
+      // A merge step stays headless: Squad opens the merge before the worker and commits it after.
+      if (step.kind === 'claude' && !step.resolves) add('Open in terminal', 'stepTerminal', () => ({ brief: brief.value }));
     }
     if (step.status !== 'running') add('Skip step', 'stepSkip', () => ({}));
     box.append(actions);
