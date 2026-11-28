@@ -172,7 +172,7 @@ export function registerAiTerminals(context: vscode.ExtensionContext, profiles: 
 
   async function selectProvider(token?: vscode.CancellationToken) {
     const choices: (vscode.QuickPickItem & { provider?: TerminalProvider })[] = terminalProviderIds.map(provider => ({
-      label: terminalProviders[provider].name, description: 'Sign in for a terminal', provider
+      label: terminalProviders[provider].name, description: terminalProviders[provider].note ?? 'Sign in for a terminal', provider
     }));
     choices.push({ label: 'API Profile', description: 'OpenAI, Anthropic, Gemini, or a compatible API for Squad Chat' });
     const choice = await vscode.window.showQuickPick(choices, { title: 'Add AI Account', matchOnDescription: true }, token);

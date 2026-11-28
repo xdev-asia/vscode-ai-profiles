@@ -205,6 +205,28 @@ exports.run = async () => {
     }
   });
 
+  await step('a blocked worker asks a question, and the answer continues its session', async () => {
+    const { client: session, call } = await client();
+    try {
+      const { plan } = await call('xdev_squad_submit_plan', {
+        request: 'Trial: a task that needs an answer', summary: 'One task that asks first',
+        tasks: [{ role: 'Implement', brief: 'Ask first, then write the answer.', account }]
+      });
+      const { run } = await within(call('xdev_squad_approve_plan', { planId: plan.id }), 60_000, 'Approving the plan');
+      const first = await within(call('xdev_squad_run_step', { runId: run.id, waitSeconds: 60 }), 70_000, 'The first attempt');
+      const asked = first.run.steps[0];
+      if (asked.status !== 'blocked' || asked.question !== 'What should ANSWER.md say?') throw new Error(`the step did not ask: ${JSON.stringify(asked)}`);
+      const answered = await within(call('xdev_squad_answer', { runId: run.id, answer: 'forty-two', waitSeconds: 60 }), 70_000, 'The answer');
+      const done = answered.run.steps[0];
+      if (done.status !== 'done' || !/earlier session/.test(done.summary)) throw new Error(`the answer did not continue the session: ${JSON.stringify(done)}`);
+      const tree = answered.run.repositories[0];
+      if (!tree.commit || readFileSync(join(tree.worktree, 'ANSWER.md'), 'utf8').trim() !== 'forty-two') throw new Error(`ANSWER.md is wrong: ${JSON.stringify(tree)}`);
+      return `asked "${asked.question}"; ${done.summary}`;
+    } finally {
+      await session.close();
+    }
+  });
+
   await step('a client shares artifacts, and the Memory & Artifacts tab opens', async () => {
     const { client: session, call } = await client();
     try {

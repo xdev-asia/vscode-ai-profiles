@@ -513,6 +513,7 @@ export function xdevMcpTools(squad: SquadChat, accounts: Accounts, profiles: Ter
     index, role: step.role, account: step.profile, kind: step.kind ?? 'api', repo: step.repo, model: step.model, status: step.status,
     ...(brief ? {} : {
       brief: clip(step.brief, 1_000), summary: step.summary === undefined ? undefined : clip(step.summary, 4_000),
+      question: step.status === 'blocked' ? step.question : undefined,
       files: step.files?.slice(0, 80), review: step.gate && { verdict: step.gate.verdict, reason: step.gate.reason, by: step.gate.by },
       costUsd: step.costUsd, seconds: step.ms === undefined ? undefined : Math.round(step.ms / 1_000), attempts: step.attempts
     })
@@ -639,6 +640,21 @@ export function xdevMcpTools(squad: SquadChat, accounts: Accounts, profiles: Ter
     squadReadTool('squad_wait', 'Wait for Squad work to end, then return what Squad is doing. With runId: until that run’s step ends. Without: until one of the steps or requests in flight ends. Use after a tool returned finished false.', {
       seconds: { type: 'integer', minimum: 1, maximum: maxWaitSeconds }, runId: runArg.runId
     }, async ({ seconds, runId }, signal) => outcome(await settle(seconds, signal, maxWaitSeconds, runId), runId), []),
+    squadReadTool('squad_session', 'Read what a worker did in one headless session of a run, when the step summary is not enough: what it was asked, what it said, each tool call, and what failed. Returns the newest entries; ask for more with last.', {
+      ...runArg,
+      sessionId: { type: 'string', maxLength: 80, description: 'A session id from xdev_squad_run. Without it, the newest session of the run.' },
+      last: { type: 'integer', minimum: 1, maximum: 200, description: 'How many of the newest entries to return; 40 when omitted.' }
+    }, async ({ runId, sessionId, last }) => {
+      const { session, items } = await squad.transcript(findRun(runId).id, sessionId);
+      const wanted = typeof last === 'number' && Number.isFinite(last) ? Math.max(1, Math.min(200, Math.floor(last))) : 40;
+      let shown = items.slice(-wanted).map(item => ({ kind: item.kind, at: item.time ? iso(item.time) : undefined, text: clip(item.text, 2_000) }));
+      // The answer stays below what a client reads in one result; the oldest entries go first.
+      while (shown.length > 1 && shown.reduce((sum, item) => sum + item.text.length, 0) > 40_000) shown = shown.slice(1);
+      return {
+        session: { role: session.role, account: session.profile, sessionId: session.sessionId, repo: session.repo },
+        note: sharedTextNote, entries: items.length, shown: shown.length, items: shown
+      };
+    }, ['runId']),
     squadReadTool('artifacts_list', 'List the documents every account of this project shares, such as designs, reports, and specs: name, kind, description, who saved each one last, and its claude.ai page if it has one. Read one with xdev_artifact_read.', {}, async () => ({
       note: sharedTextNote, artifacts: (await artifacts().list()).map(artifactView)
     })),
@@ -705,6 +721,12 @@ export function xdevMcpTools(squad: SquadChat, accounts: Accounts, profiles: Ter
       await squad.runStep(runId, brief || undefined);
       return outcome(await settle(waitSeconds, signal, maxWaitSeconds, runId), runId);
     }, ['runId']),
+    squadRunTool('squad_answer', 'Answer the question of a blocked step (see "question" in xdev_squad_run). The worker continues in the session where it asked, so it keeps what it had found. Returns like xdev_squad_run_step.', {
+      ...runArg, answer: { type: 'string', maxLength: 4_000 }, ...waitArg
+    }, async ({ runId, answer, waitSeconds }, signal) => {
+      await squad.runStep(runId, undefined, undefined, answer ?? '');
+      return outcome(await settle(waitSeconds, signal, maxWaitSeconds, runId), runId);
+    }, ['runId', 'answer']),
     squadRunTool('squad_skip_step', 'Skip the current step of a run.', runArg, async ({ runId }) => {
       await squad.skipStep(runId);
       return { run: runView(findRun(runId)) };

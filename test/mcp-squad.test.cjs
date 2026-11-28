@@ -89,7 +89,7 @@ test('an MCP client leads Squad: it hands tasks to accounts, runs the steps, and
   const names = () => xdevMcpTools(chat, accounts, list, host).map(tool => tool.name).filter(name => name.startsWith('xdev_squad'));
   assert.deepEqual(names(), []);
   squadLevel = 'read';
-  assert.deepEqual(names(), ['xdev_squad_status', 'xdev_squad_run', 'xdev_squad_wait']);
+  assert.deepEqual(names(), ['xdev_squad_status', 'xdev_squad_run', 'xdev_squad_wait', 'xdev_squad_session']);
   squadLevel = 'run';
   const call = caller(xdevMcpTools(chat, accounts, list, host));
 

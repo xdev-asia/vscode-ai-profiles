@@ -8,6 +8,8 @@ import { isRole, roles, SquadStore, type Role } from './squad';
 import { SquadCustomizations, type Skill } from './squad-customizations';
 import type { SquadArtifacts } from './squad-artifacts';
 import { SquadMemory } from './squad-memory';
+import { sessionFolder } from './squad-storage';
+import { readTranscript, type TranscriptItem } from './squad-transcript';
 import { suggestRepository } from './squad-codegraph';
 import {
   parseGateOutput, parsePlanOutput, parseWorkerOutput, workerModel, type ActivityKind, type WorkerActivity, type WorkerMode, type WorkerRequest,
@@ -134,6 +136,10 @@ export interface RunStep extends Job {
   problems?: number;
   /** The step was added from review feedback on the changes. */
   feedback?: boolean;
+  /** What a blocked worker asked, until the step runs again. */
+  question?: string;
+  /** The answer to that question, sent into the worker's session when the step continues. */
+  answer?: string;
 }
 
 /** One repository's worktree in a run. */
@@ -340,7 +346,7 @@ export function gateChanges(changes: readonly FileChange[], limit = gatePatchLim
 }
 
 const textOnly = 'You are using a text API. You cannot access the workspace, edit files, or run commands. Do not claim that you did.';
-const headless = 'You are a headless Claude Code worker in xDev Squad. Nobody can answer questions during the run: decide reasonably, or report status "blocked" with what you need. Do not commit, push, or change git remotes; xDev commits the worktree for the user. Shell commands are checked against an allowed list ("allowed_commands" when given, plus read-only git), and a command with pipes, redirects, ";", "&&", or "cd" is denied even when each part is allowed: run each allowed command on its own from the working directory, and create or edit files with the Write and Edit tools, not the shell. Use available skills when they apply. Report through the required JSON fields and keep the summary short, because other agents read it.';
+const headless = 'You are a headless Claude Code worker in xDev Squad. Nobody can answer questions during the run: decide reasonably, or report status "blocked" with what you need and put the one question that would unblock you in "question"; its answer comes back into this session. Do not commit, push, or change git remotes; xDev commits the worktree for the user. Shell commands are checked against an allowed list ("allowed_commands" when given, plus read-only git), and a command with pipes, redirects, ";", "&&", or "cd" is denied even when each part is allowed: run each allowed command on its own from the working directory, and create or edit files with the Write and Edit tools, not the shell. Use available skills when they apply. Report through the required JSON fields and keep the summary short, because other agents read it.';
 
 /**
  * Notes, summaries and artifacts cross from one account's worker to another's, and files come from anywhere.
@@ -987,6 +993,23 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
     });
   }
 
+  /**
+   * What a worker did in one headless session of a run: the newest session when none is named. Read from the
+   * session file Claude Code keeps in the account's folder; nothing else of that folder is read.
+   */
+  async transcript(id: unknown, sessionInput?: unknown): Promise<{ session: RunSession; items: TranscriptItem[] }> {
+    const record = this.run(id);
+    if (!record) throw new Error('This run is no longer available.');
+    const session = sessionInput === undefined || sessionInput === null || sessionInput === ''
+      ? record.sessions.at(-1) : record.sessions.find(candidate => candidate.sessionId === sessionInput);
+    if (!session) throw new Error(record.sessions.length ? 'This run has no session with that id.' : 'This run has no headless session yet.');
+    if (!/^[\w-]{1,80}$/.test(session.sessionId)) throw new Error('This session id cannot be read.');
+    const tree = record.trees?.find(candidate => candidate.target === session.repo) ?? record.trees?.[0];
+    const profile = (await this.host?.profiles() ?? []).find(candidate => terminalProfileId(candidate) === session.profileId);
+    if (!tree || !profile) throw new Error('The worktree or the account of this session was removed.');
+    return { session, items: await readTranscript(join(sessionFolder(profile.configDir, tree.path), `${session.sessionId}.jsonl`), tree.path) };
+  }
+
   /** The worktree a step works in: its repository's, or the run's only one. */
   treeFor(record: RunRecord, step: Pick<Job, 'repo'>): RunTree | undefined {
     const trees = record.trees ?? [];
@@ -1042,18 +1065,30 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
    * reviewed by a different account; in "ai" mode a passing review starts the next step, and anything
    * else pauses the run for the user. Merging always stays with the user.
    */
-  async runStep(id: unknown, briefInput?: unknown, signal?: AbortSignal): Promise<StartedRun> {
+  async runStep(id: unknown, briefInput?: unknown, signal?: AbortSignal, answerInput?: unknown): Promise<StartedRun> {
     const { record, index, step } = this.activeRun(id);
     this.requireFree(record.id);
     this.requireNotInTerminal(step);
-    const brief = this.briefFrom(briefInput, step.brief);
+    // An answer continues the session in which the worker asked, so it keeps what it had found.
+    let answer: string | undefined;
+    let asked: RunSession | undefined;
+    if (answerInput !== undefined) {
+      if (typeof answerInput !== 'string' || !answerInput.trim() || answerInput.length > 4_000) throw new Error('Write the answer, up to 4,000 characters.');
+      if (step.status !== 'blocked') throw new Error('Only a blocked step takes an answer. Edit the brief and run the step instead.');
+      const tree = this.treeFor(record, step);
+      asked = [...record.sessions].reverse().find(session => session.role === step.role && session.profileId === step.accountId && (!tree || session.repo === tree.target));
+      if (!asked) throw new Error('This step kept no session to continue. Edit the brief and run it again.');
+      answer = answerInput.trim();
+    }
+    const brief = answer ? step.brief : this.briefFrom(briefInput, step.brief);
     const agent = this.verify(step, await this.directory());
     if (agent.kind === 'claude' && !this.treeFor(record, step)) throw new Error('This run has no worktree for Claude Code steps.');
 
     return this.launch(`${step.role} is ${agent.kind === 'claude' ? 'working' : 'responding'}…`, signal, state => {
       const saved = state.runs?.find(candidate => candidate.id === record.id);
       if (!saved || saved.status !== 'active' || this.currentStep(saved) !== index) throw new Error('This step has changed. Check Worker runs.');
-      state.entries.push({ author: 'You', to: step.role, run: record.id, text: brief });
+      if (answer && asked) Object.assign(saved.steps[index], { resume: asked.sessionId, answer });
+      state.entries.push({ author: 'You', to: step.role, run: record.id, text: answer ?? brief });
     }, async run => {
       let current = { index, brief, agent };
       for (;;) {
@@ -1105,6 +1140,8 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
           executable: await this.host!.executable(), profile: agent.profile, cwd: tree.path, role: step.role, mode: 'work',
           prompt: JSON.stringify({
             request: record.request, task: brief, repository: target, other_repositories: others.length ? others : undefined,
+            // The step was blocked on a question; this is the answer.
+            your_question: step.answer ? step.question : undefined, answer: step.answer,
             allowed_commands: step.role === 'Review' ? undefined : settings.allowedCommands,
             // Names only: the values reach the worker's commands as environment variables, never the prompt.
             environment_variables: environment,
@@ -1121,7 +1158,9 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
             stdout = await this.work({
               ...request, resume: step.resume,
               prompt: JSON.stringify({
-                task: brief, note: 'Continue your earlier session in this worktree.',
+                ...(step.answer
+                  ? { answer: step.answer, note: 'This answers the question you reported as "blocked". Continue your earlier session in this worktree and finish the task.' }
+                  : { task: brief, note: 'Continue your earlier session in this worktree.' }),
                 allowed_commands: step.role === 'Review' ? undefined : settings.allowedCommands, environment_variables: environment,
                 changed_files: changed.length ? changed : undefined
               })
@@ -1146,12 +1185,13 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
           const current = saved.steps[index];
           if (current.resume && result.sessionId) current.resume = result.sessionId;
           Object.assign(current, {
+            question: result.question, answer: undefined,
             status: result.status, summary: result.summary, files: result.filesChanged, ms: elapsed(current),
             costUsd: (current.costUsd ?? 0) + result.costUsd, problems: (current.problems ?? 0) + problems
           });
           state.entries.push({ ...this.reply(step.role, agent, reported, result.costUsd), run: id });
           if (result.status === 'blocked') {
-            state.entries.push({ author: 'Squad', run: id, text: `${step.role} is blocked. Edit the brief and run the step again, continue it in a terminal, skip it, or finish the run.` });
+            state.entries.push({ author: 'Squad', run: id, text: `${step.role} is blocked${result.question ? ` and asks: ${result.question}` : ''}. Answer it to continue its session, edit the brief and run the step again, continue it in a terminal, skip it, or finish the run.` });
           }
         }, run);
         return result.status;

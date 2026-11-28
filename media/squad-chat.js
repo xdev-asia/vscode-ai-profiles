@@ -556,7 +556,10 @@ function mountSquadChat(vscode, roles) {
         }
         button('Open folder', 'runOpen', {}, false);
         for (const session of run.sessions) {
-          button(`Resume ${session.role}${multiple && session.repo ? ` (${session.repo})` : ''}`, 'runResume', { session: session.sessionId }, busy);
+          const where = multiple && session.repo ? ` (${session.repo})` : '';
+          button(`Resume ${session.role}${where}`, 'runResume', { session: session.sessionId }, busy);
+          // Reading does not change the run, so it stays available while a step works.
+          button(`Transcript ${session.role}${where}`, 'runTranscript', { session: session.sessionId }, Boolean(pending));
         }
       }
       button('Remove', 'runRemove', {}, busy);
@@ -600,6 +603,29 @@ function mountSquadChat(vscode, roles) {
       add('Mark step done', 'stepDone', () => ({ summary: summary.value }), true);
     } else if (step.status !== 'running') {
       const again = step.status === 'blocked' || step.status === 'failed';
+      // A blocked Claude Code worker asked something: the answer goes back into its session.
+      if (step.status === 'blocked' && step.kind === 'claude' && (run.sessions ?? []).some(session => session.role === step.role)) {
+        if (step.question) box.append(element('p', `${step.role} asks: ${step.question}`, 'question'));
+        const answerKey = `${draftKey}:answer`;
+        const answer = element('textarea');
+        answer.rows = 2;
+        answer.maxLength = 4000;
+        answer.placeholder = 'Your answer. The worker continues in the same session.';
+        answer.setAttribute('aria-label', `Answer to ${step.role}`);
+        answer.value = stepDrafts.get(answerKey) ?? '';
+        answer.disabled = busy;
+        box.append(answer);
+        const sendAnswer = element('button', 'Send answer', 'primary');
+        sendAnswer.type = 'button';
+        const sync = () => { sendAnswer.disabled = busy || !answer.value.trim(); };
+        answer.addEventListener('input', () => { stepDrafts.set(answerKey, answer.value); sync(); });
+        sync();
+        sendAnswer.addEventListener('click', () => {
+          stepDrafts.delete(answerKey);
+          send('stepAnswer', { id: run.id, answer: answer.value });
+        });
+        actions.append(sendAnswer);
+      }
       add(step.kind === 'claude' ? (again ? 'Run again' : 'Run headless') : (again ? 'Ask again' : 'Ask API'), 'stepRun',
         () => ({ brief: brief.value }), true);
       if (step.kind === 'claude') add('Open in terminal', 'stepTerminal', () => ({ brief: brief.value }));

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.21.0 - 2026-11-28
+
+### Added
+
+- **Answer a blocked worker.** A worker that lacks a fact reports its question with the blocked status. **Send answer** on the step, or `xdev_squad_answer` for an AI client, sends your answer into the same Claude Code session, so the worker keeps what it had found. If that session is gone, the answer goes out with the whole task.
+- **Read a worker's transcript.** **Transcript <role>** on a run opens what the worker was asked, said, and did as a document. An AI client reads it with `xdev_squad_session`.
+
+### Changed
+
+- The account picker says who can still sign in to Gemini CLI. Since 18 June 2026 Google serves it only to paid Gemini API keys, Vertex AI, and Gemini Code Assist Standard or Enterprise; free, AI Pro, and AI Ultra accounts moved to Antigravity CLI, which xDev AI does not manage yet.
+
 ## 0.20.1 - 2026-11-28
 
 ### Fixed
