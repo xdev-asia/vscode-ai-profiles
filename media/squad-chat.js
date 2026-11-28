@@ -435,6 +435,8 @@ function mountSquadChat(vscode, roles) {
     const key = JSON.stringify(runs) + String(blocked) + JSON.stringify([...busyRuns]) + String((snapshot.working ?? []).length) + JSON.stringify([...diffs]) + JSON.stringify(deployTargets);
     if (key === runsKey) return;
     runsKey = key;
+    const ready = run => run.batch && run.status !== 'active' && !run.combined && !run.combinedInto && (run.trees ?? []).some(tree => tree.commit && !tree.merged);
+    const batchSize = batch => runs.filter(run => run.batch === batch && ready(run)).length;
     byId('run-list').replaceChildren(...runs.map(run => {
       const working = busyRuns.has(run.id);
       const busy = blocked || working;
@@ -523,7 +525,22 @@ function mountSquadChat(vscode, roles) {
         control.addEventListener('click', () => send(action, { id: run.id, ...args }));
         actions.append(control);
       };
+      if (run.combined) {
+        const list = element('ul', undefined, 'combined');
+        for (const part of run.combined) {
+          const row = element('li', undefined, part.merged ? 'merged' : 'left-out');
+          row.textContent = part.merged ? `Merged: ${part.title}` : `Left out: ${part.title} · conflicts in ${(part.conflicts ?? []).slice(0, 5).join(', ')}`;
+          list.append(row);
+        }
+        item.append(list);
+      } else if (run.combinedInto) {
+        item.append(element('small', 'Merged into a combined run', 'subtle'));
+      }
       const active = run.status === 'active';
+      // The finished runs of one parallel plan merge into one new run, where they are checked together.
+      if (ready(run) && batchSize(run.batch) > 1) {
+        button(`Combine ${batchSize(run.batch)} runs`, 'runCombine', {}, blocked || Boolean(snapshot.chatBusy), 'accent');
+      }
       // With several runs working, each can be stopped on its own.
       if (working && (snapshot.working ?? []).length > 1) button('Stop this run', 'stop', {}, Boolean(pending));
       if (active) button('Finish run', 'runFinish', {}, busy);

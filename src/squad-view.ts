@@ -938,6 +938,9 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
           await this.teamChat.runStep(message.id, undefined, undefined, message.answer ?? '');
           return;
         case 'runMerge': return this.mergeRun(message.id);
+        case 'runCombine':
+          await this.teamChat.combine(message.id);
+          return;
         case 'stepRun':
           await this.teamChat.runStep(message.id, message.brief);
           return;

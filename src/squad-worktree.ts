@@ -346,6 +346,25 @@ export class Worktrees {
     await this.run(['add', '-A', '--', '.', ...excluded], worktree.path);
   }
 
+  /**
+   * Merges a local branch into a worktree, as its own merge commit. When the two conflict, the merge is undone
+   * and the conflicting files are returned, so the worktree stays as it was.
+   */
+  async mergeBranch(worktree: Pick<RunWorktree, 'path'>, branch: string, message: string): Promise<{ merged: boolean; conflicts: string[] }> {
+    if (!validBranch(branch)) throw new Error(`"${branch}" is not a valid branch name.`);
+    const email = (await this.run(['config', 'user.email'], worktree.path).catch(() => '')).trim();
+    const identity = email ? [] : ['-c', 'user.name=xDev Squad', '-c', 'user.email=squad@xdev.invalid'];
+    try {
+      await this.run([...identity, 'merge', '--no-ff', '--no-edit', '--no-verify', '-q', '-m', message.slice(0, 200), branch], worktree.path);
+      return { merged: true, conflicts: [] };
+    } catch (error) {
+      const conflicts = (await this.run(['diff', '--name-only', '--diff-filter=U'], worktree.path).catch(() => '')).split('\n').filter(Boolean);
+      await this.run(['merge', '--abort'], worktree.path).catch(() => undefined);
+      if (!conflicts.length) throw error;
+      return { merged: false, conflicts: conflicts.slice(0, 50) };
+    }
+  }
+
   /** Restores one file to the base commit, or deletes it when the run added it. */
   async discard(worktree: RunWorktree, file: string): Promise<void> {
     const changed = await this.changedFiles(worktree);
