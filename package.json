@@ -2,7 +2,7 @@
   "name": "xdev-ai",
   "displayName": "xDev AI",
   "description": "Manage AI accounts, open Claude Code, Codex, and Gemini terminals, and coordinate AI tasks in VS Code.",
-  "version": "0.21.0",
+  "version": "0.22.0",
   "publisher": "xdev-asia",
   "icon": "media/icon.png",
   "private": true,

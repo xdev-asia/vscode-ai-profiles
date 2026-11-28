@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.22.0 - 2026-11-28
+
+### Added
+
+- **Combine parallel runs.** **Combine N runs** on the finished runs of a parallel plan, or `xdev_squad_combine` for an AI client, merges their branches into one new run with its own branch and worktree. A run that conflicts with one merged before it is left out and its conflicting files are named. The combined run has a Review and a Tests step that check the changes together, and you merge or push one branch.
+
 ## 0.21.0 - 2026-11-28
 
 ### Added

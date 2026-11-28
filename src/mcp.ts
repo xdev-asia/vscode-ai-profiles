@@ -522,6 +522,9 @@ export function xdevMcpTools(squad: SquadChat, accounts: Accounts, profiles: Ter
     id: record.id, request: clip(record.prompt, brief ? 200 : 500), status: record.status, approver: record.approver,
     startedAt: iso(record.time), costUsd: Number(record.costUsd.toFixed(4)),
     currentStep: record.status === 'active' ? squad.currentStep(record) : null,
+    // Runs of one parallel plan share a batch; finished ones can be combined with xdev_squad_combine.
+    batch: record.batch, combinedInto: record.combinedInto,
+    combined: record.combined?.map(({ run, title, branch, merged, conflicts }) => ({ runId: run, task: clip(title, 200), branch, merged, conflicts })),
     steps: record.steps.map((step, index) => stepView(step, index, brief)),
     ...(brief ? {} : {
       repositories: record.trees?.map(tree => ({
@@ -739,6 +742,16 @@ export function xdevMcpTools(squad: SquadChat, accounts: Accounts, profiles: Ter
       await squad.requestChanges(runId, text, repo, account);
       return { run: runView(findRun(runId)) };
     }, ['runId', 'text']),
+    squadRunTool('squad_combine', 'Combine finished runs, such as the runs of a parallel plan, into one new run: each run’s branch is merged into a new branch in its own worktree. A run that conflicts with one merged before it is left out and its conflicting files are returned; ask for that change again on the combined run with xdev_squad_request_changes. The new run has a Review and a Tests step that check the changes together. Nothing is merged into the user’s checkout or pushed.', {
+      runIds: { type: 'array', minItems: 2, maxItems: 8, items: { type: 'string', maxLength: 64 }, description: 'The finished runs to merge, in this order.' }
+    }, async ({ runIds }) => {
+      const known = new Set(squad.snapshot().runs.map(record => record.id));
+      const started = await squad.combine(Array.isArray(runIds) ? runIds.map(id => findRun(id).id) : []);
+      const entries = await started.finished;
+      const record = squad.snapshot().runs.find(candidate => !known.has(candidate.id));
+      if (!record) throw new Error(entries.at(-1)?.text ?? 'The runs could not be combined.');
+      return { run: runView(record), note: entries.at(-1)?.text };
+    }, ['runIds']),
     squadRunTool('squad_finish_run', 'End a run now: remaining steps are skipped and each worktree is committed to its local branch. Nothing is merged or pushed; the user does that in VS Code.', runArg, async ({ runId }) => {
       await squad.finish(runId);
       return { run: runView(findRun(runId)), note: 'Committed locally. Merging, pushing, and deploying stay with the user in VS Code.' };

@@ -20,6 +20,7 @@ exports.run = async () => {
   let token;
   let url;
   let terminal;
+  let parallelRuns = [];
   const client = () => until(() => connect(url, token).catch(() => undefined), 15_000, 'Connecting to the MCP server');
 
   await step('the extension activates', async () => {
@@ -199,7 +200,26 @@ exports.run = async () => {
         if (!tree.commit || tree.filesChanged !== 1) throw new Error(`run ${run.id} did not commit one file: ${JSON.stringify(tree)}`);
         ended.push(`${tree.branch}: ${state.run.steps[0].summary}`);
       }
+      parallelRuns = approved.runs.map(run => run.id);
       return `${working.length} runs worked at the same time; ${ended.join('; ')}`;
+    } finally {
+      await session.close();
+    }
+  });
+
+  await step('the finished parallel runs combine into one run on a new branch', async () => {
+    if (parallelRuns.length !== 2) throw new Error('the parallel runs of the step before are missing');
+    const { client: session, call } = await client();
+    try {
+      const { run } = await within(call('xdev_squad_combine', { runIds: parallelRuns }), 60_000, 'Combining the runs');
+      if (run.combined?.length !== 2 || run.combined.some(part => !part.merged)) throw new Error(`not everything merged: ${JSON.stringify(run.combined)}`);
+      const tree = run.repositories[0];
+      for (const file of ['ALPHA.md', 'BETA.md']) if (!existsSync(join(tree.worktree, file))) throw new Error(`${file} is not in the combined worktree`);
+      const finished = await within(call('xdev_squad_finish_run', { runId: run.id }), 60_000, 'Finishing the combined run');
+      const done = finished.run.repositories[0];
+      if (!done.commit || done.filesChanged !== 2) throw new Error(`the combined branch does not hold both files: ${JSON.stringify(done)}`);
+      if (existsSync(join(folder, 'ALPHA.md'))) throw new Error('the main checkout was changed');
+      return `${done.branch}: ${run.combined.map(part => part.task).join(' + ')}`;
     } finally {
       await session.close();
     }

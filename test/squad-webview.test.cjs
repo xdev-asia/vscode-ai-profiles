@@ -362,3 +362,36 @@ test('a blocked step shows the question and sends the answer; a session opens as
   assert.equal(third.$('#run-list .step-controls .question'), null);
   assert.ok(!third.$$('#run-list .step-controls button').some(node => node.textContent === 'Send answer'));
 });
+
+test('finished runs of one parallel plan offer to combine, and a combined run says what it merged', () => {
+  const ui = mount();
+  const tree = (id, extra) => ({ target: '.', repo: '/w', path: `/t/${id}`, branch: `xdev/squad/${id}`, base: 'b', commit: 'c', files: 1, ...extra });
+  const part = (id, extra) => ({
+    id, prompt: `Implement: task ${id}`, request: 'Three endpoints', title: `task ${id}`, batch: 'batch-1', time: 0, finished: 1, status: 'done', approver: 'human',
+    costUsd: 0, sessions: [], steps: [{ ...job('Implement'), status: 'done' }], trees: [tree(id)], ...extra
+  });
+  const buttons = card => [...card.querySelectorAll('.actions button')].map(node => node.textContent);
+  ui.post(state({ runs: [part('a'), part('b'), part('c', { status: 'active', trees: [tree('c', { commit: undefined })] })], busyRuns: [], working: [] }));
+  let cards = ui.$$('#run-list li.run');
+  assert.ok(buttons(cards[0]).includes('Combine 2 runs') && buttons(cards[1]).includes('Combine 2 runs'), 'the two finished runs can be combined');
+  assert.ok(!buttons(cards[2]).some(text => /^Combine/.test(text)), 'a run that is still open is not part of it');
+  ui.click([...cards[1].querySelectorAll('.actions button')].find(node => node.textContent === 'Combine 2 runs'));
+  assert.deepEqual([ui.last('runCombine').action, ui.last('runCombine').id], ['runCombine', 'b']);
+
+  const second = mount();
+  const combined = {
+    id: 'z', prompt: 'Combined: task a; task b', request: 'Combine: task a; task b; task c', title: 'Combine 2 changes', time: 2, status: 'active', approver: 'human',
+    costUsd: 0, sessions: [], steps: [{ ...job('Review'), status: 'pending' }], trees: [tree('z', { commit: undefined })],
+    combined: [
+      { run: 'a', title: 'task a', branch: 'xdev/squad/a', merged: true }, { run: 'b', title: 'task b', branch: 'xdev/squad/b', merged: true },
+      { run: 'c', title: 'task c', branch: 'xdev/squad/c', merged: false, conflicts: ['README.md'] }
+    ]
+  };
+  second.post(state({ runs: [combined, part('a', { combinedInto: 'z' }), part('b', { combinedInto: 'z' }), part('c')], busyRuns: [], working: [] }));
+  cards = second.$$('#run-list li.run');
+  assert.deepEqual([...cards[0].querySelectorAll('.combined li')].map(row => [row.className, row.textContent]), [
+    ['merged', 'Merged: task a'], ['merged', 'Merged: task b'], ['left-out', 'Left out: task c · conflicts in README.md']
+  ]);
+  assert.match(cards[1].textContent, /Merged into a combined run/);
+  assert.ok(!cards.some(card => buttons(card).some(text => /^Combine/.test(text))), 'one run alone is not offered');
+});

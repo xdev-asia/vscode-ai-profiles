@@ -155,11 +155,27 @@ export interface RunTree extends RunWorktree {
   deploy?: { from: string; to?: string; url?: string; time: number; health?: { url: string; status: number; time: number } };
 }
 
+/** One run merged, or not, into a combining run. */
+export interface CombinedRun {
+  run: string;
+  title: string;
+  branch: string;
+  merged: boolean;
+  /** Files changed by this run and by one merged before it; the merge was undone. */
+  conflicts?: string[];
+}
+
 export interface RunRecord {
   id: string;
   request: string;
   /** What this run alone does, when it is one task of a parallel plan. Names its commit and merge request. */
   title?: string;
+  /** The parallel plan this run is one task of; its runs can be combined when they are finished. */
+  batch?: string;
+  /** For a run that combines others: each run it was asked to merge, and the files that kept one out. */
+  combined?: CombinedRun[];
+  /** The run this one was merged into. */
+  combinedInto?: string;
   prompt: string;
   time: number;
   status: 'active' | 'done' | 'stopped';
@@ -277,7 +293,7 @@ export interface WorkerHost {
   /** Worker settings for a role, with the allowed commands of the repository the step works in. */
   settings(role: Role, repo?: string): WorkerSettings;
   run(request: WorkerRequest): Promise<string>;
-  worktrees: Pick<Worktrees, 'create' | 'commit' | 'remove' | 'changes' | 'changedFiles' | 'discard'> & Partial<Pick<Worktrees, 'setup'>>;
+  worktrees: Pick<Worktrees, 'create' | 'commit' | 'remove' | 'changes' | 'changedFiles' | 'discard'> & Partial<Pick<Worktrees, 'setup' | 'mergeBranch'>>;
   /** Paths, such as node_modules, linked from the main checkout into each new worktree. */
   worktreeLinks?(): readonly string[];
   /** The branch new worktrees start from, such as origin/dev; HEAD when undefined. */
@@ -932,6 +948,7 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
     }, async run => {
       for (const old of overflow) await this.disposeRun(old);
       const records: RunRecord[] = [];
+      const batch = groups.length > 1 ? randomUUID() : undefined;
       const made: RunTree[] = [];
       const setupNotes: string[] = [];
       let ready = false;
@@ -961,7 +978,7 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
           }
           records.push({
             id: runId, request: plan.prompt, prompt: shorten(groups.length > 1 ? `${group[0].role}: ${group[0].brief}` : plan.prompt, 500),
-            time: Date.now(), status: 'active', approver, costUsd: 0, ...(groups.length > 1 ? { title: group[0].brief } : {}),
+            time: Date.now(), status: 'active', approver, costUsd: 0, ...(batch ? { title: group[0].brief, batch } : {}),
             sessions: [], steps: group.map(job => ({ ...job, status: 'pending' })), ...(trees.length ? { trees } : {})
           });
         }
@@ -1008,6 +1025,117 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
     const profile = (await this.host?.profiles() ?? []).find(candidate => terminalProfileId(candidate) === session.profileId);
     if (!tree || !profile) throw new Error('The worktree or the account of this session was removed.');
     return { session, items: await readTranscript(join(sessionFolder(profile.configDir, tree.path), `${session.sessionId}.jsonl`), tree.path) };
+  }
+
+  /** The finished, committed runs that can be combined with this one: the other tasks of its parallel plan. */
+  combinable(id: unknown): RunRecord[] {
+    const record = this.run(id);
+    if (!record?.batch) return [];
+    const ready = (this.read().runs ?? []).filter(candidate => candidate.batch === record.batch && candidate.status !== 'active'
+      && !candidate.combined && !candidate.combinedInto && (candidate.trees ?? []).some(tree => tree.commit && !tree.merged));
+    // The runs of a plan are kept in the order of its tasks, which is the order they are merged in.
+    return ready.length > 1 && ready.some(candidate => candidate.id === record.id) ? ready : [];
+  }
+
+  /**
+   * Combines finished runs into a new run: one worktree per repository on a new branch, into which each run's
+   * branch is merged in turn. A run whose changes conflict with those merged before it is left out, with the
+   * files named, and nothing of it stays in the new branch. The new run gets a Review and a Tests step when
+   * those roles have an account, so the changes are checked together; like every run, nothing is merged into
+   * your checkout or pushed.
+   */
+  async combine(input: unknown, signal?: AbortSignal): Promise<StartedRun> {
+    this.requireChatIdle();
+    const ids = Array.isArray(input) ? [...new Set(input.map(String))] : this.combinable(input).map(record => record.id);
+    if (ids.length < 2) throw new Error('Choose at least two finished runs to combine.');
+    if (ids.length > 8) throw new Error('Combine at most eight runs at a time.');
+    const sources = ids.map(id => {
+      const record = this.run(id);
+      if (!record) throw new Error('One of the runs is no longer available.');
+      if (record.status === 'active' || this.busyRun(record.id)) throw new Error(`Finish the run “${runName(record)}” before combining it.`);
+      if (record.combined) throw new Error(`“${runName(record)}” is itself a combined run.`);
+      if (!(record.trees ?? []).some(tree => tree.commit)) throw new Error(`The run “${runName(record)}” has no committed changes.`);
+      return record;
+    });
+    const mergeBranch = this.host?.worktrees.mergeBranch?.bind(this.host.worktrees);
+    if (!this.host || !mergeBranch) throw new Error('This window cannot combine runs.');
+    const host = this.host;
+    const targets = [...new Set(sources.flatMap(record => (record.trees ?? []).filter(tree => tree.commit).map(tree => tree.target)))];
+    // The combined run is one more run. When the list is full, the oldest run whose work is merged or pushed makes room.
+    const kept = this.read().runs ?? [];
+    const spare = kept.length >= runLimit ? [...kept].reverse().find(old => !ids.includes(old.id) && disposableRun(old)) : undefined;
+    if (kept.length >= runLimit && !spare) {
+      throw new Error(`Squad keeps ${runLimit} runs per project. Push, merge, or remove an older run before combining.`);
+    }
+    await host.checkDisk?.();
+    const directory = await this.directory();
+
+    return this.launch(`Combining ${sources.length} runs…`, signal, () => undefined, async run => {
+      if (spare) await this.disposeRun(spare);
+      const runId = randomUUID();
+      const trees: RunTree[] = [];
+      const results: CombinedRun[] = sources.map(record => ({ run: record.id, title: runName(record), branch: record.trees?.find(tree => tree.commit)?.branch ?? '', merged: false }));
+      try {
+        await host.prepare?.();
+        for (const [index, target] of targets.entries()) {
+          const first = sources.flatMap(record => record.trees ?? []).find(tree => tree.target === target && tree.commit)!;
+          // The new branch starts where the runs started, so each merge brings in exactly that run's changes.
+          const worktree = await host.worktrees.create(first.repo, runId, targets.length > 1 ? `${index + 1}-${target.split('/').at(-1)}` : undefined, first.base);
+          trees.push({ ...worktree, target });
+          for (const [position, record] of sources.entries()) {
+            const tree = (record.trees ?? []).find(candidate => candidate.target === target && candidate.commit);
+            if (!tree) continue;
+            run.status = `Merging ${results[position].title.slice(0, 60)}…`;
+            this.changed();
+            const outcome = await mergeBranch(worktree, tree.branch, `Merge ${results[position].title}`);
+            // A run counts as merged only when it merged in every repository it changed.
+            if (outcome.merged) results[position].merged = !results[position].conflicts;
+            else {
+              const files = outcome.conflicts.map(file => targets.length > 1 ? `${repoName(target)}/${file}` : file);
+              results[position] = { ...results[position], merged: false, conflicts: [...(results[position].conflicts ?? []), ...files] };
+            }
+          }
+          const prepared = await host.worktrees.setup?.(worktree, host.worktreeLinks?.() ?? []).catch(() => undefined);
+          if (prepared?.linked.length) trees[trees.length - 1] = { ...trees[trees.length - 1], linked: prepared.linked };
+        }
+        if (!results.some(result => result.merged)) throw new Error('None of the runs could be merged.');
+      } catch (error) {
+        for (const tree of trees) await host.worktrees.remove(tree).catch(() => undefined);
+        throw error;
+      }
+      const merged = results.filter(result => result.merged);
+      const left = results.filter(result => !result.merged);
+      const summary = merged.map(result => result.title).join('; ');
+      // Review and Tests look at the changes together, which no single run did.
+      const steps: RunStep[] = [];
+      for (const role of ['Review', 'Tests'] as const) {
+        const agent = this.agentFor(role, directory);
+        if (!agent) continue;
+        const brief = role === 'Review'
+          ? `These changes were made separately and are now merged into one branch: ${summary}. Review them together: do they fit each other, and does anything one of them changed break another?`
+          : `These changes were made separately and are now merged into one branch: ${summary}. Run the tests on the combined code and add tests where the changes meet.`;
+        steps.push({
+          role, brief: shorten(brief, 4_000), profile: agent.name, kind: agent.kind, accountId: agent.id, revision: agent.revision,
+          ...(agent.kind === 'claude' ? { repo: targets[0] } : {}),
+          status: 'pending'
+        });
+      }
+      const request = `Combine: ${results.map(result => result.title).join('; ')}`;
+      const record: RunRecord = {
+        id: runId, request, title: `Combine ${merged.length} changes`, prompt: shorten(`Combined: ${summary}`, 500), time: Date.now(), status: 'active',
+        approver: sources[0].approver ?? 'human', costUsd: 0, sessions: [], steps, trees, combined: results
+      };
+      await this.write(state => {
+        state.runs = [record, ...(state.runs ?? [])].slice(0, runLimit);
+        for (const saved of state.runs) if (merged.some(result => result.run === saved.id)) saved.combinedInto = runId;
+        state.entries.push({
+          author: 'Squad', run: runId,
+          text: `Combined ${merged.length} of ${results.length} runs on branch ${trees[0].branch}, in a separate worktree; your checkout is not changed.${left.length
+            ? ` Left out because they change the same lines as a run merged before them: ${left.map(result => `“${result.title}” (${(result.conflicts ?? []).slice(0, 5).join(', ')})`).join('; ')}. Ask for those changes again on the combined run with Request changes.`
+            : ''} ${steps.length ? `Run ${steps.map(step => step.role).join(' and ')} under Worker runs to check the changes together, or finish the run.` : 'Finish the run to keep the branch.'}`
+        });
+      }, run);
+    });
   }
 
   /** The worktree a step works in: its repository's, or the run's only one. */
