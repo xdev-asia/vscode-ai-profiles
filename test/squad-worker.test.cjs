@@ -142,6 +142,19 @@ test('runClaude spawns the CLI in the worktree and can be stopped', async () => 
   await assert.rejects(pending);
   assert.equal(hanging.calls[0].child.killed, 'SIGTERM');
 
+  // The stop is reported once the CLI has ended, so nothing still writes to the worktree when the caller goes on.
+  const slow = fakeSpawn(child => { child.kill = signal => { child.killed = signal; return true; }; });
+  const stopper = new AbortController();
+  let settled = false;
+  const stopping = runClaude({ ...request, signal: stopper.signal }, slow.spawn).catch(error => { settled = true; return error; });
+  await new Promise(resolve => setImmediate(resolve));
+  stopper.abort();
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(slow.calls[0].child.killed, 'SIGTERM');
+  assert.equal(settled, false, 'still waiting for the CLI to end');
+  slow.calls[0].child.emit('close', null);
+  assert.match((await stopping).message, /stopped|aborted/i);
+
   const failed = fakeSpawn(child => {
     child.stderr.end('Invalid API key · Please run /login\n');
     child.emit('close', 1);

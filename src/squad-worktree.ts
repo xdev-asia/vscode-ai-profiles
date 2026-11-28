@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { realpathSync } from 'node:fs';
-import { access, lstat, mkdir, symlink } from 'node:fs/promises';
+import { access, lstat, mkdir, open, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, normalize, resolve, sep } from 'node:path';
 
 export interface RunWorktree {
@@ -137,6 +137,18 @@ export function pathKey(path: string, platform: NodeJS.Platform = process.platfo
 }
 
 /** A branch name safe to pass to git as a value. */
+/** Whether a file looks binary: a zero byte in its first 8,000 bytes, which is how git decides too. */
+async function binary(file: string): Promise<boolean> {
+  const handle = await open(file, 'r').catch(() => undefined);
+  if (!handle) return false;
+  try {
+    const { buffer, bytesRead } = await handle.read(Buffer.alloc(8_000), 0, 8_000, 0);
+    return buffer.subarray(0, bytesRead).includes(0);
+  } finally {
+    await handle.close();
+  }
+}
+
 export function validBranch(name: unknown): name is string {
   return typeof name === 'string' && name.length <= 200 && /^[\w./-]+$/.test(name) && !name.startsWith('-') && !name.includes('..') && !name.endsWith('/') && !name.endsWith('.lock');
 }
@@ -322,12 +334,12 @@ export class Worktrees {
 
   /** Stages everything so new files show up, then lists the run's changes against its base commit. */
   async changes(worktree: RunWorktree): Promise<FileChange[]> {
-    await this.stageAll(worktree);
+    if (!(await this.merging(worktree))) await this.stageAll(worktree);
     return parseDiff(await this.run(['diff', '--cached', '--no-renames', '--no-color', worktree.base], worktree.path));
   }
 
   async changedFiles(worktree: RunWorktree): Promise<string[]> {
-    await this.stageAll(worktree);
+    if (!(await this.merging(worktree))) await this.stageAll(worktree);
     return (await this.run(['diff', '--cached', '--no-renames', '--name-only', worktree.base], worktree.path)).split('\n').filter(Boolean).slice(0, 200);
   }
 
@@ -358,11 +370,134 @@ export class Worktrees {
       await this.run([...identity, 'merge', '--no-ff', '--no-edit', '--no-verify', '-q', '-m', message.slice(0, 200), branch], worktree.path);
       return { merged: true, conflicts: [] };
     } catch (error) {
-      const conflicts = (await this.run(['diff', '--name-only', '--diff-filter=U'], worktree.path).catch(() => '')).split('\n').filter(Boolean);
+      const conflicts = (await this.run(['diff', '--name-only', '-z', '--diff-filter=U'], worktree.path).catch(() => '')).split('\0').filter(Boolean);
       await this.run(['merge', '--abort'], worktree.path).catch(() => undefined);
       if (!conflicts.length) throw error;
       return { merged: false, conflicts: conflicts.slice(0, 50) };
     }
+  }
+
+  /** Whether a branch is already part of what the worktree has checked out. */
+  async mergedInto(worktree: Pick<RunWorktree, 'path'>, branch: string): Promise<boolean> {
+    if (!validBranch(branch)) return false;
+    return this.run(['merge-base', '--is-ancestor', branch, 'HEAD'], worktree.path).then(() => true, () => false);
+  }
+
+  /**
+   * Starts merging a local branch into a worktree for a worker to finish. A merge that an interrupted step left
+   * behind is undone first, and what earlier steps left uncommitted becomes its own commit, so undoing this merge
+   * loses nothing. Returns `before`, the commit the worktree goes back to, and the files that conflict; none when
+   * the merge was committed without a conflict. A conflict that editing text cannot settle, such as a file one
+   * side deleted or a binary file, undoes the merge and is an error.
+   *
+   * While the merge is the step's, the commit before it is kept in a file in the worktree's git folder. That file
+   * is how `abortMerge` tells this merge from one the user opened by hand.
+   */
+  async startMerge(worktree: RunWorktree, branch: string, message: string, keepMessage: string): Promise<{ before: string; conflicts: string[] }> {
+    if (!validBranch(branch)) throw new Error(`"${branch}" is not a valid branch name.`);
+    await this.abortMerge(worktree);
+    await this.commit(worktree, keepMessage);
+    const before = (await this.run(['rev-parse', 'HEAD'], worktree.path)).trim();
+    const marker = await this.mergeMarker(worktree);
+    await writeFile(marker, before);
+    try {
+      await this.run([...await this.identity(worktree), 'merge', '--no-ff', '--no-edit', '--no-verify', '-q', '-m', message.slice(0, 200), branch], worktree.path);
+      await rm(marker, { force: true });
+      return { before, conflicts: [] };
+    } catch (error) {
+      const unmerged = await this.unmerged(worktree).catch(() => []);
+      let problem = unmerged.find(entry => entry.code !== 'UU' && entry.code !== 'AA');
+      let reason = 'was deleted or renamed by one of the two changes';
+      if (!problem) {
+        for (const entry of unmerged) {
+          if (!(await binary(join(worktree.path, entry.path)))) continue;
+          problem = entry;
+          reason = 'is a binary file';
+          break;
+        }
+      }
+      if (!unmerged.length || problem) {
+        await this.abortMerge(worktree);
+        if (!problem) throw error;
+        throw new Error(`A worker cannot resolve this merge: ${problem.path} ${reason}. Merge ${branch} by hand in the worktree, or ask for the change again with Request changes.`);
+      }
+      return { before, conflicts: unmerged.map(entry => entry.path) };
+    }
+  }
+
+  /**
+   * Commits the merge that `startMerge` left open, once none of its conflicting files still holds a conflict
+   * marker. Returns the files that still do; the merge then stays as it is, for `abortMerge`. A worker that
+   * committed the merge itself is held to the same check.
+   */
+  async finishMerge(worktree: RunWorktree, merge: { branch: string; conflicts: readonly string[] }): Promise<string[]> {
+    const marker = await this.mergeMarker(worktree);
+    const open = await this.merging(worktree);
+    if (!open && !(await this.mergedInto(worktree, merge.branch))) {
+      throw new Error('The merge is no longer open in this worktree; it was ended from outside the step.');
+    }
+    const remaining: string[] = [];
+    for (const file of merge.conflicts) {
+      const content = await readFile(join(worktree.path, file), 'utf8').catch(() => '');
+      if (/^(?:<{7}|>{7})(?: |\r?$)/m.test(content)) remaining.push(file);
+    }
+    if (remaining.length) return remaining;
+    if (open) {
+      await this.stageAll(worktree);
+      await this.run([...await this.identity(worktree), 'commit', '--no-edit', '--cleanup=strip', '--no-verify', '-q'], worktree.path);
+    }
+    await rm(marker, { force: true });
+    return [];
+  }
+
+  /**
+   * Undoes the merge a step opened with `startMerge`, in whatever state it is: the worktree goes back to the
+   * commit before the merge, and files created since are removed. Everything older is in that commit, so nothing
+   * else is lost. Does nothing, and returns false, when no step has a merge open here; a merge the user opened by
+   * hand is not touched.
+   */
+  async abortMerge(worktree: Pick<RunWorktree, 'path' | 'linked'>): Promise<boolean> {
+    const marker = await this.mergeMarker(worktree);
+    const before = (await readFile(marker, 'utf8').catch(() => '')).trim();
+    if (!/^[0-9a-f]{40,64}$/.test(before)) return false;
+    if (await this.merging(worktree)) await this.run(['merge', '--abort'], worktree.path).catch(() => undefined);
+    await this.run(['reset', '--hard', '-q', before], worktree.path);
+    // Files the worker created are not part of any commit. Ignored files and linked folders are not listed.
+    const excluded = (worktree.linked ?? []).map(path => `:(exclude)${path}`);
+    const created = (await this.run(['ls-files', '--others', '--exclude-standard', '-z', '--', '.', ...excluded], worktree.path)).split('\0').filter(Boolean);
+    for (const file of created) await rm(join(worktree.path, file), { force: true }).catch(() => undefined);
+    await rm(marker, { force: true });
+    return true;
+  }
+
+  private merging(worktree: Pick<RunWorktree, 'path'>): Promise<boolean> {
+    return this.run(['rev-parse', '-q', '--verify', 'MERGE_HEAD'], worktree.path).then(() => true, () => false);
+  }
+
+  /** Where the commit before a step's open merge is kept: in the git folder of the worktree, outside the checkout. */
+  private async mergeMarker(worktree: Pick<RunWorktree, 'path'>): Promise<string> {
+    return join((await this.run(['rev-parse', '--absolute-git-dir'], worktree.path)).trim(), 'XDEV_SQUAD_MERGE');
+  }
+
+  /** The files of an open merge that are not merged yet, each with git's two-letter state (UU, AA, DU, …). */
+  private async unmerged(worktree: Pick<RunWorktree, 'path'>): Promise<{ code: string; path: string }[]> {
+    const fields = (await this.run(['status', '--porcelain', '-z'], worktree.path)).split('\0');
+    const entries: { code: string; path: string }[] = [];
+    for (let index = 0; index < fields.length; index++) {
+      const field = fields[index];
+      if (field.length < 4) continue;
+      const code = field.slice(0, 2);
+      // A rename or copy is followed by the name it came from.
+      if (code[0] === 'R' || code[0] === 'C') index++;
+      if (['DD', 'AU', 'UD', 'UA', 'DU', 'AA', 'UU'].includes(code)) entries.push({ code, path: field.slice(3) });
+    }
+    return entries;
+  }
+
+  /** A committer for a repository whose git has none configured. */
+  private async identity(worktree: Pick<RunWorktree, 'path'>): Promise<string[]> {
+    const email = (await this.run(['config', 'user.email'], worktree.path).catch(() => '')).trim();
+    return email ? [] : ['-c', 'user.name=xDev Squad', '-c', 'user.email=squad@xdev.invalid'];
   }
 
   /** Restores one file to the base commit, or deletes it when the run added it. */

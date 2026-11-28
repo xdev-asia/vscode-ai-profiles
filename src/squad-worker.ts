@@ -95,6 +95,8 @@ type Spawn = (command: string, args: readonly string[], options: SpawnOptions) =
 export const summaryLimit = 2_000;
 export const memoryNoteLimit = 300;
 const outputLimit = 4_000_000;
+/** How long a stopped CLI gets to end before its run is reported as stopped anyway. */
+const stopGraceMs = 5_000;
 
 const reportSchema = {
   type: 'object',
@@ -495,25 +497,38 @@ export function runClaude(request: WorkerRequest, spawn: Spawn = spawnProcess): 
     let result = '';
     let stderr = '';
     let settled = false;
+    let ending: Error | undefined;
+    let grace: NodeJS.Timeout | undefined;
     const finish = (error?: Error) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearTimeout(grace);
       signal?.removeEventListener('abort', abort);
       if (error) reject(error);
       else resolve(result);
     };
+    /**
+     * Ends the CLI and, on Windows, every process under it: a CLI installed as a .cmd script runs under cmd.exe,
+     * and ending only that shell would leave the CLI working in the worktree.
+     */
     const stop = () => {
-      if (child.exitCode === null && !child.killed) child.kill('SIGTERM');
+      if (child.exitCode !== null) return;
+      if (process.platform === 'win32' && child.pid) {
+        spawnProcess('taskkill', ['/pid', String(child.pid), '/t', '/f'], { stdio: 'ignore', windowsHide: true })
+          .on('error', () => child.kill('SIGTERM'));
+      } else if (!child.killed) child.kill('SIGTERM');
     };
-    const abort = () => {
+    /** Stops the CLI and reports `error` once it has ended, so nothing still writes to the worktree; after a few seconds at the latest. */
+    const end = (error: Error) => {
+      if (ending || settled) return;
+      ending = error;
       stop();
-      finish(signal?.reason instanceof Error ? signal.reason : new Error('The worker was stopped.'));
+      if (child.exitCode !== null) finish(error);
+      else grace = setTimeout(() => finish(error), stopGraceMs);
     };
-    const timer = setTimeout(() => {
-      stop();
-      finish(new Error(`The worker did not finish within ${Math.round(settings.timeoutMs / 60_000)} minutes.`));
-    }, settings.timeoutMs);
+    const abort = () => end(signal?.reason instanceof Error ? signal.reason : new Error('The worker was stopped.'));
+    const timer = setTimeout(() => end(new Error(`The worker did not finish within ${Math.round(settings.timeoutMs / 60_000)} minutes.`)), settings.timeoutMs);
     signal?.addEventListener('abort', abort, { once: true });
     const calls = new Map<string, WorkerActivity>();
     const line = (text: string) => {
@@ -541,10 +556,7 @@ export function runClaude(request: WorkerRequest, spawn: Spawn = spawnProcess): 
       const lines = buffer.split('\n');
       buffer = lines.pop() ?? '';
       for (const text of lines) line(text);
-      if (buffer.length > outputLimit) {
-        stop();
-        finish(new Error('The worker output was too large.'));
-      }
+      if (buffer.length > outputLimit) end(new Error('The worker output was too large.'));
     });
     child.stderr?.setEncoding('utf8').on('data', (chunk: string) => {
       stderr = (stderr + chunk).slice(-2_000);
@@ -553,6 +565,7 @@ export function runClaude(request: WorkerRequest, spawn: Spawn = spawnProcess): 
     child.on('close', code => {
       line(buffer);
       buffer = '';
+      if (ending) return finish(ending);
       if (code === 0 || result) return finish();
       const detail = stderr.trim().split('\n').at(-1)?.slice(0, 300);
       finish(new Error(`Claude Code exited with code ${code}${detail ? `: ${detail}` : ''}. Sign in to the terminal account again if its session expired.`));

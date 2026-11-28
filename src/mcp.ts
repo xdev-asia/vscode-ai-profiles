@@ -511,6 +511,8 @@ export function xdevMcpTools(squad: SquadChat, accounts: Accounts, profiles: Ter
   const squadLevel = () => host?.squadLevel?.() ?? 'off';
   const stepView = (step: RunStep, index: number, brief: boolean) => ({
     index, role: step.role, account: step.profile, kind: step.kind ?? 'api', repo: step.repo, model: step.model, status: step.status,
+    // In a combined run: the left-out run this step merges, resolving its conflicts.
+    resolvesRunId: step.resolves,
     ...(brief ? {} : {
       brief: clip(step.brief, 1_000), summary: step.summary === undefined ? undefined : clip(step.summary, 4_000),
       question: step.status === 'blocked' ? step.question : undefined,
@@ -524,7 +526,7 @@ export function xdevMcpTools(squad: SquadChat, accounts: Accounts, profiles: Ter
     currentStep: record.status === 'active' ? squad.currentStep(record) : null,
     // Runs of one parallel plan share a batch; finished ones can be combined with xdev_squad_combine.
     batch: record.batch, combinedInto: record.combinedInto,
-    combined: record.combined?.map(({ run, title, branch, merged, conflicts }) => ({ runId: run, task: clip(title, 200), branch, merged, conflicts })),
+    combined: record.combined?.map(({ run, title, branch, merged, conflicts, resolved }) => ({ runId: run, task: clip(title, 200), branch, merged, conflicts, resolved })),
     steps: record.steps.map((step, index) => stepView(step, index, brief)),
     ...(brief ? {} : {
       repositories: record.trees?.map(tree => ({
@@ -742,7 +744,7 @@ export function xdevMcpTools(squad: SquadChat, accounts: Accounts, profiles: Ter
       await squad.requestChanges(runId, text, repo, account);
       return { run: runView(findRun(runId)) };
     }, ['runId', 'text']),
-    squadRunTool('squad_combine', 'Combine finished runs, such as the runs of a parallel plan, into one new run: each run’s branch is merged into a new branch in its own worktree. A run that conflicts with one merged before it is left out and its conflicting files are returned; ask for that change again on the combined run with xdev_squad_request_changes. The new run has a Review and a Tests step that check the changes together. Nothing is merged into the user’s checkout or pushed.', {
+    squadRunTool('squad_combine', 'Combine finished runs, such as the runs of a parallel plan, into one new run: each run’s branch is merged into a new branch in its own worktree. A run that conflicts with one merged before it is left out and its conflicting files are returned; merge it afterwards with xdev_squad_resolve, or ask for that change again on the combined run with xdev_squad_request_changes. The new run has a Review and a Tests step that check the changes together. Nothing is merged into the user’s checkout or pushed.', {
       runIds: { type: 'array', minItems: 2, maxItems: 8, items: { type: 'string', maxLength: 64 }, description: 'The finished runs to merge, in this order.' }
     }, async ({ runIds }) => {
       const known = new Set(squad.snapshot().runs.map(record => record.id));
@@ -752,6 +754,13 @@ export function xdevMcpTools(squad: SquadChat, accounts: Accounts, profiles: Ter
       if (!record) throw new Error(entries.at(-1)?.text ?? 'The runs could not be combined.');
       return { run: runView(record), note: entries.at(-1)?.text };
     }, ['runIds']),
+    squadRunTool('squad_resolve', 'On a combined run, merge the runs it left out: adds one Implement step for each, which merges that run’s branch into the combined worktree and resolves the conflicts. Run each new step with xdev_squad_run_step. A step that leaves a conflict unresolved undoes its merge, and that run stays left out. Review and Tests steps that already ran did not see these changes.', {
+      ...runArg, sourceRunId: { type: 'string', maxLength: 64, description: 'One left-out run. Without it, every left-out run.' },
+      account: { type: 'string', maxLength: 200, description: 'Claude Code account id that merges. Without it: Implement’s account, else the account that implemented the left-out run.' }
+    }, async ({ runId, sourceRunId, account }) => {
+      await squad.resolveConflicts(findRun(runId).id, typeof sourceRunId === 'string' && sourceRunId ? findRun(sourceRunId).id : undefined, account);
+      return { run: runView(findRun(runId)), note: 'Run the new Implement steps with xdev_squad_run_step, then the checks.' };
+    }),
     squadRunTool('squad_finish_run', 'End a run now: remaining steps are skipped and each worktree is committed to its local branch. Nothing is merged or pushed; the user does that in VS Code.', runArg, async ({ runId }) => {
       await squad.finish(runId);
       return { run: runView(findRun(runId)), note: 'Committed locally. Merging, pushing, and deploying stay with the user in VS Code.' };
