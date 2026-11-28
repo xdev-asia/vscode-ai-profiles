@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.20.0 - 2026-11-28
+
+### Added
+
+- **Parallel runs.** Several runs can be open, and up to `xdevAi.squad.maxParallelRuns` of them (3 by default) work at the same time, each in its own worktree and branch and under its own account. A plan marked **parallel** becomes one run per task: `parallel: true` in `xdev_squad_submit_plan`, or `"parallel": true` from Squad's own Lead, which may then give one role several tasks. You review, merge, and push each run on its own.
+- For an AI client: `xdev_squad_approve_plan` returns `runs` for a parallel plan, `xdev_squad_wait` returns each time one piece of work ends, `xdev_squad_status` lists `workingRuns`, and `xdev_squad_stop` takes a `runId`.
+- The panel shows a live feed for each run that works, locks only that run, and has **Stop this run**. The chat stays usable while steps work.
+- `npm run test:host` tests the extension in a real VS Code window; CI runs it on Linux and Windows.
+
+### Changed
+
+- Approving a plan no longer needs the earlier run to be finished, and **Request changes** can reopen a finished run while another run is open.
+- A run of a parallel plan names its commit and merge request after its own task.
+
 ## 0.19.0 - 2026-11-28
 
 ### Security

@@ -58,6 +58,8 @@ interface Plan {
   jobs: Job[];
   /** Repositories in the workspace when there is more than one. */
   repos?: string[];
+  /** Every task is independent: approving makes one run per task, each with its own worktree and branch. */
+  parallel?: boolean;
 }
 
 export interface RunSession {
@@ -88,11 +90,16 @@ export interface SquadOptions {
   poolAccounts: readonly string[];
   /** Request changes continues Implement's earlier session instead of starting a new one. */
   resumeFeedback: boolean;
+  /** How many runs may have a step working at the same time. 1 runs one step at a time. */
+  maxParallel: number;
 }
 
 export const defaultSquadOptions: SquadOptions = {
-  leadSessionTurns: 0, planApproval: 'manual', approver: 'human', accountPool: 'role', poolAccounts: [], resumeFeedback: false
+  leadSessionTurns: 0, planApproval: 'manual', approver: 'human', accountPool: 'role', poolAccounts: [], resumeFeedback: false, maxParallel: 3
 };
+
+/** The most runs that may work at the same time, whatever the setting says. */
+export const parallelLimit = 8;
 
 /**
  * Reads the two settings that let a run go on without the user. Automation is opt-in: a value that is
@@ -145,6 +152,8 @@ export interface RunTree extends RunWorktree {
 export interface RunRecord {
   id: string;
   request: string;
+  /** What this run alone does, when it is one task of a parallel plan. Names its commit and merge request. */
+  title?: string;
   prompt: string;
   time: number;
   status: 'active' | 'done' | 'stopped';
@@ -235,6 +244,10 @@ export interface LiveActivity {
 }
 
 interface ActiveRun {
+  /** The run a step works on, or '' for a chat request, a plan approval, or a workflow draft. */
+  key: string;
+  /** Runs whose steps this work changes; no other work may touch them meanwhile. */
+  claims: Set<string>;
   controller: AbortController;
   signal: AbortSignal;
   entries: SquadChatEntry[];
@@ -397,6 +410,11 @@ export function squadMetrics(history: readonly RunMetric[], now = Date.now()): S
 }
 
 /** A short title for a run's commits and merge requests: the request's first sentence, at most 72 characters. */
+/** The title of a run's commit and merge request: its own task for a run of a parallel plan, else the request. */
+export function runName(record: Pick<RunRecord, 'request' | 'title'>): string {
+  return runTitle(record.title ?? record.request);
+}
+
 export function runTitle(request: string): string {
   const line = request.trim().split('\n', 1)[0].trim();
   const sentence = line.split(/(?<=[.!?:;])\s+|\s+\((?=\d+\))/u, 1)[0].replace(/[.:;]+$/, '').trim() || line;
@@ -435,7 +453,12 @@ function repoName(target: string): string {
 }
 
 export class SquadChat {
-  private active?: ActiveRun;
+  /** Work in flight in this window: at most one chat request (key '') and one step per run (key: the run id). */
+  private readonly working = new Map<string, ActiveRun>();
+  /** The work the panel shows first. */
+  private get active(): ActiveRun | undefined {
+    return this.working.values().next().value;
+  }
   private notifyTimer?: ReturnType<typeof setTimeout>;
   private heartbeat?: ReturnType<typeof setInterval>;
   /** Identifies this window, so other windows sharing the state can tell its runs apart. */
@@ -480,14 +503,22 @@ export class SquadChat {
       workflow,
       workflowIssue: this.workflowIssue?.id === workflow?.id && this.workflowIssue?.step === workflow?.approved.length
         ? this.workflowIssue?.text : undefined,
-      plan: plan && { id: plan.id, jobs: plan.jobs, repos: plan.repos },
+      plan: plan && { id: plan.id, jobs: plan.jobs, repos: plan.repos, parallel: plan.parallel },
       workers: Boolean(this.host),
+      maxParallel: options.maxParallel,
+      /** Anything at all is in flight, here or in another window. */
       busy: Boolean(this.active) || Boolean(remote),
+      /** A chat request, a plan approval, or a workflow draft is in flight; steps of runs are not counted. */
+      chatBusy: this.working.has('') || Boolean(remote),
+      /** Runs with a step working now. Other runs can be started, finished, or reviewed meanwhile. */
+      busyRuns: this.busyRuns(),
+      /** Each piece of work in flight, with its live activity. */
+      working: [...this.working.values()].map(job => ({ run: job.key || [...job.claims][0], status: job.status, live: job.live })),
       /** A run in another VS Code window that shares this workspace's Squad. */
       remote: Boolean(remote),
       live: this.active?.live,
       metrics: squadMetrics(history ?? []),
-      status: this.active?.status ?? (remote ? `Another window is running: ${remote.status ?? 'a Squad step'}`
+      status: this.statusLine() ?? (remote ? `Another window is running: ${remote.status ?? 'a Squad step'}`
         : inFlight ? 'The previous run was interrupted. Send a new message to continue.' : '')
     };
   }
@@ -497,6 +528,7 @@ export class SquadChat {
     return plan && {
       id: plan.id,
       repos: plan.repos,
+      ...(plan.parallel ? { parallel: true } : {}),
       jobs: plan.jobs.map(({ role, brief, profile, kind, repo, model }) => ({
         role, brief, profile, kind: kind ?? 'api' as AgentKind, ...(repo ? { repo } : {}), ...(model ? { model } : {})
       }))
@@ -514,7 +546,7 @@ export class SquadChat {
   }
 
   async send(input: unknown, signal?: AbortSignal): Promise<StartedRun> {
-    this.requireIdle();
+    this.requireChatIdle();
     if (typeof input !== 'string' || !input.trim() || input.length > chatPromptLimit) throw new Error('Enter a chat message.');
     if (this.read().plan) throw new Error('Approve or discard the current plan first.');
     const message = input.trim();
@@ -550,7 +582,7 @@ export class SquadChat {
         ? saved : undefined;
       // A resumed Lead already holds the conversation; it only needs what happened since its last turn.
       history = lead ? sinceLead(state.entries) : recent;
-      if (state.inFlight) state.entries.push({ author: 'Squad', text: 'The previous run was interrupted.' });
+      if (state.inFlight && this.working.size < 2) state.entries.push({ author: 'Squad', text: 'The previous run was interrupted.' });
       state.chatId ??= randomUUID();
       state.chatTime ??= Date.now();
       state.chatTitle ??= runTitle(message);
@@ -583,7 +615,7 @@ export class SquadChat {
         ? `${worker} (Claude Code worker: reads the repository, ${worker === 'Review' ? 'reviews the diff' : 'edits files and runs allowed commands'} in a git worktree)`
         : `${worker} (text API: proposes text only)`);
       const leadSystem = `${roleInstructions.Lead} ${agent.kind === 'api' ? textOnly : 'You may read the repository (read-only) to answer or to make briefs concrete; do not change files. Start from "code" when given, and keep reading short.'} Available worker roles: ${capabilities.join(', ') || 'none'}.
-Return only a JSON object with a "reply" string and a "tasks" array. Each task has a "role" from the available worker roles and a "brief" string${multiple ? ' and a "repo"' : ''}. Use each role at most once${multiple ? ' per repository' : ''}.${claudeWorkers ? ' To save cost, a task for a Claude Code worker may set "model": "haiku" for simple mechanical work such as renames, small edits, or running tests; "sonnet" for most coding; "opus" only for the hardest tasks. Omit "model" to use the configured default.' : ''}${dataNote} Use an empty tasks array for questions, summaries, or when no workers are available. Write briefs that a worker can act on without the chat history. Reply in the user's language. ${options.planApproval === 'auto' ? 'Proposed tasks start as soon as you return them, so propose tasks only when the request asks for a change; keep the reply to a short summary of the plan (at most 80 words).' : 'The user reviews proposed tasks in the xDev Squad panel and approves them with a button, then starts each step there, so keep the reply to a short summary of the plan (at most 80 words) and do not ask the user to reply to start it.'}${multiple ? ' Each Claude Code task runs in one git repository from "repositories": set its "repo" to that entry exactly. A change that spans repositories, such as a backend API and the frontend screen that calls it, gets one Implement task per repository, listed so that dependencies come first. Write file paths relative to the task\'s repository root.' : ''}${allowedCommands?.includes('*') ? ' Claude Code workers may run any shell command.' : allowedCommands ? ` Claude Code workers may only run "allowed_commands"${perRepository ? ' plus, in a repository listed in "repository_commands", the commands listed for it' : ''} and read-only git; do not ask them to run anything else, and do not tell them a command is not allowed.` : ''} When given, "code" is a CodeGraph excerpt of the relevant symbols and call paths: name concrete files and symbols in each brief so workers do not have to search.${keepLead ? ' Later turns of this chat continue this session: they send only the new request, "history" since your last reply, and "memory", "allowed_commands", "repository_commands", or "repositories" when they changed.' : ''}`;
+Return only a JSON object with a "reply" string and a "tasks" array. Each task has a "role" from the available worker roles and a "brief" string${multiple ? ' and a "repo"' : ''}. Use each role at most once${multiple ? ' per repository' : ''}.${claudeWorkers ? ' To save cost, a task for a Claude Code worker may set "model": "haiku" for simple mechanical work such as renames, small edits, or running tests; "sonnet" for most coding; "opus" only for the hardest tasks. Omit "model" to use the configured default. When the request is several independent pieces of work that do not need each other\'s changes, set "parallel": true at the top level: each task then gets its own worktree and branch and they work at the same time, so a role may take several tasks; never use it for tasks that build on one another, such as a review of another task.' : ''}${dataNote} Use an empty tasks array for questions, summaries, or when no workers are available. Write briefs that a worker can act on without the chat history. Reply in the user's language. ${options.planApproval === 'auto' ? 'Proposed tasks start as soon as you return them, so propose tasks only when the request asks for a change; keep the reply to a short summary of the plan (at most 80 words).' : 'The user reviews proposed tasks in the xDev Squad panel and approves them with a button, then starts each step there, so keep the reply to a short summary of the plan (at most 80 words) and do not ask the user to reply to start it.'}${multiple ? ' Each Claude Code task runs in one git repository from "repositories": set its "repo" to that entry exactly. A change that spans repositories, such as a backend API and the frontend screen that calls it, gets one Implement task per repository, listed so that dependencies come first. Write file paths relative to the task\'s repository root.' : ''}${allowedCommands?.includes('*') ? ' Claude Code workers may run any shell command.' : allowedCommands ? ` Claude Code workers may only run "allowed_commands"${perRepository ? ' plus, in a repository listed in "repository_commands", the commands listed for it' : ''} and read-only git; do not ask them to run anything else, and do not tell them a command is not allowed.` : ''} When given, "code" is a CodeGraph excerpt of the relevant symbols and call paths: name concrete files and symbols in each brief so workers do not have to search.${keepLead ? ' Later turns of this chat continue this session: they send only the new request, "history" since your last reply, and "memory", "allowed_commands", "repository_commands", or "repositories" when they changed.' : ''}`;
       const standing = {
         memory: memory.length ? memory : undefined, allowed_commands: allowedCommands,
         repository_commands: perRepository ? repositoryCommands : undefined,
@@ -673,12 +705,14 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
     const plan = this.read().plan;
     if (!plan || this.stops !== stops) return entries;
     try {
+      const begun = Date.now();
       const approved = await this.approve(plan.id, undefined, options.approver);
       const prepared = await approved.finished;
-      const record = this.read().runs?.find(candidate => candidate.status === 'active' && candidate.request === plan.prompt);
-      if (!record || this.stops !== stops) return [...entries, ...prepared];
-      const step = await this.runStep(record.id);
-      return [...entries, ...prepared, ...await step.finished];
+      const records = (this.read().runs ?? []).filter(candidate => candidate.status === 'active' && candidate.request === plan.prompt && candidate.time >= begun);
+      if (!records.length || this.stops !== stops) return [...entries, ...prepared];
+      // One run starts its first step. The runs of a parallel plan start together, as many as may work at once.
+      const steps = await Promise.all(records.slice(0, plan.parallel ? options.maxParallel : 1).map(record => this.runStep(record.id)));
+      return [...entries, ...prepared, ...(await Promise.all(steps.map(step => step.finished))).flat()];
     } catch (error) {
       const text = `Automatic start paused: ${error instanceof Error ? error.message : 'unknown error'} Continue in the panel.`;
       await this.write(state => state.entries.push({ author: 'Squad', text })).catch(() => undefined);
@@ -732,7 +766,7 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
         const overall = repos && suggestRepository(repos, [plan.reply, ...plan.jobs.map(job => job.brief), planned.code ?? '']);
         const jobs = plan.jobs.map(job => job.kind !== 'claude' || !repos || job.repo ? job
           : { ...job, repo: suggestRepository(repos, [job.brief]) ?? overall });
-        state.plan = { id: randomUUID(), prompt, jobs, repos };
+        state.plan = { id: randomUUID(), prompt, jobs, repos, ...(plan.parallel ? { parallel: true } : {}) };
       }
       if (!plan || plan.invalid) {
         state.entries.push({ author: 'Squad', text: 'Lead did not return a valid plan. Ask again to generate tasks.' });
@@ -747,8 +781,9 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
    * Like a plan from Lead, nothing runs until the plan is approved.
    */
   async submitPlan(input: unknown, lead = 'External lead'): Promise<NonNullable<ReturnType<SquadChat['pendingPlan']>>> {
-    this.requireIdle();
-    const { request, summary, tasks } = (input ?? {}) as { request?: unknown; summary?: unknown; tasks?: unknown };
+    this.requireChatIdle();
+    const { request, summary, tasks, parallel } = (input ?? {}) as { request?: unknown; summary?: unknown; tasks?: unknown; parallel?: unknown };
+    if (parallel !== undefined && typeof parallel !== 'boolean') throw new Error('"parallel" is true or false.');
     if (typeof request !== 'string' || !request.trim() || request.length > chatPromptLimit) throw new Error('Give the request the plan answers, up to 8,000 characters.');
     if (typeof summary !== 'string' || !summary.trim() || summary.length > 4_000) throw new Error('Give a summary of the plan, up to 4,000 characters.');
     if (!Array.isArray(tasks) || !tasks.length || tasks.length > 8) throw new Error('Give one to eight tasks.');
@@ -809,7 +844,7 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
       state.chatTitle ??= runTitle(request);
       state.entries.push({ author: 'You', text: request.trim(), to: 'Lead' });
       state.entries.push({ author: 'Lead', profile: shorten(lead, 80), text: shorten(summary.trim(), responseLimit) });
-      state.plan = { id: randomUUID(), prompt: request.trim(), jobs, repos: multiple ? repositories : undefined };
+      state.plan = { id: randomUUID(), prompt: request.trim(), jobs, repos: multiple ? repositories : undefined, ...(parallel && jobs.length > 1 ? { parallel: true } : {}) };
     });
     this.changed();
     return this.pendingPlan()!;
@@ -830,11 +865,10 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
    * `repoInput` is one repository for every Claude Code step, or one entry per step (empty keeps the plan's).
    */
   async approve(id: unknown, signal?: AbortSignal, approverInput: unknown = 'human', repoInput?: unknown): Promise<StartedRun> {
-    this.requireIdle();
+    this.requireChatIdle();
     const plan = this.requirePlan(id);
     const approver = approvers.find(candidate => candidate === approverInput);
     if (!approver) throw new Error('Choose who approves each step: human, ai+human, or ai.');
-    if (this.read().runs?.some(run => run.status === 'active')) throw new Error('Finish or stop the current run before approving another plan.');
     const directory = await this.directory();
     for (const job of plan.jobs) this.verify(job, directory);
     const headlessJobs = plan.jobs.some(job => job.kind === 'claude');
@@ -855,13 +889,15 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
         job.repo = chosen;
       }
     }
-    const targets = [...new Set(jobs.flatMap(job => job.kind === 'claude' ? [job.repo ?? '.'] : []))];
+    // A parallel plan becomes one run per task, so each task has its own worktree and branch.
+    const groups = plan.parallel && jobs.length > 1 ? jobs.map(job => [job]) : [jobs];
+    const targetsOf = (group: Job[]) => [...new Set(group.flatMap(job => job.kind === 'claude' ? [job.repo ?? '.'] : []))];
     // Squad keeps a fixed number of runs. The oldest runs make room only when their work is merged or pushed.
-    const overflow = (this.read().runs ?? []).slice(runLimit - 1);
-    if (overflow.some(old => !disposableRun(old))) {
-      throw new Error(`Squad keeps ${runLimit} runs per project. Push, merge, or remove an older run before approving another plan.`);
+    const overflow = (this.read().runs ?? []).slice(Math.max(0, runLimit - groups.length));
+    if (groups.length > runLimit || overflow.some(old => !disposableRun(old))) {
+      throw new Error(`Squad keeps ${runLimit} runs per project. Push, merge, or remove an older run before approving ${groups.length > 1 ? `a plan with ${groups.length} parallel tasks` : 'another plan'}.`);
     }
-    if (targets.length) await this.host?.checkDisk?.();
+    if (groups.some(group => targetsOf(group).length)) await this.host?.checkDisk?.();
 
     return this.launch('Preparing the run…', signal, state => {
       if (state.plan?.id !== plan.id) throw new Error('This plan is no longer available.');
@@ -869,36 +905,56 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
       state.entries.push({ author: 'Squad', text: 'Plan approved.' });
     }, async run => {
       for (const old of overflow) await this.disposeRun(old);
-      const runId = randomUUID();
-      const trees: RunTree[] = [];
+      const records: RunRecord[] = [];
+      const made: RunTree[] = [];
       const setupNotes: string[] = [];
-      if (targets.length) {
-        run.status = targets.length > 1 ? `Preparing ${targets.length} git worktrees…` : 'Preparing a git worktree…';
-        this.changed();
-        await this.host!.prepare?.();
-        try {
-          for (const [index, target] of targets.entries()) {
-            const worktree = await this.host!.worktrees.create(target !== '.' ? join(folder!, target) : folder!, runId,
-              targets.length > 1 ? `${index + 1}-${target.split('/').at(-1)}` : undefined, this.host!.baseBranch?.(target));
-            if (worktree.fallbackFrom) {
-              setupNotes.push(`${targets.length > 1 ? `${repoName(target)}: ` : ''}${worktree.fallbackFrom} does not exist; started from ${worktree.source ?? 'the remote default branch'}`);
+      let ready = false;
+      try {
+        for (const group of groups) {
+          const targets = targetsOf(group);
+          const runId = randomUUID();
+          const trees: RunTree[] = [];
+          if (targets.length) {
+            run.status = groups.length > 1 ? `Preparing git worktrees for ${groups.length} runs…`
+              : targets.length > 1 ? `Preparing ${targets.length} git worktrees…` : 'Preparing a git worktree…';
+            this.changed();
+            if (!ready) await this.host!.prepare?.();
+            ready = true;
+            for (const [index, target] of targets.entries()) {
+              const worktree = await this.host!.worktrees.create(target !== '.' ? join(folder!, target) : folder!, runId,
+                targets.length > 1 ? `${index + 1}-${target.split('/').at(-1)}` : undefined, this.host!.baseBranch?.(target));
+              made.push({ ...worktree, target });
+              if (worktree.fallbackFrom) {
+                setupNotes.push(`${targets.length > 1 ? `${repoName(target)}: ` : ''}${worktree.fallbackFrom} does not exist; started from ${worktree.source ?? 'the remote default branch'}`);
+              }
+              const prepared = await this.host!.worktrees.setup?.(worktree, this.host!.worktreeLinks?.() ?? [])
+                .catch((error: Error) => ({ notes: [error.message], linked: [] as string[] }));
+              trees.push({ ...worktree, target, ...(prepared?.linked.length ? { linked: prepared.linked } : {}) });
+              setupNotes.push(...(prepared?.notes ?? []).map(note => targets.length > 1 ? `${repoName(target)}: ${note}` : note));
             }
-            const prepared = await this.host!.worktrees.setup?.(worktree, this.host!.worktreeLinks?.() ?? [])
-              .catch((error: Error) => ({ notes: [error.message], linked: [] as string[] }));
-            trees.push({ ...worktree, target, ...(prepared?.linked.length ? { linked: prepared.linked } : {}) });
-            setupNotes.push(...(prepared?.notes ?? []).map(note => targets.length > 1 ? `${repoName(target)}: ${note}` : note));
           }
-        } catch (error) {
-          for (const tree of trees) await this.host!.worktrees.remove(tree).catch(() => undefined);
-          throw error;
+          records.push({
+            id: runId, request: plan.prompt, prompt: shorten(groups.length > 1 ? `${group[0].role}: ${group[0].brief}` : plan.prompt, 500),
+            time: Date.now(), status: 'active', approver, costUsd: 0, ...(groups.length > 1 ? { title: group[0].brief } : {}),
+            sessions: [], steps: group.map(job => ({ ...job, status: 'pending' })), ...(trees.length ? { trees } : {})
+          });
         }
+      } catch (error) {
+        for (const tree of made) await this.host!.worktrees.remove(tree).catch(() => undefined);
+        throw error;
       }
-      const record: RunRecord = {
-        id: runId, request: plan.prompt, prompt: shorten(plan.prompt, 500), time: Date.now(), status: 'active', approver, costUsd: 0,
-        sessions: [], steps: jobs.map(job => ({ ...job, status: 'pending' })), ...(trees.length ? { trees } : {})
-      };
+      const runId = records[0].id;
+      const trees = records[0].trees ?? [];
       await this.write(state => {
-        state.runs = [record, ...(state.runs ?? [])].slice(0, runLimit);
+        state.runs = [...records, ...(state.runs ?? [])].slice(0, runLimit);
+        if (records.length > 1) {
+          const branches = records.flatMap(record => (record.trees ?? []).slice(0, 1).map(tree => tree.branch));
+          state.entries.push({
+            author: 'Squad', run: runId,
+            text: `${records.length} runs are ready, one for each task${branches.length ? `, each on its own branch in a separate worktree (${branches.join(', ')}); your checkout is not changed` : ''}. Nothing has run yet. Start them under Worker runs; up to ${this.options().maxParallel} work at the same time, and each run is reviewed and merged on its own.${setupNotes.length ? ` Setup: ${[...new Set(setupNotes)].join('; ')}.` : ''}`
+          });
+          return;
+        }
         const branch = trees[0]?.branch;
         const from = trees[0]?.source ? ` from ${trees[0].source}` : '';
         state.entries.push({
@@ -967,8 +1023,8 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
    * else pauses the run for the user. Merging always stays with the user.
    */
   async runStep(id: unknown, briefInput?: unknown, signal?: AbortSignal): Promise<StartedRun> {
-    this.requireIdle();
     const { record, index, step } = this.activeRun(id);
+    this.requireFree(record.id);
     this.requireNotInTerminal(step);
     const brief = this.briefFrom(briefInput, step.brief);
     const agent = this.verify(step, await this.directory());
@@ -998,10 +1054,11 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
         current = { index: next, brief: nextStep.brief, agent: nextAgent };
       }
       await this.afterStep(record.id, run);
-    });
+    }, record.id);
   }
 
   private async executeStep(id: string, index: number, brief: string, agent: Agent, run: ActiveRun): Promise<StepStatus> {
+    run.claims.add(id);
     const record = this.run(id)!;
     const step = record.steps[index];
     const started = Date.now();
@@ -1168,7 +1225,7 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
 
   /** Marks the current Claude Code step as handed to an interactive terminal and returns what to open. */
   async startTerminalStep(id: unknown, briefInput?: unknown) {
-    this.requireIdle();
+    this.requireRunIdle(id);
     const { record, index, step } = this.activeRun(id);
     this.requireNotInTerminal(step);
     const brief = this.briefFrom(briefInput, step.brief);
@@ -1193,7 +1250,7 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
 
   /** Completes a step the user worked on in a terminal. */
   async completeStep(id: unknown, summaryInput?: unknown): Promise<void> {
-    this.requireIdle();
+    this.requireRunIdle(id);
     const { record, index, step } = this.activeRun(id);
     if (step.status !== 'terminal') throw new Error('Mark a step done only after continuing it in a terminal.');
     const summary = typeof summaryInput === 'string' && summaryInput.trim() ? summaryInput.trim().slice(0, 2_000) : 'Done in the terminal.';
@@ -1205,7 +1262,7 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
   }
 
   async skipStep(id: unknown): Promise<void> {
-    this.requireIdle();
+    this.requireRunIdle(id);
     const { record, index, step } = this.activeRun(id);
     await this.updateRun(record.id, (saved, state) => {
       saved.steps[index].status = 'skipped';
@@ -1216,7 +1273,7 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
 
   /** Ends the run now: remaining steps are skipped and the worktree is committed locally. */
   async finish(id: unknown): Promise<void> {
-    this.requireIdle();
+    this.requireRunIdle(id);
     const record = this.run(id);
     if (!record || record.status !== 'active') throw new Error('This run is no longer active.');
     await this.closeRun(record.id, 'stopped');
@@ -1234,7 +1291,7 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
     const issues: string[] = [];
     for (const tree of record.trees ?? []) {
       try {
-        results.set(tree.target, await this.host!.worktrees.commit(tree, runTitle(record.request)));
+        results.set(tree.target, await this.host!.worktrees.commit(tree, runName(record)));
       } catch (error) {
         issues.push(`${(record.trees?.length ?? 0) > 1 ? `${repoName(tree.target)}: ` : ''}${error instanceof Error ? error.message : 'Could not commit the worktree.'}`);
       }
@@ -1296,7 +1353,7 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
 
   /** Reverts one file of a run. A finished run gets a new local commit so merging matches what you see. */
   async discardFile(id: unknown, file: unknown, repo?: unknown): Promise<void> {
-    this.requireIdle();
+    this.requireRunIdle(id);
     const { record, tree } = this.runTree(id, repo);
     if (typeof file !== 'string' || !file || file.length > 1_000) throw new Error('Choose a changed file.');
     await this.host!.worktrees.discard(tree, file);
@@ -1314,13 +1371,10 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
    * A finished run becomes active again; its next commit lands on the same branch.
    */
   async requestChanges(id: unknown, textInput: unknown, repo?: unknown, accountInput?: unknown): Promise<void> {
-    this.requireIdle();
+    this.requireRunIdle(id);
     const { record, tree } = this.runTree(id, repo);
     if (typeof textInput !== 'string' || !textInput.trim() || textInput.length > 4_000) throw new Error('Describe the changes you want, up to 4,000 characters.');
     if (tree.merged) throw new Error(`${tree.branch} is already merged. Start a new request in chat instead.`);
-    if (record.status !== 'active' && this.read().runs?.some(run => run.status === 'active' && run.id !== record.id)) {
-      throw new Error('Finish or stop the current run before reopening this one.');
-    }
     const options = this.options();
     const directory = await this.directory();
     // Continue the last Implement session in this repository, with its account, when one is kept.
@@ -1399,7 +1453,7 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
   }
 
   async removeRun(id: unknown): Promise<void> {
-    this.requireIdle();
+    this.requireRunIdle(id);
     const record = this.run(id);
     if (!record) throw new Error('This run is no longer available.');
     if (record.trees?.length) {
@@ -1423,13 +1477,13 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
       if (!state.runs?.some(candidate => candidate.id === record.id)) return;
       state.runs = state.runs.filter(candidate => candidate.id !== record.id);
       const branch = record.trees?.[0]?.branch;
-      state.entries.push({ author: 'Squad', text: `Cleaned up the run “${runTitle(record.request)}”${branch ? ` (${branch})` : ''} ${reason}; its work is merged or pushed.` });
+      state.entries.push({ author: 'Squad', text: `Cleaned up the run “${runName(record)}”${branch ? ` (${branch})` : ''} ${reason}; its work is merged or pushed.` });
     });
   }
 
   /** Removes one run whose work is merged or pushed, at the user's request. */
   async cleanRun(id: unknown): Promise<void> {
-    this.requireIdle();
+    this.requireRunIdle(id);
     const record = this.run(id);
     if (!record) return;
     if (!disposableRun(record)) throw new Error('This run has work that is not merged or pushed. Use Remove on its card instead.');
@@ -1451,7 +1505,7 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
   }
 
   async discard(id: unknown): Promise<void> {
-    this.requireIdle();
+    this.requireChatIdle();
     const plan = this.requirePlan(id);
     await this.write(state => {
       if (state.plan?.id !== plan.id) throw new Error('This plan is no longer available.');
@@ -1566,17 +1620,64 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
     return { workflow, stage };
   }
 
-  cancel(): void {
-    if (!this.active) return;
+  /** Stops the work on one run, or everything in flight when no run is named. */
+  cancel(id?: unknown): void {
+    const jobs = [...this.working.values()].filter(job => id === undefined || job.key === id || job.claims.has(String(id)));
+    if (!jobs.length) return;
     this.stops++;
-    this.active.status = 'Stopping…';
-    this.active.controller.abort();
+    for (const job of jobs) {
+      job.status = 'Stopping…';
+      job.controller.abort();
+    }
     this.changed();
   }
 
+  /** Runs with a step working in this window. */
+  busyRuns(): string[] {
+    return [...new Set([...this.working.values()].flatMap(job => [...job.claims, ...(job.key ? [job.key] : [])]))];
+  }
+
+  /** True while a step of this run works, here. */
+  busyRun(id: unknown): boolean {
+    return typeof id === 'string' && this.busyRuns().includes(id);
+  }
+
+  private statusLine(): string | undefined {
+    const jobs = [...this.working.values()];
+    return jobs.length > 1 ? `${jobs.length} are working: ${jobs.map(job => job.status.replace(/…$/, '')).join(' · ')}` : jobs[0]?.status;
+  }
+
+  private requireLocal(): void {
+    if (this.remoteRun(this.read().inFlight)) throw new Error('Another VS Code window is running a Squad step for this workspace. Wait for it to finish.');
+  }
+
+  /** Nothing at all is in flight: for changes to the chat sessions or the workflow. */
   private requireIdle(): void {
     if (this.active) throw new Error('Wait for the current run or stop it first.');
-    if (this.remoteRun(this.read().inFlight)) throw new Error('Another VS Code window is running a Squad step for this workspace. Wait for it to finish.');
+    this.requireLocal();
+  }
+
+  /** No chat request, plan approval, or draft is in flight. Steps of runs may be working. */
+  private requireChatIdle(): void {
+    if (this.working.has('')) throw new Error('Wait for the current run or stop it first.');
+    this.requireLocal();
+  }
+
+  /** No step of this run is working. Other runs may be. */
+  private requireRunIdle(id: unknown): void {
+    if (this.busyRun(id)) throw new Error('Wait for the current run or stop it first.');
+    this.requireLocal();
+  }
+
+  /** A step of this run may start: the run is idle and fewer runs than the limit are working. */
+  private requireFree(id: string): void {
+    this.requireRunIdle(id);
+    const limit = this.options().maxParallel;
+    const steps = [...this.working.keys()].filter(Boolean).length;
+    if (steps >= limit) {
+      throw new Error(limit === 1 ? 'Wait for the current run or stop it first.'
+        : `${steps} runs are working, which is the most allowed at once (xdevAi.squad.maxParallelRuns). Wait for one to finish.`);
+    }
   }
 
   private requirePlan(id: unknown): Plan {
@@ -1666,7 +1767,8 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
       planApproval: options.planApproval === 'auto' ? 'auto' : 'manual',
       approver: approvers.find(candidate => candidate === options.approver) ?? 'human',
       accountPool: poolModes.find(candidate => candidate === options.accountPool) ?? 'role',
-      poolAccounts: Array.isArray(options.poolAccounts) ? options.poolAccounts.filter(item => typeof item === 'string') : []
+      poolAccounts: Array.isArray(options.poolAccounts) ? options.poolAccounts.filter(item => typeof item === 'string') : [],
+      maxParallel: Math.max(1, Math.min(parallelLimit, Math.floor(Number(options.maxParallel) || 1)))
     };
   }
 
@@ -1735,34 +1837,39 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
 
   private async launch(
     status: string, externalSignal: AbortSignal | undefined, setup: (state: Thread) => void,
-    task: (run: ActiveRun) => Promise<void>
+    task: (run: ActiveRun) => Promise<void>,
+    /** The run whose step this is, or '' for a chat request. */
+    key = ''
   ): Promise<StartedRun> {
-    this.requireIdle();
+    if (key) this.requireFree(key);
+    else this.requireChatIdle();
     externalSignal?.throwIfAborted();
     const controller = new AbortController();
     const signal = externalSignal ? AbortSignal.any([externalSignal, controller.signal]) : controller.signal;
-    const run: ActiveRun = { controller, signal, status, entries: [] };
-    this.active = run;
+    const run: ActiveRun = { key, claims: new Set(key ? [key] : []), controller, signal, status, entries: [] };
+    this.working.set(key, run);
     try {
       await this.write(state => {
         run.signal.throwIfAborted();
         if (this.remoteRun(state.inFlight)) throw new Error('Another VS Code window is running a Squad step for this workspace. Wait for it to finish.');
         setup(state);
-        state.inFlight = { owner: this.owner, beat: Date.now(), status };
+        state.inFlight = { owner: this.owner, beat: Date.now(), status: this.statusLine() ?? status };
       });
     } catch (error) {
-      this.active = undefined;
+      if (this.working.get(key) === run) this.working.delete(key);
       throw error;
     }
-    // Other windows share this state; the heartbeat tells them the run is still alive.
-    clearInterval(this.heartbeat);
-    this.heartbeat = setInterval(() => {
-      if (this.active !== run) return;
-      void this.write(state => {
-        if (typeof state.inFlight === 'object' && state.inFlight.owner === this.owner) state.inFlight = { owner: this.owner, beat: Date.now(), status: run.status };
-      }).catch(() => undefined);
-    }, heartbeatMs);
-    this.heartbeat.unref?.();
+    // Other windows share this state; the heartbeat tells them the work is still alive.
+    if (!this.heartbeat) {
+      this.heartbeat = setInterval(() => {
+        const line = this.statusLine();
+        if (line === undefined) return;
+        void this.write(state => {
+          if (typeof state.inFlight === 'object' && state.inFlight.owner === this.owner) state.inFlight = { owner: this.owner, beat: Date.now(), status: line };
+        }).catch(() => undefined);
+      }, heartbeatMs);
+      this.heartbeat.unref?.();
+    }
     return { finished: this.complete(run, task) };
   }
 
@@ -1774,21 +1881,28 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
     } catch (error) {
       notice = run.signal.aborted ? 'Run stopped.' : error instanceof Error ? error.message : 'The run failed.';
     } finally {
+      const others = () => [...this.working.values()].filter(job => job !== run);
       try {
         await this.write(state => {
-          state.inFlight = undefined;
+          // Other work in this window keeps the marker; only this work's own steps are closed.
+          const rest = others();
+          state.inFlight = rest.length ? { owner: this.owner, beat: Date.now(), status: rest.map(job => job.status).join(' · ') } : undefined;
           for (const saved of state.runs ?? []) {
+            if (rest.some(job => job.claims.has(saved.id))) continue;
+            if (!run.claims.has(saved.id) && rest.length) continue;
             for (const step of saved.steps ?? []) if (step.status === 'running') step.status = 'failed';
           }
-          if (notice) state.entries.push({ author: 'Squad', text: notice });
+          if (notice) state.entries.push({ author: 'Squad', ...(run.key ? { run: run.key } : {}), text: notice });
         }, run);
       } catch {
         // The persisted in-flight marker allows the chat to report an interrupted run.
         run.entries.push({ author: 'Squad', text: notice ?? 'Could not save the final run status.' });
       } finally {
-        clearInterval(this.heartbeat);
-        this.heartbeat = undefined;
-        this.active = undefined;
+        if (this.working.get(run.key) === run) this.working.delete(run.key);
+        if (!this.working.size) {
+          clearInterval(this.heartbeat);
+          this.heartbeat = undefined;
+        }
         this.changed();
       }
     }
@@ -1813,7 +1927,7 @@ function readGate(answer: string): { verdict: GateVerdict; reason: string } {
 
 function parsePlan(
   answer: string, workers: ReadonlyMap<WorkerRole, Agent>, repositories: readonly string[] = []
-): { reply: string; jobs: Job[]; invalid?: boolean } | undefined {
+): { reply: string; jobs: Job[]; invalid?: boolean; parallel?: boolean } | undefined {
   let value: unknown;
   const text = answer.trim();
   try {
@@ -1824,6 +1938,8 @@ function parsePlan(
   if (!value || typeof value !== 'object') return undefined;
   const { reply, tasks } = value as { reply?: unknown; tasks?: unknown };
   if (typeof reply !== 'string' || !reply.trim() || !Array.isArray(tasks)) return undefined;
+  // Independent tasks, each in its own run: a role may then take several of them.
+  const parallel = (value as { parallel?: unknown }).parallel === true && tasks.length > 1;
   const jobs: Job[] = [];
   for (const task of tasks) {
     if (!task || !isRole(task.role) || task.role === 'Lead') return { reply, jobs: [], invalid: true };
@@ -1834,7 +1950,7 @@ function parsePlan(
     const repo = agent?.kind !== 'claude' ? undefined
       : repositories.length === 1 ? repositories[0]
         : typeof task.repo === 'string' && repositories.includes(task.repo.trim().replace(/\/+$/, '')) ? task.repo.trim().replace(/\/+$/, '') : undefined;
-    const duplicate = jobs.some(job => job.role === role && (repositories.length < 2 || (repo !== undefined && job.repo === repo)));
+    const duplicate = !parallel && jobs.some(job => job.role === role && (repositories.length < 2 || (repo !== undefined && job.repo === repo)));
     if (!agent || !brief || brief.length > 4_000 || duplicate || jobs.length >= 8) return { reply, jobs: [], invalid: true };
     // Lead may pick a cheaper or stronger model per task; a value that is not a model name is dropped.
     const model = agent.kind === 'claude' ? workerModel(task.model) : undefined;
@@ -1842,5 +1958,5 @@ function parsePlan(
   }
   // Implement steps come first, then Review, then Tests; Lead's order is kept within a role.
   jobs.sort((a, b) => workerRoles.indexOf(a.role) - workerRoles.indexOf(b.role));
-  return { reply, jobs };
+  return { reply, jobs, ...(parallel ? { parallel: true } : {}) };
 }

@@ -30,6 +30,8 @@ export interface WorkerResult extends WorkerReport {
 
 export interface PlanReport {
   reply: string;
+  /** Every task is independent and gets its own run. */
+  parallel?: boolean;
   tasks: { role: string; brief: string; repo?: string; model?: string }[];
   sessionId?: string;
 }
@@ -126,6 +128,7 @@ const planSchema = {
   type: 'object',
   properties: {
     reply: { type: 'string', description: 'A short summary of the plan for the user, at most 80 words, without labels or disclaimers.' },
+    parallel: { type: 'boolean', description: 'True only when every task is an independent piece of work: each then runs in its own worktree and branch, at the same time.' },
     tasks: {
       type: 'array',
       maxItems: 8,
@@ -436,6 +439,7 @@ export function parsePlanOutput(stdout: string): PlanReport & { costUsd: number 
   if (typeof plan.reply !== 'string' || !Array.isArray(plan.tasks)) throw new Error('Lead did not return a structured plan.');
   return {
     reply: plan.reply,
+    ...(plan.parallel === true ? { parallel: true } : {}),
     tasks: plan.tasks.map(task => ({
       role: typeof task?.role === 'string' ? task.role : '',
       brief: typeof task?.brief === 'string' ? task.brief : '',

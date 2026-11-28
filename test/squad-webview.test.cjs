@@ -256,3 +256,62 @@ test('the Project tab lists worker .env files by variable name only, and deploy 
   assert.equal(rows['Deploy · services/api'].textContent, 'dev → build-dev · health https://api.example.com/healthz project');
   assert.equal(rows['Deploy · studio'].textContent, 'on main project');
 });
+
+test('runs that work at the same time each show their feed and lock only themselves', () => {
+  const ui = mount();
+  const tree = id => ({ target: '.', repo: '/w', path: `/t/${id}`, branch: `xdev/squad/${id}`, base: 'b' });
+  const run = (id, status) => ({
+    id, prompt: `Implement: task ${id}`, request: 'Three endpoints', time: 0, status: 'active', approver: 'human', costUsd: 0, sessions: [],
+    steps: [{ ...job('Implement', undefined, `task ${id}`), status }], trees: [tree(id)]
+  });
+  const live = profile => ({ role: 'Implement', profile, since: Date.now() - 5_000, items: [{ kind: 'edit', text: `src/${profile}.ts`, time: 1 }], reads: 0, edits: 1, commands: 0 });
+  const runs = [run('aaaa1111', 'running'), run('bbbb2222', 'running'), run('cccc3333', 'pending')];
+  ui.post(state({
+    runs, busy: true, chatBusy: false, maxParallel: 3, busyRuns: ['aaaa1111', 'bbbb2222'], live: live('dev-1'), status: '2 are working: Implement is working · Implement is working',
+    working: [{ run: 'aaaa1111', status: 'Implement is working…', live: live('dev-1') }, { run: 'bbbb2222', status: 'Implement is working…', live: live('dev-2') }]
+  }));
+
+  const feeds = ui.$$('#chat-live .live-item');
+  assert.equal(feeds.length, 2, 'one feed for each run that works');
+  assert.deepEqual(feeds.map(feed => feed.querySelector('.live-head .subtle').textContent), ['dev-1', 'dev-2']);
+  assert.deepEqual(feeds.map(feed => feed.querySelector('code').textContent), ['src/dev-1.ts', 'src/dev-2.ts']);
+  assert.equal(ui.$('#stop-chat').textContent, 'Stop all');
+
+  const cards = ui.$$('#run-list li.run');
+  const buttons = card => [...card.querySelectorAll('.actions button')];
+  const named = (card, text) => buttons(card).find(node => node.textContent === text);
+  assert.deepEqual(cards.map(card => card.classList.contains('working')), [true, true, false]);
+  assert.equal(named(cards[0], 'Finish run').disabled, true, 'a run that works is locked');
+  assert.equal(named(cards[2], 'Finish run').disabled, false, 'the idle run is not');
+  assert.equal(named(cards[2], 'Run headless').disabled, false, 'and its step can start while the others work');
+  assert.equal(named(cards[2], 'Stop this run'), undefined);
+  ui.click(named(cards[1], 'Stop this run'));
+  assert.deepEqual([ui.last('stop').action, ui.last('stop').id], ['stop', 'bbbb2222'], 'one run is stopped by its id');
+
+  // The chat stays usable while only steps of runs work.
+  const message = ui.$('#chat-message');
+  message.value = 'What is left?';
+  message.dispatchEvent(new ui.window.Event('input'));
+  assert.equal(ui.$('#send-chat').disabled, true, 'a request is on its way');
+});
+
+test('a parallel plan says that each task becomes its own run', () => {
+  const ui = mount();
+  ui.post(state({ maxParallel: 3, plan: { id: 'p1', parallel: true, jobs: [job('Implement', undefined, 'alpha'), job('Implement', undefined, 'beta')] } }));
+  assert.match(ui.$('#plan-cost').textContent, /^Parallel plan: each task becomes its own run, with its own worktree and branch, and up to 3 work at the same time/);
+  ui.post(state({ maxParallel: 3, plan: { id: 'p2', jobs: [job('Implement')] } }));
+  assert.doesNotMatch(ui.$('#plan-cost').textContent, /Parallel plan/);
+
+  // With one piece of work the feed keeps its single form, and the chat is free while a step works.
+  const live = { role: 'Implement', profile: 'dev-1', since: Date.now(), items: [], reads: 0, edits: 0, commands: 0 };
+  ui.post(state({ busy: true, chatBusy: false, busyRuns: ['r1'], live, working: [{ run: 'r1', status: 'Implement is working…', live }] }));
+  assert.equal(ui.$$('#chat-live .live-item').length, 0);
+  assert.equal(ui.$('#chat-live #live-time') !== null, true);
+  assert.equal(ui.$('#stop-chat').textContent, 'Stop run');
+  const message = ui.$('#chat-message');
+  message.value = 'What is left?';
+  message.dispatchEvent(new ui.window.Event('input'));
+  assert.equal(ui.$('#send-chat').disabled, false, 'the chat is free while a step works');
+  ui.post(state({ busy: true, chatBusy: true, busyRuns: [], status: 'Lead is planning…', working: [{ status: 'Lead is planning…' }] }));
+  assert.equal(ui.$('#send-chat').disabled, true, 'and waits while Lead answers');
+});

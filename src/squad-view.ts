@@ -9,7 +9,7 @@ import {
 } from './terminal-profiles';
 import { chat, providers } from './core';
 import { isRole, noteLimit, readTask, roles, SquadStore, type Role } from './squad';
-import { approvalSettings, disposableRun, poolModes, runTitle, settledAt, SquadChat, type RunTree, type SquadOptions, type WorkerHost } from './squad-chat';
+import { approvalSettings, disposableRun, poolModes, runName, settledAt, SquadChat, type RunTree, type SquadOptions, type WorkerHost } from './squad-chat';
 import { readClaudeQuota } from './account-usage';
 import { allEnvFiles, envFilesFor, loadEnv } from './squad-env';
 import { mcpControl, mcpServerName, onMcpChanged } from './mcp-control';
@@ -45,7 +45,8 @@ function squadOptions(): SquadOptions {
     ...approval(),
     accountPool: poolModes.find(candidate => candidate === pool) ?? 'role',
     poolAccounts: squadSetting<unknown[]>('poolAccounts', []).filter((item): item is string => typeof item === 'string'),
-    resumeFeedback: squadSetting('resumeFeedback', true)
+    resumeFeedback: squadSetting('resumeFeedback', true),
+    maxParallel: Number(squadSetting<number>('maxParallelRuns', 3))
   };
 }
 
@@ -422,7 +423,7 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
           bytes += size.bytes;
           partial ||= size.partial;
         }
-        sizes.push({ id: run.id, title: runTitle(run.request), bytes, disposable: Boolean(run.trees?.length) && disposableRun(run), settled: settledAt(run) });
+        sizes.push({ id: run.id, title: runName(run), bytes, disposable: Boolean(run.trees?.length) && disposableRun(run), settled: settledAt(run) });
       }
       const leftovers: StorageReport['leftovers'] = [];
       for (const runFolder of this.subfolders(this.worktreeRoot)) {
@@ -887,7 +888,7 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
           await this.teamChat.approve(message.id, undefined, message.approver ?? approval().approver,message.repos ?? message.repo);
           return;
         case 'discard': return this.teamChat.discard(message.id);
-        case 'stop': return this.teamChat.cancel();
+        case 'stop': return this.teamChat.cancel(typeof message.id === 'string' && message.id ? message.id : undefined);
         case 'newChat': return this.teamChat.newChat();
         case 'openChat': return this.teamChat.openChat(message.id);
         case 'deleteChat': {
@@ -1253,7 +1254,7 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
     if (!differ) for (const plan of plans) plan.target = asked.trim();
     const target = asked;
     const title = await vscode.window.showInputBox({
-      title: mergeRequests ? 'Merge request title' : 'Title', value: runTitle(run.request),
+      title: mergeRequests ? 'Merge request title' : 'Title', value: runName(run),
       prompt: 'Teammates see this title. Follow your team\'s convention, for example "test(api): add date parser tests".',
       validateInput: value => value.trim() ? undefined : 'Enter a title.'
     });
@@ -1322,7 +1323,7 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
       if (plan.target.to && plan.behind !== 0) {
         const result = await this.worktrees.deploy(plan.tree.repo, {
           from: plan.target.from, to: plan.target.to, branch: `xdev/deploy/${run.id.slice(0, 8)}`,
-          title: `Deploy ${plan.target.from} → ${plan.target.to}: ${runTitle(run.request)}`, mode
+          title: `Deploy ${plan.target.from} → ${plan.target.to}: ${runName(run)}`, mode
         });
         await this.teamChat.recordDeploy(run.id, plan.tree.target, { from: plan.target.from, to: plan.target.to, url: result.url });
       } else if (!plan.target.to && plan.merged) {

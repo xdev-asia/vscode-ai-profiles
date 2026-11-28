@@ -15,7 +15,7 @@ import {
 } from './mcp-control';
 import type { McpConnection, McpTool } from './mcp-transport';
 import { artifactContentLimit, artifactDescriptionLimit, artifactKinds, artifactNameLimit, type SquadArtifact } from './squad-artifacts';
-import { approvers, chatPromptLimit, poolModes, type PoolMode, type RunRecord, type RunStep, type SquadChat, type SquadChatEntry } from './squad-chat';
+import { approvers, chatPromptLimit, poolModes, type LiveActivity, type PoolMode, type RunRecord, type RunStep, type SquadChat, type SquadChatEntry } from './squad-chat';
 import {
   maxNoteLength, maxTags, terminalProfileId, terminalProviderIds, type TerminalProfile, type TerminalProfiles, type TerminalProvider
 } from './terminal-profiles';
@@ -521,18 +521,24 @@ export function xdevMcpTools(squad: SquadChat, accounts: Accounts, profiles: Ter
   });
   const planView = () => {
     const plan = squad.pendingPlan();
-    return plan ? { id: plan.id, tasks: plan.jobs.map(({ role, brief, profile, kind, repo, model }) => ({ role, account: profile, kind, repo, model, brief })) } : null;
+    return plan ? { id: plan.id, parallel: plan.parallel, tasks: plan.jobs.map(({ role, brief, profile, kind, repo, model }) => ({ role, account: profile, kind, repo, model, brief })) } : null;
   };
   const entryView = ({ author, profile, text }: SquadChatEntry) => ({ author, account: profile, text: clip(text, 2_000) });
+  const liveView = (live: LiveActivity) => ({
+    role: live.role, account: live.profile, seconds: Math.round((Date.now() - live.since) / 1_000),
+    reads: live.reads, edits: live.edits, commands: live.commands, problems: live.problems,
+    recent: live.items.slice(-5).map(item => `${item.kind}: ${clip(item.text, 160)}`)
+  });
   const activity = () => {
-    const { busy, status: text, live } = squad.snapshot();
+    const { busy, status: text, live, working, maxParallel } = squad.snapshot();
     return {
       busy, status: text || undefined,
-      working: live && {
-        role: live.role, account: live.profile, seconds: Math.round((Date.now() - live.since) / 1_000),
-        reads: live.reads, edits: live.edits, commands: live.commands, problems: live.problems,
-        recent: live.items.slice(-5).map(item => `${item.kind}: ${clip(item.text, 160)}`)
-      }
+      working: live && liveView(live),
+      // Several runs may work at once; each entry is one of them.
+      ...(working.length > 1 || working.some(job => job.run) ? {
+        workingRuns: working.filter(job => job.run).map(job => ({ runId: job.run, status: job.status, ...(job.live ? liveView(job.live) : {}) })),
+        maxParallel
+      } : {})
     };
   };
   const findRun = (id: unknown): RunRecord => {
@@ -540,15 +546,24 @@ export function xdevMcpTools(squad: SquadChat, accounts: Accounts, profiles: Ter
     if (!record) throw new Error('Unknown run id. Call xdev_squad_status.');
     return record;
   };
-  /** Waits until Squad is idle, at most `seconds`. A client that disconnects stops waiting, not the work. */
-  const settle = async (seconds: unknown, signal: AbortSignal, fallback: number): Promise<boolean> => {
+  /**
+   * Waits at most `seconds`. With a run: until no step of that run works. Without: until one of the pieces of work
+   * in flight ends, so a lead that started several runs hears about each as it finishes. A client that
+   * disconnects stops waiting, not the work.
+   */
+  const settle = async (seconds: unknown, signal: AbortSignal, fallback: number, runId?: unknown, chat = false): Promise<boolean> => {
     const wanted = typeof seconds === 'number' && Number.isFinite(seconds) ? seconds : fallback;
     const end = Date.now() + Math.max(0, Math.min(maxWaitSeconds, wanted)) * 1_000;
-    while (squad.snapshot().busy && Date.now() < end) {
+    const jobs = () => squad.snapshot().working.length;
+    const started = jobs();
+    // A message to Lead or a role waits for its own answer, whatever the runs do meanwhile.
+    const waiting = () => chat ? squad.snapshot().chatBusy
+      : typeof runId === 'string' && runId ? squad.busyRun(runId) : squad.snapshot().busy && jobs() >= Math.max(1, started);
+    while (waiting() && Date.now() < end) {
       signal.throwIfAborted();
       await new Promise(resolve => setTimeout(resolve, 200));
     }
-    return !squad.snapshot().busy;
+    return !waiting();
   };
   const outcome = (finished: boolean, runId?: unknown) => {
     const record = runId === undefined ? undefined : squad.run(runId);
@@ -608,9 +623,9 @@ export function xdevMcpTools(squad: SquadChat, accounts: Accounts, profiles: Ter
       });
       return { ...runView(record), note: sharedTextNote, messages, files };
     }, ['runId']),
-    squadReadTool('squad_wait', 'Wait until the running Squad step or request ends, then return what Squad is doing. Use after a tool returned finished false.', {
+    squadReadTool('squad_wait', 'Wait for Squad work to end, then return what Squad is doing. With runId: until that run’s step ends. Without: until one of the steps or requests in flight ends. Use after a tool returned finished false.', {
       seconds: { type: 'integer', minimum: 1, maximum: maxWaitSeconds }, runId: runArg.runId
-    }, async ({ seconds, runId }, signal) => outcome(await settle(seconds, signal, maxWaitSeconds), runId), []),
+    }, async ({ seconds, runId }, signal) => outcome(await settle(seconds, signal, maxWaitSeconds, runId), runId), []),
     squadReadTool('artifacts_list', 'List the documents every account of this project shares, such as designs, reports, and specs: name, kind, description, who saved each one last, and its claude.ai page if it has one. Read one with xdev_artifact_read.', {}, async () => ({
       note: sharedTextNote, artifacts: (await artifacts().list()).map(artifactView)
     })),
@@ -633,16 +648,17 @@ export function xdevMcpTools(squad: SquadChat, accounts: Accounts, profiles: Ter
     }
   };
   const squadRunTools = [
-    squadRunTool('squad_submit_plan', 'Hand out work as the lead: save a plan of one to eight tasks for Squad workers. Each task names a worker role, a brief, and optionally the Claude Code account that does it and the model it uses; choose the cheapest model that can do each task. Tasks run in the order given, one at a time, in a git worktree on a new local branch. Nothing runs until xdev_squad_approve_plan.', {
+    squadRunTool('squad_submit_plan', 'Hand out work as the lead: save a plan of one to eight tasks for Squad workers. Each task names a worker role, a brief, and optionally the Claude Code account that does it and the model it uses; choose the cheapest model that can do each task. Tasks run in the order given, one at a time, in a git worktree on a new local branch. For independent tasks that do not need each other’s changes, set parallel true: each task then becomes its own run with its own worktree and branch, and the runs can work at the same time under different accounts. Nothing runs until xdev_squad_approve_plan.', {
       request: { type: 'string', maxLength: chatPromptLimit, description: 'The user’s request the plan answers.' },
       summary: { type: 'string', maxLength: 4_000, description: 'A short summary of the plan, shown in the Squad chat.' },
-      tasks: { type: 'array', minItems: 1, maxItems: 8, items: taskSchema }
+      tasks: { type: 'array', minItems: 1, maxItems: 8, items: taskSchema },
+      parallel: { type: 'boolean', description: 'One run per task, each in its own worktree and branch, so the tasks can work at the same time. Only for tasks that are independent; each run is reviewed and merged on its own.' }
     }, async args => ({ plan: await squad.submitPlan(args, 'Lead through MCP').then(planView), note: 'Nothing runs yet. Call xdev_squad_approve_plan with the plan id.' })),
     squadRunTool('squad_ask', 'Send a message to Squad’s own Lead, or to one role with @Implement, @Review or @Tests. Lead may answer with a plan, which then waits as the pending plan.', {
       message: { type: 'string', maxLength: chatPromptLimit }, ...waitArg
     }, async ({ message, waitSeconds }, signal) => {
       const started = await squad.send(message);
-      const finished = await settle(waitSeconds, signal, 120);
+      const finished = await settle(waitSeconds, signal, 120, undefined, true);
       return { ...outcome(finished), replies: finished ? (await started.finished).map(entryView) : undefined, pendingPlan: planView() };
     }, ['message']),
     squadRunTool('squad_approve_plan', 'Approve the pending plan. This prepares a run and, for Claude Code tasks, a git worktree per repository; no step runs yet. The approver decides what follows each step: human waits for you after every step, ai lets a passing AI review start the next one.', {
@@ -652,19 +668,23 @@ export function xdevMcpTools(squad: SquadChat, accounts: Accounts, profiles: Ter
       const known = new Set(squad.snapshot().runs.map(record => record.id));
       const started = await squad.approve(planId, undefined, approver ?? squad.snapshot().approver);
       const entries = await started.finished;
-      const record = squad.snapshot().runs.find(candidate => !known.has(candidate.id));
-      if (!record) throw new Error(entries.at(-1)?.text ?? 'The run could not be prepared.');
-      return { run: runView(record), note: 'No step has run. Call xdev_squad_run_step with the run id.' };
+      const records = squad.snapshot().runs.filter(candidate => !known.has(candidate.id));
+      if (!records.length) throw new Error(entries.at(-1)?.text ?? 'The run could not be prepared.');
+      if (records.length === 1) return { run: runView(records[0]), note: 'No step has run. Call xdev_squad_run_step with the run id.' };
+      return {
+        run: runView(records[0]), runs: records.map(record => runView(record)),
+        note: `${records.length} runs are ready, one for each task; no step has run. Call xdev_squad_run_step for each run with waitSeconds 0 to start them together (at most ${squad.snapshot().maxParallel} work at once), then xdev_squad_wait, which returns each time one of them ends. Each run has its own branch.`
+      };
     }, ['planId']),
     squadRunTool('squad_discard_plan', 'Discard the pending plan without running it.', { planId: { type: 'string', maxLength: 64 } }, async ({ planId }) => {
       await squad.discard(planId);
       return { done: true };
     }),
-    squadRunTool('squad_run_step', 'Run the current step of a run once: its account’s Claude Code works headless in the worktree (or its text API answers) and stops. Optionally replace the step’s brief. Returns the step’s result, or finished false when it is still working after waitSeconds.', {
+    squadRunTool('squad_run_step', 'Run the current step of a run once: its account’s Claude Code works headless in the worktree (or its text API answers) and stops. Optionally replace the step’s brief. Returns the step’s result, or finished false when it is still working after waitSeconds. Steps of different runs can work at the same time: start each with waitSeconds 0, then call xdev_squad_wait.', {
       ...runArg, brief: { type: 'string', maxLength: 4_000 }, ...waitArg
     }, async ({ runId, brief, waitSeconds }, signal) => {
       await squad.runStep(runId, brief || undefined);
-      return outcome(await settle(waitSeconds, signal, maxWaitSeconds), runId);
+      return outcome(await settle(waitSeconds, signal, maxWaitSeconds, runId), runId);
     }, ['runId']),
     squadRunTool('squad_skip_step', 'Skip the current step of a run.', runArg, async ({ runId }) => {
       await squad.skipStep(runId);
@@ -682,10 +702,10 @@ export function xdevMcpTools(squad: SquadChat, accounts: Accounts, profiles: Ter
       await squad.finish(runId);
       return { run: runView(findRun(runId)), note: 'Committed locally. Merging, pushing, and deploying stay with the user in VS Code.' };
     }),
-    squadRunTool('squad_stop', 'Stop the Squad step or request that is running now.', {}, () => {
-      squad.cancel();
+    squadRunTool('squad_stop', 'Stop Squad work that is running now: the step of one run when runId is given, otherwise every step and request.', runArg, ({ runId }) => {
+      squad.cancel(typeof runId === 'string' && runId ? findRun(runId).id : undefined);
       return activity();
-    }),
+    }, []),
     squadRunTool('artifact_save', 'Share a document with every account of this project: a design, a report, a spec. Saving under an existing name replaces that artifact. A page you published on claude.ai belongs to your account alone, so give its full content here and its address as link; other accounts then read the content with xdev_artifact_read.', {
       name: { type: 'string', maxLength: artifactNameLimit, description: 'A short title.' },
       content: { type: 'string', maxLength: artifactContentLimit, description: 'The full document.' },

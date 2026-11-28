@@ -172,6 +172,27 @@ exports.run = async () => {
     }
   });
 
+  await step('a parallel plan becomes one run per task, each with its own worktree and branch', async () => {
+    const { client: session, call } = await client();
+    try {
+      const { plan } = await call('xdev_squad_submit_plan', {
+        request: 'Trial: two independent files', summary: 'Two tasks that can work at the same time', parallel: true,
+        tasks: [{ role: 'Implement', brief: 'Create ALPHA.md.', account }, { role: 'Implement', brief: 'Create BETA.md.', account }]
+      });
+      if (plan.parallel !== true) throw new Error(`the plan is not parallel: ${JSON.stringify(plan)}`);
+      const approved = await within(call('xdev_squad_approve_plan', { planId: plan.id }), 60_000, 'Approving the plan');
+      const trees = (approved.runs ?? []).map(run => run.repositories?.[0]);
+      if (trees.length !== 2 || trees.some(tree => !tree)) throw new Error(`expected two runs with a worktree: ${JSON.stringify(approved)}`);
+      if (new Set(trees.map(tree => tree.branch)).size !== 2) throw new Error('the runs share a branch');
+      for (const tree of trees) if (!existsSync(join(tree.worktree, 'README.md'))) throw new Error(`no checkout in ${tree.worktree}`);
+      const status = await call('xdev_squad_status');
+      for (const run of approved.runs) await within(call('xdev_squad_finish_run', { runId: run.id }), 60_000, 'Finishing a run');
+      return `${trees.map(tree => tree.branch).join(', ')}; open runs before finishing: ${status.runs?.filter(run => run.status === 'active').length ?? '?'}`;
+    } finally {
+      await session.close();
+    }
+  });
+
   await step('a client shares artifacts, and the Memory & Artifacts tab opens', async () => {
     const { client: session, call } = await client();
     try {
