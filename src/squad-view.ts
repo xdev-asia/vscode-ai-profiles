@@ -22,7 +22,7 @@ import { registerSquadTools } from './squad-tools';
 import { squadPage } from './squad-html';
 import { memoryTextLimit } from './squad-memory';
 import { exploreCode, findRepositories, hasCodegraph } from './squad-codegraph';
-import { codexWindowsSandboxes, runWorker } from './squad-codex';
+import { codexWindowsSandboxes, runWorker, sessionIdPattern } from './squad-codex';
 import { launch, terminalArguments, validCommand, workerSummary, type WorkerSettings } from './squad-worker';
 import { git, validBranch, Worktrees, type MergeRequestMode } from './squad-worktree';
 import { mergeSkills, readSyncFolder, syncProfileSkills, writeSyncFolder } from './skill-sync';
@@ -146,7 +146,8 @@ function workerSettings(role: Role, repo?: string): WorkerSettings {
   const model = typeof models[role] === 'string' && /^[\w.:[\]-]{1,80}$/.test(models[role] as string) ? models[role] as string : undefined;
   const budget = Number(squadSetting<number>('workerBudgetUsd', 1));
   const minutes = Number(squadSetting<number>('workerTimeoutMinutes', 20));
-  const codexModel = squadSetting<string>('codexModel', '').trim();
+  const configured = squadSetting<unknown>('codexModel', '');
+  const codexModel = typeof configured === 'string' ? configured.trim() : '';
   const sandbox = codexWindowsSandboxes.find(candidate => candidate === squadSetting<string>('codexWindowsSandbox', 'mxc'));
   return {
     model,
@@ -1407,6 +1408,7 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
     if (!tree) throw new Error('This run has no git worktree.');
     const profile: TerminalProfile | undefined = (await this.profiles.list()).find(candidate => terminalProfileId(candidate) === session.profileId);
     if (!profile || (profile.provider !== 'claude' && profile.provider !== 'codex')) throw new Error('The account for this session was removed.');
+    if (!sessionIdPattern.test(session.sessionId)) throw new Error('This session id cannot be resumed.');
     // Codex keeps the sign-in of an account from xDev AI in a file in the account's folder.
     const args = profile.provider === 'codex' ? ['-c', 'cli_auth_credentials_store=file', 'resume', session.sessionId] : ['--resume', session.sessionId];
     this.openClaudeTerminal(`${session.role} · ${session.profile}`, profile, tree.path, await this.cliExecutable(profile.provider), args);

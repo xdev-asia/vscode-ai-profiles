@@ -61,6 +61,10 @@ test('no command of a Codex worker reads an account folder, a .env file, or the 
   const defaultHome = { ...profile, configDir: join(home, '.codex') };
   const mine = codexDenied({ ...request, profile: defaultHome, accounts: [join(home, '.codex')] }, home, 'linux');
   assert.ok(!mine.includes(join(home, '.codex')) && mine.includes(join(home, '.codex', 'auth.json')));
+  // On Windows, gh and gcloud keep their sign-in under AppData.
+  const windows = codexDenied({ ...request, accounts: [] }, 'C:\\Users\\dev', 'win32');
+  assert.ok(windows.includes(join('C:\\Users\\dev', 'AppData', 'Roaming', 'GitHub CLI')) && windows.includes(join('C:\\Users\\dev', 'AppData', 'Roaming', 'gcloud')));
+  assert.ok(!denied.some(path => /GitHub CLI/.test(path)));
   // Windows paths compare without case.
   assert.ok(!codexDenied({ ...request, cwd: 'C:\\Users\\Dev\\.codex\\tree', accounts: [] }, 'c:\\users\\dev', 'win32').includes(join('c:\\users\\dev', '.codex')));
 });
@@ -102,6 +106,9 @@ test('Codex arguments confine a run by role, keep the user\'s config out, and ne
   const resumed = codexArguments({ ...request, resume: '01a2-b3' }, files, { platform: 'linux' });
   assert.deepEqual(resumed.slice(-3), ['resume', '01a2-b3', '-']);
   assert.ok(resumed.indexOf('--output-schema') < resumed.indexOf('resume'));
+  for (const bad of ['--dangerously-bypass-approvals-and-sandbox', '-c', 'a b', '']) {
+    if (bad) assert.throws(() => codexArguments({ ...request, resume: bad }, files, { platform: 'linux' }), /cannot be resumed/, bad);
+  }
 
   // Through cmd.exe the instructions cannot be an argument: they lead the input instead.
   const script = codexArguments(request, files, { platform: 'win32', systemInPrompt: true });
@@ -166,6 +173,16 @@ test('a Codex run comes back as the result the Squad reads', () => {
   const failed = new CodexOutcome();
   failed.read({ type: 'turn.failed', error: { message: 'You have hit your usage limit.' } });
   assert.equal(failed.failed, 'You have hit your usage limit.');
+  // A notice such as a reconnect does not fail a turn that completes after it; alone, it is why the run ended.
+  const retried = new CodexOutcome();
+  for (const event of [{ type: 'turn.started' }, { type: 'error', message: 'Reconnecting... 1/5' }, message(JSON.stringify(report)), { type: 'turn.completed' }]) retried.read(event);
+  assert.deepEqual([retried.failed, retried.finished], [undefined, true]);
+  const dropped = new CodexOutcome();
+  for (const event of [{ type: 'turn.started' }, message(JSON.stringify(report)), { type: 'error', message: 'stream disconnected' }]) dropped.read(event);
+  assert.equal(dropped.failed, 'stream disconnected');
+  const afterAnswer = new CodexOutcome();
+  for (const event of [message(JSON.stringify(report)), { type: 'turn.completed' }, { type: 'turn.started' }, { type: 'turn.failed', error: { message: 'limit' } }]) afterAnswer.read(event);
+  assert.equal(afterAnswer.failed, 'limit', 'a failed turn after an answer still fails the run');
   const prose = new CodexOutcome();
   prose.read(message('Sorry, I cannot.'));
   prose.read({ type: 'turn.completed' });
@@ -230,6 +247,13 @@ test('runCodex starts the CLI under the account, streams activity, and cleans up
   const silent = fakeSpawn(child => child.emit('close', 0));
   await assert.rejects(runCodex(base, silent.spawn), /ended without an answer/);
 
+  // A stop in the same tick as the start, and a session id that cannot be an argument: both are rejections.
+  const early = new AbortController();
+  const stopped = runCodex({ ...base, signal: early.signal }, fakeSpawn(() => {}).spawn);
+  early.abort();
+  await assert.rejects(stopped);
+  await assert.rejects(runCodex({ ...base, resume: '--last' }, done.spawn), /cannot be resumed/);
+
   const hanging = fakeSpawn(() => {});
   const controller = new AbortController();
   const pending = runCodex({ ...base, signal: controller.signal }, hanging.spawn);
@@ -269,6 +293,7 @@ test('a role with a Codex account works through Squad like one with Claude Code'
       return JSON.stringify({ type: 'result', subtype: 'success', is_error: false, total_cost_usd: 0, num_turns: 1, session_id: 'thread-9',
         structured_output: { status: 'done', summary: 'Built it.', files_changed: ['a.ts'], tests: '', memory: [] } });
     },
+    options: () => ({ resumeFeedback: true }),
     worktrees: { create: async () => tree, commit: async () => ({ commit: 'c1', stat: 'a.ts | 1 +', files: 1 }), remove: async () => undefined, changes: async () => [], changedFiles: async () => ['a.ts'], discard: async () => undefined },
     repositories: async () => ['.']
   };
@@ -313,4 +338,18 @@ test('a role with a Codex account works through Squad like one with Claude Code'
   assert.match(chat.snapshot().entries.find(entry => entry.author === 'Implement').profile, /^codex-dev · Codex/);
   assert.deepEqual(chat.run(runId).sessions.map(session => [session.profileId, session.sessionId]), [[`codex:${uuid(1)}`, 'thread-9']]);
   await assert.rejects(chat.transcript(runId), /A transcript can be shown for Claude Code sessions only\. Resume this Codex session in a terminal/);
+
+  // Feedback continues the Codex session under the Codex account; another account starts fresh.
+  await chat.requestChanges(runId, 'Rename the function.');
+  await chat.requestChanges(runId, 'Add a comment.', undefined, 'claude-lead');
+  assert.deepEqual(chat.run(runId).steps.filter(step => step.feedback).map(step => [step.profile, step.resume ?? null]).sort(),
+    [['claude-lead', null], ['codex-dev', 'thread-9']]);
+
+  // Without the list of accounts a Codex worker does not start.
+  host.profiles = async () => { if (host.broken) throw new Error('disk'); return profiles; };
+  const before = requests.length;
+  host.broken = true;
+  await call('squad_run_step', { runId, waitSeconds: 20 }).catch(() => undefined);
+  host.broken = false;
+  assert.equal(requests.length, before, 'no worker was started');
 });

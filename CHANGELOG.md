@@ -11,6 +11,12 @@
 ### Changed
 
 - A worker is kept out of the folders of every terminal account, also Codex and Gemini CLI ones. Before, only Claude Code account folders were listed.
+- A project's .env can no longer set `CODEX_*` variables for workers.
+
+### Fixed
+
+- A CLI installed as a `.cmd` script in a folder with a space in its name, such as `C:\Users\First Last\AppData\Roaming\npm\claude.cmd`, could not start a worker.
+- Request changes with another account no longer tries to continue the first account's session.
 
 ## 0.23.0 - 2026-11-28
 

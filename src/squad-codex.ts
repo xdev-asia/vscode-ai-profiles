@@ -79,8 +79,12 @@ export function codexDenied(
   for (const file of signInFiles) denied.add(join(own, file));
   for (const file of request.settings.denyRead ?? []) denied.add(file);
   for (const place of credentialPlaces) denied.add(join(home, place));
+  if (platform === 'win32') for (const place of ['GitHub CLI', 'gcloud']) denied.add(join(home, 'AppData', 'Roaming', place));
   return [...denied].filter(path => path && !within(request.cwd, path, platform) && !within(own, path, platform));
 }
+
+/** A session id as Codex and Claude Code write them: letters, digits, and dashes. */
+export const sessionIdPattern = /^[A-Za-z0-9][\w-]{0,79}$/;
 
 /** A value as TOML: a basic string. JSON string escapes are valid TOML escapes. */
 const toml = (value: string) => JSON.stringify(value);
@@ -128,7 +132,11 @@ export function codexArguments(
   if (model) args.push('-m', model);
   if (mode !== 'work' && !persist) args.push('--ephemeral');
   // Options come before the subcommand; "-" reads the prompt from standard input.
-  if (resume) args.push('resume', resume);
+  if (resume) {
+    // An id that starts with "-" would be read as an option of "resume".
+    if (!sessionIdPattern.test(resume)) throw new Error('This Codex session id cannot be resumed.');
+    args.push('resume', resume);
+  }
   args.push('-');
   return args;
 }
@@ -195,7 +203,10 @@ export function codexActivities(event: unknown, cwd: string): WorkerActivity[] {
 export class CodexOutcome {
   private session?: string;
   private last?: string;
+  /** Why a turn failed. */
   private error?: string;
+  /** A top-level error, such as a reconnect notice; it ends the run only when no turn completes after it. */
+  private notice?: string;
   private turns = 0;
   private readonly declined: string[] = [];
 
@@ -204,16 +215,18 @@ export class CodexOutcome {
       type?: unknown; item?: CodexItem; thread_id?: unknown; error?: { message?: unknown }; message?: unknown;
     };
     if (type === 'thread.started' && typeof thread_id === 'string') this.session = thread_id;
-    else if (type === 'turn.completed') this.turns++;
-    else if (type === 'turn.failed') this.error = String(error?.message ?? 'the turn failed');
-    // A top-level error ends the run; an "error" item is a notice, such as a warning about a feature.
-    else if (type === 'error') this.error = String(message ?? 'unknown error');
+    else if (type === 'turn.completed') {
+      this.turns++;
+      this.notice = undefined;
+    } else if (type === 'turn.failed') this.error = String(error?.message ?? 'the turn failed');
+    // An "error" item inside a turn is a notice too, such as a warning about a feature; it is not read here.
+    else if (type === 'error') this.notice = String(message ?? 'unknown error');
     else if (type === 'item.completed' && item?.type === 'agent_message' && typeof item.text === 'string') this.last = item.text;
     else if (type === 'item.completed' && item?.type === 'command_execution' && item.status === 'declined') this.declined.push(codexCommand(item.command));
   }
 
   get failed(): string | undefined {
-    return this.error;
+    return this.error ?? this.notice;
   }
 
   get finished(): boolean {
@@ -255,14 +268,17 @@ export function codexEnvironment(request: Pick<WorkerRequest, 'profile' | 'setti
 export function runCodex(request: WorkerRequest, spawn: Spawn = spawnProcess): Promise<string> {
   const { executable, profile, cwd, settings, signal } = request;
   if (profile.provider !== 'codex') return Promise.reject(new Error('This worker needs a Codex terminal account.'));
-  signal?.throwIfAborted();
-  const folder = mkdtempSync(join(tmpdir(), 'xdev-squad-run-'));
-  const files: CodexFiles = { schema: join(folder, 'schema.json') };
-  writeFileSync(files.schema, JSON.stringify(strictSchema(workerSchema(request.mode))), { mode: 0o600 });
   const script = process.platform === 'win32' && /\.cmd$/i.test(executable);
   const outcome = new CodexOutcome();
+  let folder: string | undefined;
   return Promise.resolve()
-    .then(() => launch(executable, codexArguments(request, files, { systemInPrompt: script }), process.platform, process.env.ComSpec, { name: 'Codex', setting: 'xdevAi.codexExecutable' }))
+    .then(() => {
+      signal?.throwIfAborted();
+      folder = mkdtempSync(join(tmpdir(), 'xdev-squad-run-'));
+      const files: CodexFiles = { schema: join(folder, 'schema.json') };
+      writeFileSync(files.schema, JSON.stringify(strictSchema(workerSchema(request.mode))), { mode: 0o600 });
+      return launch(executable, codexArguments(request, files, { systemInPrompt: script }), process.platform, process.env.ComSpec, { name: 'Codex', setting: 'xdevAi.codexExecutable' });
+    })
     .then(start => runProcess({
       name: 'Codex', start, cwd, env: codexEnvironment(request), input: codexInput(request, script), signal, timeoutMs: settings.timeoutMs, spawn,
       hint: 'Sign in to the Codex account again if its session expired.',
@@ -284,7 +300,7 @@ export function runCodex(request: WorkerRequest, spawn: Spawn = spawnProcess): P
       if (!outcome.finished) throw new Error('Codex ended without an answer. Update Codex and try again.');
       return outcome.result();
     })
-    .finally(() => rmSync(folder, { recursive: true, force: true }));
+    .finally(() => { if (folder) rmSync(folder, { recursive: true, force: true }); });
 }
 
 /** Runs one headless worker with the CLI of its account: Claude Code or Codex. */

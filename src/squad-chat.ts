@@ -1767,7 +1767,8 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
       const step: RunStep = {
         role: 'Implement', brief, profile: agent.name, kind: 'claude', accountId: agent.id, revision: agent.revision,
         repo: tree.target, status: 'pending', feedback: true,
-        ...(pooled ? { pooled: true } : {}), ...(sessionProfile ? { resume: session!.sessionId } : {})
+        // A session belongs to one account and one CLI: another account starts fresh.
+        ...(pooled ? { pooled: true } : {}), ...(sessionProfile && session!.profileId === agent.id ? { resume: session!.sessionId } : {})
       };
       const next = saved.status === 'active' ? this.currentStep(saved) : -1;
       saved.steps.splice(next < 0 ? saved.steps.length : next, 0, step);
@@ -2100,7 +2101,10 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
    * gets the folder of every account so its rules can deny them: a worker must not reach another account's sign-in.
    */
   private async work(request: WorkerRequest, readDirs: readonly string[] = []): Promise<string> {
-    const accounts = (await this.host!.profiles().catch(() => [])).map(profile => profile.configDir).filter(Boolean);
+    const listed = await this.host!.profiles().catch(() => undefined);
+    // Claude Code reads only its working directory. For Codex the list is what keeps it out of the other accounts.
+    if (!listed && request.profile.provider === 'codex') throw new Error('The accounts could not be listed, so a Codex worker cannot be kept out of their folders. Try again.');
+    const accounts = (listed ?? []).map(profile => profile.configDir).filter(Boolean);
     const dirs = [...new Set([...readDirs, ...(this.artifacts ? [this.artifacts.dir] : [])])]
       .filter(dir => dir && dir !== request.cwd && existsSync(dir));
     return this.host!.run({ ...request, ...(dirs.length ? { readDirs: dirs } : {}), ...(accounts.length ? { accounts } : {}) });

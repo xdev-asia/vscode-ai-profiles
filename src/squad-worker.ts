@@ -286,7 +286,9 @@ export function launch(
     throw new Error(`${product.name} is installed as a .cmd script, and Windows cannot pass this value to it safely: ${unsafe.slice(0, 80)}. `
       + `Set ${product.setting} to the .exe instead.`);
   }
-  return { command: comSpec ?? 'cmd.exe', args: ['/d', '/s', '/c', executable, ...args] };
+  // Without "call", cmd.exe drops the first and the last quote of the line when the script's path is quoted,
+  // which it is when the path holds a space, and then looks for a program named by the text up to that space.
+  return { command: comSpec ?? 'cmd.exe', args: ['/d', '/s', '/c', 'call', executable, ...args] };
 }
 
 /**
@@ -546,6 +548,7 @@ export function runProcess(run: ProcessRun): Promise<void> {
     const abort = () => end(signal?.reason instanceof Error ? signal.reason : new Error('The worker was stopped.'));
     const timer = setTimeout(() => end(new Error(`The worker did not finish within ${Math.round(run.timeoutMs / 60_000)} minutes.`)), run.timeoutMs);
     signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
     const line = (text: string) => {
       const trimmed = text.trim();
       if (!trimmed.startsWith('{')) return;
