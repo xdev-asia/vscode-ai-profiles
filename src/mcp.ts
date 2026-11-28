@@ -558,7 +558,8 @@ export function xdevMcpTools(squad: SquadChat, accounts: Accounts, profiles: Ter
     const started = jobs();
     // A message to Lead or a role waits for its own answer, whatever the runs do meanwhile.
     const waiting = () => chat ? squad.snapshot().chatBusy
-      : typeof runId === 'string' && runId ? squad.busyRun(runId) : squad.snapshot().busy && jobs() >= Math.max(1, started);
+      : typeof runId === 'string' && runId ? squad.busyRun(runId)
+        : squad.snapshot().remote || (squad.snapshot().busy && jobs() >= Math.max(1, started));
     while (waiting() && Date.now() < end) {
       signal.throwIfAborted();
       await new Promise(resolve => setTimeout(resolve, 200));
@@ -659,7 +660,13 @@ export function xdevMcpTools(squad: SquadChat, accounts: Accounts, profiles: Ter
     }, async ({ message, waitSeconds }, signal) => {
       const started = await squad.send(message);
       const finished = await settle(waitSeconds, signal, 120, undefined, true);
-      return { ...outcome(finished), replies: finished ? (await started.finished).map(entryView) : undefined, pendingPlan: planView() };
+      if (!finished) return { ...outcome(false), pendingPlan: planView() };
+      // With automatic start, "finished" of the request also covers the steps it began; they are not waited for.
+      const whole = await Promise.race([started.finished, new Promise<undefined>(resolve => { setTimeout(resolve, 300); })]);
+      const entries = squad.snapshot().entries;
+      const asked = entries.map(entry => entry.author === 'You' && !entry.run && entry.text === String(message).trim()).lastIndexOf(true);
+      const replies = whole ?? entries.slice(asked + 1).filter(entry => !entry.run || entry.author !== 'You');
+      return { ...outcome(true), replies: replies.map(entryView), pendingPlan: planView() };
     }, ['message']),
     squadRunTool('squad_approve_plan', 'Approve the pending plan. This prepares a run and, for Claude Code tasks, a git worktree per repository; no step runs yet. The approver decides what follows each step: human waits for you after every step, ai lets a passing AI review start the next one.', {
       planId: { type: 'string', maxLength: 64 },

@@ -18,9 +18,9 @@ function report(output) {
 
 /**
  * A Squad whose workers do not finish until the test lets them: `release(text)` ends the work whose brief holds
- * `text`. `plan` is what Squad's own Lead answers.
+ * `text`. `plan` is what Squad's own Lead answers, at once or, with `holdPlan`, on `release('LEAD')`.
  */
-async function squadWith({ options = {}, plan } = {}) {
+async function squadWith({ options = {}, plan, holdPlan = false } = {}) {
   const storage = memento();
   const secrets = new Map();
   const accounts = new Accounts({ get: async key => secrets.get(key), store: async (key, value) => secrets.set(key, value) });
@@ -45,7 +45,10 @@ async function squadWith({ options = {}, plan } = {}) {
     options: () => options,
     settings: () => ({ model: 'sonnet', budgetUsd: 1, allowedCommands: [], timeoutMs: 60_000 }),
     run: request => {
-      if (request.mode === 'plan') return Promise.resolve(report(plan));
+      if (request.mode === 'plan') {
+        // With holdPlan, Lead answers when the test releases 'LEAD'.
+        return holdPlan ? new Promise(resolve => waiting.set('LEAD', () => resolve(report(plan)))) : Promise.resolve(report(plan));
+      }
       const { task } = JSON.parse(request.prompt);
       started.push(task);
       return new Promise((resolve, reject) => {
@@ -82,6 +85,8 @@ function leadTools(t, chat, accounts, profiles) {
   const signal = new AbortController().signal;
   return async (name, args = {}) => JSON.parse(JSON.stringify(await tools.find(tool => tool.name === `xdev_${name}`).run(args, signal)));
 }
+
+const tickTwice = async () => { await tick(); await tick(); };
 
 const threeTasks = [
   { role: 'Implement', brief: 'Add the alpha endpoint', account: idOf(1) },
@@ -217,4 +222,59 @@ test('Squad\'s own Lead may plan independent tasks in parallel, and automatic ap
   await sent.finished;
   assert.deepEqual(auto.chat.snapshot().runs.map(run => run.status), ['done', 'done']);
   assert.equal(auto.worktrees.committed.length, 2);
+});
+
+const threePlan = {
+  reply: 'Three independent endpoints', parallel: true,
+  tasks: ['alpha', 'beta', 'gamma'].map(name => ({ role: 'Implement', brief: `Add the ${name} endpoint` }))
+};
+
+test('an automatic start takes the places that are free, and stopping another run does not cancel it', { timeout: 20_000 }, async () => {
+  const { chat, started, release, until } = await squadWith({ plan: threePlan, holdPlan: true, options: { planApproval: 'auto', maxParallel: 3 } });
+  // Two runs are already working.
+  const earlier = await chat.submitPlan({
+    request: 'Two chores', summary: 'Two chores', parallel: true,
+    tasks: [{ role: 'Tests', brief: 'Chore one' }, { role: 'Tests', brief: 'Chore two' }]
+  });
+  await (await chat.approve(earlier.id)).finished;
+  const [one, two] = chat.snapshot().runs.map(run => run.id);
+  await chat.runStep(one);
+  await chat.runStep(two);
+  await until(() => started.length === 2, 'the chores start');
+
+  // The user asks for more, then stops one chore while Lead still plans.
+  const sent = await chat.send('Add three endpoints');
+  chat.cancel(one);
+  await until(() => !chat.busyRun(one), 'the stopped chore ends');
+  assert.equal(chat.snapshot().chatBusy, true, 'Lead is still planning');
+  assert.ok(!chat.snapshot().entries.some(entry => /interrupted/.test(entry.text)), 'work of this window is not an interrupted run');
+  await release('LEAD');
+
+  // Three runs are made; one chore still works, so two of the three places are free.
+  await until(() => started.length === 4, 'two of the three new runs start');
+  await tickTwice();
+  assert.deepEqual(started.slice(2).sort(), ['Add the alpha endpoint', 'Add the beta endpoint']);
+  assert.equal(chat.snapshot().working.length, 3);
+  assert.equal(chat.snapshot().chatBusy, false);
+  await release('alpha');
+  await release('beta');
+  const entries = await sent.finished;
+  assert.ok(!entries.some(entry => /Automatic start paused/.test(entry.text)), 'the start was not cancelled or refused');
+  const gamma = chat.snapshot().runs.find(run => run.steps[0].brief === 'Add the gamma endpoint');
+  assert.deepEqual([gamma.status, gamma.steps[0].status], ['active', 'pending'], 'the run without a place waits in the panel');
+  await release('Chore two');
+  await until(() => !chat.snapshot().busy, 'all work ends');
+});
+
+test('a message through MCP returns with the answer of Lead and does not wait for the steps it started', { timeout: 20_000 }, async t => {
+  const { chat, accounts, profiles, started, release, until } = await squadWith({ plan: threePlan, options: { planApproval: 'auto', maxParallel: 2 } });
+  const call = leadTools(t, chat, accounts, profiles);
+  const answer = await call('squad_ask', { message: 'Add three endpoints', waitSeconds: 5 });
+  assert.equal(answer.finished, true);
+  assert.ok(answer.replies.some(reply => reply.author === 'Lead' && /Three independent endpoints/.test(reply.text)), JSON.stringify(answer.replies));
+  await until(() => started.length === 2, 'the automatic start goes on');
+  assert.equal(chat.snapshot().busy, true, 'the steps are still working after the call returned');
+  await release('alpha');
+  await release('beta');
+  await until(() => !chat.snapshot().busy, 'all work ends');
 });

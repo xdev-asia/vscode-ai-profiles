@@ -582,7 +582,8 @@ export class SquadChat {
         ? saved : undefined;
       // A resumed Lead already holds the conversation; it only needs what happened since its last turn.
       history = lead ? sinceLead(state.entries) : recent;
-      if (state.inFlight && this.working.size < 2) state.entries.push({ author: 'Squad', text: 'The previous run was interrupted.' });
+      const ours = typeof state.inFlight === 'object' && state.inFlight.owner === this.owner;
+      if (state.inFlight && !ours) state.entries.push({ author: 'Squad', text: 'The previous run was interrupted.' });
       state.chatId ??= randomUUID();
       state.chatTime ??= Date.now();
       state.chatTitle ??= runTitle(message);
@@ -710,14 +711,33 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
       const prepared = await approved.finished;
       const records = (this.read().runs ?? []).filter(candidate => candidate.status === 'active' && candidate.request === plan.prompt && candidate.time >= begun);
       if (!records.length || this.stops !== stops) return [...entries, ...prepared];
-      // One run starts its first step. The runs of a parallel plan start together, as many as may work at once.
-      const steps = await Promise.all(records.slice(0, plan.parallel ? options.maxParallel : 1).map(record => this.runStep(record.id)));
-      return [...entries, ...prepared, ...(await Promise.all(steps.map(step => step.finished))).flat()];
+      // One run starts its first step. The runs of a parallel plan start together, as many as may work now.
+      return [...entries, ...prepared, ...await this.startRuns(records.slice(0, plan.parallel ? records.length : 1).map(record => record.id))];
     } catch (error) {
       const text = `Automatic start paused: ${error instanceof Error ? error.message : 'unknown error'} Continue in the panel.`;
       await this.write(state => state.entries.push({ author: 'Squad', text })).catch(() => undefined);
       return [...entries, { author: 'Squad', text }];
     }
+  }
+
+  /**
+   * Starts the current step of each run, as many as may work now beside the runs already working, and resolves
+   * with what the steps said once all of them have ended. Runs that find no free place stay ready in the panel.
+   */
+  async startRuns(ids: readonly string[], signal?: AbortSignal): Promise<SquadChatEntry[]> {
+    const free = this.options().maxParallel - [...this.working.keys()].filter(Boolean).length;
+    const steps: StartedRun[] = [];
+    let refused: unknown;
+    for (const id of ids.slice(0, Math.max(1, free))) {
+      try {
+        steps.push(await this.runStep(id, undefined, signal));
+      } catch (error) {
+        refused = error;
+        break;
+      }
+    }
+    if (!steps.length && refused) throw refused;
+    return (await Promise.all(steps.map(step => step.finished))).flat();
   }
 
   /** Claude Code accounts in the account pool, or none when each role uses its own account. */
@@ -1469,8 +1489,10 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
   }
 
   /** Removes a run whose work is merged or pushed, with its worktrees, local branches, and worker transcripts. */
-  private async disposeRun(record: RunRecord, reason = 'to make room for a new run'): Promise<void> {
-    if (!disposableRun(record)) return;
+  private async disposeRun(stale: RunRecord, reason = 'to make room for a new run'): Promise<void> {
+    // The caller may hold an old copy; the run may have been reopened or started meanwhile.
+    const record = this.run(stale.id);
+    if (!record || !disposableRun(record) || this.busyRun(record.id)) return;
     for (const tree of record.trees ?? []) await this.host?.worktrees.remove(tree).catch(() => undefined);
     if (record.trees?.length) await this.host?.forgetSessions?.(record.trees.map(tree => tree.path)).catch(() => undefined);
     await this.write(state => {
@@ -1624,7 +1646,8 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
   cancel(id?: unknown): void {
     const jobs = [...this.working.values()].filter(job => id === undefined || job.key === id || job.claims.has(String(id)));
     if (!jobs.length) return;
-    this.stops++;
+    // An automatic start gives up only when the chat request itself, or everything, is stopped.
+    if (id === undefined || jobs.some(job => !job.key)) this.stops++;
     for (const job of jobs) {
       job.status = 'Stopping…';
       job.controller.abort();
@@ -1857,6 +1880,14 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
       });
     } catch (error) {
       if (this.working.get(key) === run) this.working.delete(key);
+      if (!this.working.size) {
+        // Work that ended meanwhile may have kept the marker for this start; nothing is in flight now.
+        clearInterval(this.heartbeat);
+        this.heartbeat = undefined;
+        void this.write(state => {
+          if (!this.working.size && typeof state.inFlight === 'object' && state.inFlight.owner === this.owner) state.inFlight = undefined;
+        }).catch(() => undefined);
+      }
       throw error;
     }
     // Other windows share this state; the heartbeat tells them the work is still alive.

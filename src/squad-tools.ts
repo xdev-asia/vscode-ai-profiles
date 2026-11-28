@@ -152,11 +152,9 @@ export function registerSquadTools(context: vscode.ExtensionContext, squad: Squa
         const started = Date.now();
         const run = await squad.approve(plan.id, signal, vscode.workspace.getConfiguration('xdevAi.squad').get('approver') ?? 'human');
         const approved = await run.finished;
-        const record = autoApprove() ? squad.snapshot().runs?.find(candidate => candidate.status === 'active' && candidate.time >= started) : undefined;
-        if (record) {
-          const step = await squad.runStep(record.id, undefined, signal);
-          return formatReplies([...approved, ...await step.finished]);
-        }
+        // A parallel plan makes several runs; they start together, as many as may work now.
+        const records = autoApprove() ? (squad.snapshot().runs ?? []).filter(candidate => candidate.status === 'active' && candidate.time >= started) : [];
+        if (records.length) return formatReplies([...approved, ...await squad.startRuns(records.map(record => record.id), signal)]);
         return `${formatReplies(approved)}\n\nThe plan is approved but no step has run. The user runs each step from xDev Squad → Chat → Worker runs.`;
       });
     }

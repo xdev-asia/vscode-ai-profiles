@@ -525,7 +525,7 @@ function mountSquadChat(vscode, roles) {
       };
       const active = run.status === 'active';
       // With several runs working, each can be stopped on its own.
-      if (working && busyRuns.size > 1) button('Stop this run', 'stop', {}, Boolean(pending));
+      if (working && (snapshot.working ?? []).length > 1) button('Stop this run', 'stop', {}, Boolean(pending));
       if (active) button('Finish run', 'runFinish', {}, busy);
       if (branch) {
         const committed = trees.some(tree => tree.commit);
