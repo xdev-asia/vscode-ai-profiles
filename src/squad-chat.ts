@@ -16,7 +16,7 @@ import {
   type WorkerResult, type WorkerSettings
 } from './squad-worker';
 import type { FileChange, PushResult, RunWorktree, Worktrees } from './squad-worktree';
-import { terminalProfileId, type TerminalProfile } from './terminal-profiles';
+import { terminalProfileId, terminalProviders, type TerminalProfile, type TerminalProvider } from './terminal-profiles';
 import { workflowBriefLimit, workflowOutputLimit, workflowStage, workflowStages, workflowText, type Workflow } from './workflow';
 
 const storageKey = 'squadChat.v1';
@@ -289,10 +289,20 @@ type Agent =
   | { kind: 'api'; id: string; name: string; revision: string; account: Account }
   | { kind: 'claude'; id: string; name: string; revision: string; profile: TerminalProfile };
 
-/** What SquadChat needs from VS Code to run Claude Code workers. Absent in text-only setups and in tests. */
+/** The CLIs that can work headless in a worktree. A step of kind 'claude' runs one of them, by its account's provider. */
+export const workerProviders: readonly TerminalProvider[] = ['claude', 'codex'];
+
+/** The CLI behind a job or a step, read from its account id. */
+export function workerCli(job: { kind?: AgentKind; accountId: string }): TerminalProvider | undefined {
+  return job.kind !== 'claude' ? undefined : workerProviders.find(provider => job.accountId.startsWith(`${provider}:`)) ?? 'claude';
+}
+
+/** What SquadChat needs from VS Code to run Claude Code and Codex workers. Absent in text-only setups and in tests. */
 export interface WorkerHost {
+  /** The terminal accounts of every provider. Their folders are what no worker may read. */
   profiles(): Promise<TerminalProfile[]>;
-  executable(): Promise<string>;
+  /** The CLI to start for an account of this provider; Claude Code when none is given. */
+  executable(provider?: TerminalProvider): Promise<string>;
   folder(): string | undefined;
   /** Worker settings for a role, with the allowed commands of the repository the step works in. */
   settings(role: Role, repo?: string): WorkerSettings;
@@ -365,8 +375,15 @@ export function gateChanges(changes: readonly FileChange[], limit = gatePatchLim
   return { files, truncated };
 }
 
+const claudeAlias = /^(?:haiku|sonnet|opus)\b/i;
 const textOnly = 'You are using a text API. You cannot access the workspace, edit files, or run commands. Do not claim that you did.';
-const headless = 'You are a headless Claude Code worker in xDev Squad. Nobody can answer questions during the run: decide reasonably, or report status "blocked" with what you need and put the one question that would unblock you in "question"; its answer comes back into this session. Do not commit, push, or change git remotes; xDev commits the worktree for the user. Shell commands are checked against an allowed list ("allowed_commands" when given, plus read-only git), and a command with pipes, redirects, ";", "&&", or "cd" is denied even when each part is allowed: run each allowed command on its own from the working directory, and create or edit files with the Write and Edit tools, not the shell. Use available skills when they apply. Report through the required JSON fields and keep the summary short, because other agents read it.';
+const headlessStart = (cli: string) => `You are a headless ${cli} worker in xDev Squad. Nobody can answer questions during the run: decide reasonably, or report status "blocked" with what you need and put the one question that would unblock you in "question"; its answer comes back into this session. Do not commit, push, or change git remotes; xDev commits the worktree for the user.`;
+const headlessEnd = 'Report through the required JSON fields and keep the summary short, because other agents read it.';
+const headless = `${headlessStart('Claude Code')} Shell commands are checked against an allowed list ("allowed_commands" when given, plus read-only git), and a command with pipes, redirects, ";", "&&", or "cd" is denied even when each part is allowed: run each allowed command on its own from the working directory, and create or edit files with the Write and Edit tools, not the shell. Use available skills when they apply. ${headlessEnd}`;
+/** Codex confines commands with its sandbox instead of an allowed list. */
+const headlessCodex = `${headlessStart('Codex')} Your commands run in a sandbox, and nothing can be approved during the run: a command the sandbox refuses fails. They can read the project; they can write only in the working directory and the temporary folder when your role changes files, and nowhere otherwise; they have no network access. Do not try to get around a refusal: report what you could not do. ${headlessEnd}`;
+/** The instructions for a headless worker of the CLI its account belongs to. */
+const headlessFor = (profile: TerminalProfile) => profile.provider === 'codex' ? headlessCodex : headless;
 
 /**
  * Notes, summaries and artifacts cross from one account's worker to another's, and files come from anywhere.
@@ -555,8 +572,10 @@ export class SquadChat {
       id: plan.id,
       repos: plan.repos,
       ...(plan.parallel ? { parallel: true } : {}),
-      jobs: plan.jobs.map(({ role, brief, profile, kind, repo, model }) => ({
-        role, brief, profile, kind: kind ?? 'api' as AgentKind, ...(repo ? { repo } : {}), ...(model ? { model } : {})
+      jobs: plan.jobs.map(({ role, brief, profile, kind, repo, model, accountId }) => ({
+        role, brief, profile, kind: kind ?? 'api' as AgentKind, ...(repo ? { repo } : {}), ...(model ? { model } : {}),
+        // The CLI a headless task runs, when it is not Claude Code.
+        ...(workerCli({ kind, accountId }) === 'codex' ? { cli: 'codex' as const } : {})
       }))
     };
   }
@@ -639,7 +658,9 @@ export class SquadChat {
         : {};
       const perRepository = Object.keys(repositoryCommands).length > 0;
       const capabilities = [...workers].map(([worker, candidate]) => candidate.kind === 'claude'
-        ? `${worker} (Claude Code worker: reads the repository, ${worker === 'Review' ? 'reviews the diff' : 'edits files and runs allowed commands'} in a git worktree)`
+        ? candidate.profile.provider === 'codex'
+          ? `${worker} (Codex worker: reads the repository, ${worker === 'Review' ? 'reviews the diff' : 'edits files and runs commands in a sandbox without network'} in a git worktree; do not set "model" for it)`
+          : `${worker} (Claude Code worker: reads the repository, ${worker === 'Review' ? 'reviews the diff' : 'edits files and runs allowed commands'} in a git worktree)`
         : `${worker} (text API: proposes text only)`);
       const leadSystem = `${roleInstructions.Lead} ${agent.kind === 'api' ? textOnly : 'You may read the repository (read-only) to answer or to make briefs concrete; do not change files. Start from "code" when given, and keep reading short.'} Available worker roles: ${capabilities.join(', ') || 'none'}.
 Return only a JSON object with a "reply" string and a "tasks" array. Each task has a "role" from the available worker roles and a "brief" string${multiple ? ' and a "repo"' : ''}. Use each role at most once${multiple ? ' per repository' : ''}.${claudeWorkers ? ' To save cost, a task for a Claude Code worker may set "model": "haiku" for simple mechanical work such as renames, small edits, or running tests; "sonnet" for most coding; "opus" only for the hardest tasks. Omit "model" to use the configured default. When the request is several independent pieces of work that do not need each other\'s changes, set "parallel": true at the top level: each task then gets its own worktree and branch and they work at the same time, so a role may take several tasks; never use it for tasks that build on one another, such as a review of another task.' : ''}${dataNote} Use an empty tasks array for questions, summaries, or when no workers are available. Write briefs that a worker can act on without the chat history. Reply in the user's language. ${options.planApproval === 'auto' ? 'Proposed tasks start as soon as you return them, so propose tasks only when the request asks for a change; keep the reply to a short summary of the plan (at most 80 words).' : 'The user reviews proposed tasks in the xDev Squad panel and approves them with a button, then starts each step there, so keep the reply to a short summary of the plan (at most 80 words) and do not ask the user to reply to start it.'}${multiple ? ' Each Claude Code task runs in one git repository from "repositories": set its "repo" to that entry exactly. A change that spans repositories, such as a backend API and the frontend screen that calls it, gets one Implement task per repository, listed so that dependencies come first. Write file paths relative to the task\'s repository root.' : ''}${allowedCommands?.includes('*') ? ' Claude Code workers may run any shell command.' : allowedCommands ? ` Claude Code workers may only run "allowed_commands"${perRepository ? ' plus, in a repository listed in "repository_commands", the commands listed for it' : ''} and read-only git; do not ask them to run anything else, and do not tell them a command is not allowed.` : ''} When given, "code" is a CodeGraph excerpt of the relevant symbols and call paths: name concrete files and symbols in each brief so workers do not have to search.${keepLead ? ' Later turns of this chat continue this session: they send only the new request, "history" since your last reply, and "memory", "allowed_commands", "repository_commands", or "repositories" when they changed.' : ''}`;
@@ -662,7 +683,7 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
         const graph = await this.host!.codegraphRoot?.().catch(() => undefined);
         const settings = this.host!.settings(role);
         const call = async (content: string, resume?: string) => this.work({
-          executable: await this.host!.executable(), profile: agent.profile, cwd: this.host!.folder()!, role,
+          executable: await this.host!.executable(agent.profile.provider), profile: agent.profile, cwd: this.host!.folder()!, role,
           mode: role === 'Lead' ? 'plan' : 'ask', prompt: content, resume, persist: keepLead || undefined,
           system: role === 'Lead' ? leadSystem : `You are ${role} in xDev Squad. Answer the question using the repository. Do not edit files.${dataNote} Reply in the user's language.`,
           settings: graph ? { ...settings, codegraph: true } : settings, signal: run.signal, onActivity: this.track(run, role, agent.name)
@@ -770,7 +791,8 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
   private poolProfiles(directory: { terminals: TerminalProfile[] }, options: SquadOptions): TerminalProfile[] {
     if (options.accountPool === 'role' || !this.host) return [];
     const wanted = new Set(options.poolAccounts.map(name => name.trim()).filter(Boolean));
-    return directory.terminals.filter(profile => !profile.disabled &&
+    // The pool is for Claude Code accounts: their quota is what the pool reads. A Codex account works where it is assigned.
+    return directory.terminals.filter(profile => !profile.disabled && profile.provider === 'claude' &&
       (!wanted.size || wanted.has(profile.name) || wanted.has(terminalProfileId(profile))));
   }
 
@@ -851,7 +873,7 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
       let pooled = false;
       if (task.account !== undefined && task.account !== null && task.account !== '') {
         const profile = directory.terminals.find(candidate => terminalProfileId(candidate) === task.account || candidate.name === task.account);
-        if (!profile) throw new Error(`${label}: ${shorten(String(task.account), 80)} is not a Claude Code account here. Call xdev_accounts_list.`);
+        if (!profile) throw new Error(`${label}: ${shorten(String(task.account), 80)} is not a Claude Code or Codex account here. Call xdev_accounts_list.`);
         if (profile.disabled) throw new Error(`${label}: the account ${profile.name} is disabled.`);
         agent = claudeAgent(profile);
         pooled = true;
@@ -867,7 +889,10 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
       const wanted = (task as { model?: unknown }).model;
       const model = wanted === undefined || wanted === null || wanted === '' ? undefined : workerModel(wanted);
       if (wanted !== undefined && wanted !== null && wanted !== '' && !model) throw new Error(`${label}: the model is an alias such as haiku, sonnet, or opus, or a model id.`);
-      if (model && agent.kind !== 'claude') throw new Error(`${label}: a model can be chosen only for a Claude Code account; ${agent.name} is an API profile with its own model.`);
+      if (model && agent.kind !== 'claude') throw new Error(`${label}: a model can be chosen only for a Claude Code or Codex account; ${agent.name} is an API profile with its own model.`);
+      if (model && agent.kind === 'claude' && agent.profile.provider === 'codex' && claudeAlias.test(model)) {
+        throw new Error(`${label}: ${model} is a Claude Code model, and ${agent.name} is a Codex account. Leave the model out, or name a Codex model.`);
+      }
       jobs.push({
         role, brief, profile: agent.name, kind: agent.kind, accountId: agent.id, revision: agent.revision,
         ...(repo ? { repo } : {}), ...(pooled ? { pooled } : {}), ...(model ? { model } : {})
@@ -1028,6 +1053,7 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
     const tree = record.trees?.find(candidate => candidate.target === session.repo) ?? record.trees?.[0];
     const profile = (await this.host?.profiles() ?? []).find(candidate => terminalProfileId(candidate) === session.profileId);
     if (!tree || !profile) throw new Error('The worktree or the account of this session was removed.');
+    if (profile.provider !== 'claude') throw new Error(`A transcript can be shown for Claude Code sessions only. Resume this ${terminalProviders[profile.provider].name} session in a terminal to read it.`);
     return { session, items: await readTranscript(join(sessionFolder(profile.configDir, tree.path), `${session.sessionId}.jsonl`), tree.path) };
   }
 
@@ -1382,24 +1408,26 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
           ? await this.host!.worktrees.changedFiles?.(tree).catch(() => []) ?? [] : [];
         const graph = await this.host!.codegraphRoot?.().catch(() => undefined);
         const configured = this.host!.settings(step.role, tree.target);
-        const settings = step.model ? { ...configured, model: step.model } : configured;
+        const codex = agent.profile.provider === 'codex';
+        const settings = !step.model ? configured : codex ? { ...configured, codexModel: step.model } : { ...configured, model: step.model };
+        const commands = step.role === 'Review' || codex ? undefined : settings.allowedCommands;
         const shared = await this.artifacts?.context().catch(() => []) ?? [];
         const environment = settings.env && Object.keys(settings.env).length
           ? { note: 'Already set for your commands from the project\'s .env files. Do not look for, read, or print .env files.', names: Object.keys(settings.env).slice(0, 100) }
           : undefined;
         const request: WorkerRequest = {
-          executable: await this.host!.executable(), profile: agent.profile, cwd: tree.path, role: step.role, mode: 'work',
+          executable: await this.host!.executable(agent.profile.provider), profile: agent.profile, cwd: tree.path, role: step.role, mode: 'work',
           prompt: JSON.stringify({
             request: record.request, task: brief, repository: target, other_repositories: others.length ? others : undefined,
             // The step was blocked on a question; this is the answer.
             your_question: step.answer ? step.question : undefined, answer: step.answer, merge: mergeNote || undefined,
-            allowed_commands: step.role === 'Review' ? undefined : settings.allowedCommands,
+            allowed_commands: commands,
             // Names only: the values reach the worker's commands as environment variables, never the prompt.
             environment_variables: environment,
             previous: context.previous.length ? context.previous : undefined, changed_files: changed.length ? changed : undefined, memory: context.memory,
             artifacts: shared.length ? shared : undefined
           }),
-          system: `${headless}${dataNote}${this.artifacts ? artifactNote : ''} You are ${step.role}. ${workerInstructions[step.role]}${target ? ` Your working directory is the root of the repository "${target}"; read a leading "${target}/" in a path as this directory.` : ''}${others.length ? ' Other steps of this run work in the other repositories; change only this one, and read "previous" for what they did.' : ''}${graph ? ` A CodeGraph index of the workspace is at ${graph}: run \`codegraph explore -p ${graph} "<symbols or question>"\` to locate code before searching files. Its paths point to the main checkout; edit the matching files in this worktree.` : ''} Reply in the user's language.`,
+          system: `${headlessFor(agent.profile)}${dataNote}${this.artifacts ? artifactNote : ''} You are ${step.role}. ${workerInstructions[step.role]}${target ? ` Your working directory is the root of the repository "${target}"; read a leading "${target}/" in a path as this directory.` : ''}${others.length ? ' Other steps of this run work in the other repositories; change only this one, and read "previous" for what they did.' : ''}${graph ? ` A CodeGraph index of the workspace is at ${graph}: run \`codegraph explore -p ${graph} "<symbols or question>"\` to locate code before searching files. Its paths point to the main checkout; edit the matching files in this worktree.` : ''} Reply in the user's language.`,
           settings: graph ? { ...settings, codegraph: true } : settings, signal: run.signal, onActivity: this.track(run, step.role, agent.name)
         };
         let stdout: string | undefined;
@@ -1413,7 +1441,7 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
                   ? { answer: step.answer, note: 'This answers the question you reported as "blocked". Continue your earlier session in this worktree and finish the task.' }
                   : { task: brief, note: 'Continue your earlier session in this worktree.' }),
                 merge: mergeNote || undefined,
-                allowed_commands: step.role === 'Review' ? undefined : settings.allowedCommands, environment_variables: environment,
+                allowed_commands: commands, environment_variables: environment,
                 changed_files: changed.length ? changed : undefined
               })
             }, [tree.repo]);
@@ -1524,7 +1552,7 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
       const evidence = { request: record.request, step: { role: step.role, brief: step.brief, summary: step.summary, files: step.files }, changes };
       if (reviewer.kind === 'claude') {
         const stdout = await this.work({
-          executable: await this.host!.executable(), profile: reviewer.profile, cwd: tree?.path ?? this.host!.folder()!, role: 'Lead', mode: 'gate',
+          executable: await this.host!.executable(reviewer.profile.provider), profile: reviewer.profile, cwd: tree?.path ?? this.host!.folder()!, role: 'Lead', mode: 'gate',
           prompt: JSON.stringify(evidence),
           system: `You review one step of an xDev Squad run. ${gateEvidence} ${tree ? 'Inspect the uncommitted changes yourself with git diff as well, always when "changes" is marked truncated. ' : ''}Do not edit files. ${criteria}`,
           settings: this.host!.settings('Lead'), signal: run.signal, onActivity: this.track(run, 'Lead', reviewer.name)
@@ -1567,7 +1595,7 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
     const brief = this.briefFrom(briefInput, step.brief);
     const agent = this.verify(step, await this.directory());
     const tree = this.treeFor(record, step);
-    if (agent.kind !== 'claude' || !tree) throw new Error('Only Claude Code steps can continue in a terminal.');
+    if (agent.kind !== 'claude' || agent.profile.provider !== 'claude' || !tree) throw new Error('Only Claude Code steps can continue in a terminal.');
     if (step.resolves) throw new Error('A step that merges a left-out run works headless, because Squad opens and commits its merge. Run it headless, or skip it and merge the branch by hand.');
     await this.host?.prepare?.();
     const context = this.stepContext(record, index);
@@ -1739,7 +1767,8 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
       const step: RunStep = {
         role: 'Implement', brief, profile: agent.name, kind: 'claude', accountId: agent.id, revision: agent.revision,
         repo: tree.target, status: 'pending', feedback: true,
-        ...(pooled ? { pooled: true } : {}), ...(sessionProfile ? { resume: session!.sessionId } : {})
+        // A session belongs to one account and one CLI: another account starts fresh.
+        ...(pooled ? { pooled: true } : {}), ...(sessionProfile && session!.profileId === agent.id ? { resume: session!.sessionId } : {})
       };
       const next = saved.status === 'active' ? this.currentStep(saved) : -1;
       saved.steps.splice(next < 0 ? saved.steps.length : next, 0, step);
@@ -2032,7 +2061,7 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
   private async directory(): Promise<{ accounts: Account[]; terminals: TerminalProfile[] }> {
     const [{ accounts }, terminals] = await Promise.all([
       this.accounts.read(),
-      this.host ? this.host.profiles().then(list => list.filter(profile => profile.provider === 'claude')) : Promise.resolve([])
+      this.host ? this.host.profiles().then(list => list.filter(profile => workerProviders.includes(profile.provider))) : Promise.resolve([])
     ]);
     return { accounts, terminals };
   }
@@ -2061,7 +2090,7 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
   }
 
   private reply(role: Role, agent: Agent, answer: string, cost = 0): SquadChatEntry {
-    const label = agent.kind === 'claude' ? `${agent.name} · Claude Code` : agent.name;
+    const label = agent.kind === 'claude' ? `${agent.name} · ${terminalProviders[agent.profile.provider].name}` : agent.name;
     const price = formatCost(cost);
     return { author: role, profile: price ? `${label} · ${price}` : label, text: shorten(answer, responseLimit) };
   }
@@ -2072,7 +2101,10 @@ Return only a JSON object with a "reply" string and a "tasks" array. Each task h
    * gets the folder of every account so its rules can deny them: a worker must not reach another account's sign-in.
    */
   private async work(request: WorkerRequest, readDirs: readonly string[] = []): Promise<string> {
-    const accounts = (await this.host!.profiles().catch(() => [])).map(profile => profile.configDir).filter(Boolean);
+    const listed = await this.host!.profiles().catch(() => undefined);
+    // Claude Code reads only its working directory. For Codex the list is what keeps it out of the other accounts.
+    if (!listed && request.profile.provider === 'codex') throw new Error('The accounts could not be listed, so a Codex worker cannot be kept out of their folders. Try again.');
+    const accounts = (listed ?? []).map(profile => profile.configDir).filter(Boolean);
     const dirs = [...new Set([...readDirs, ...(this.artifacts ? [this.artifacts.dir] : [])])]
       .filter(dir => dir && dir !== request.cwd && existsSync(dir));
     return this.host!.run({ ...request, ...(dirs.length ? { readDirs: dirs } : {}), ...(accounts.length ? { accounts } : {}) });
@@ -2304,7 +2336,8 @@ function parsePlan(
     const duplicate = !parallel && jobs.some(job => job.role === role && (repositories.length < 2 || (repo !== undefined && job.repo === repo)));
     if (!agent || !brief || brief.length > 4_000 || duplicate || jobs.length >= 8) return { reply, jobs: [], invalid: true };
     // Lead may pick a cheaper or stronger model per task; a value that is not a model name is dropped.
-    const model = agent.kind === 'claude' ? workerModel(task.model) : undefined;
+    // The aliases Lead is told about are Claude Code models; a Codex worker keeps its own.
+    const model = agent.kind === 'claude' && agent.profile.provider === 'claude' ? workerModel(task.model) : undefined;
     jobs.push({ role, brief, profile: agent.name, kind: agent.kind, accountId: agent.id, revision: agent.revision, ...(repo ? { repo } : {}), ...(model ? { model } : {}) });
   }
   // Implement steps come first, then Review, then Tests; Lead's order is kept within a role.

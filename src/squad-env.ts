@@ -5,7 +5,7 @@ import { isAbsolute, join, normalize, sep } from 'node:path';
  * Variables a project's .env may not set for workers: they would change the worker's own account, model, or
  * runtime instead of configuring the project's commands.
  */
-const blocked = /^(ANTHROPIC_|CLAUDE_|CLAUDECODE$|OPENAI_|PATH$|HOME$|USER$|SHELL$|NODE_OPTIONS$|LD_|DYLD_)/;
+const blocked = /^(ANTHROPIC_|CLAUDE_|CLAUDECODE$|OPENAI_|CODEX_|PATH$|HOME$|USER$|SHELL$|NODE_OPTIONS$|LD_|DYLD_)/;
 const namePattern = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const fileLimit = 10;
 const valueLimit = 32_000;

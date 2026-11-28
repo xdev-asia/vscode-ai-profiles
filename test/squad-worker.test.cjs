@@ -137,7 +137,7 @@ test('runClaude spawns the CLI in the worktree and can be stopped', async () => 
   const hanging = fakeSpawn(() => {});
   const controller = new AbortController();
   const pending = runClaude({ ...request, signal: controller.signal }, hanging.spawn);
-  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setTimeout(resolve, 10));
   controller.abort();
   await assert.rejects(pending);
   assert.equal(hanging.calls[0].child.killed, 'SIGTERM');
@@ -147,7 +147,7 @@ test('runClaude spawns the CLI in the worktree and can be stopped', async () => 
   const stopper = new AbortController();
   let settled = false;
   const stopping = runClaude({ ...request, signal: stopper.signal }, slow.spawn).catch(error => { settled = true; return error; });
-  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setTimeout(resolve, 10));
   stopper.abort();
   await new Promise(resolve => setTimeout(resolve, 50));
   assert.equal(slow.calls[0].child.killed, 'SIGTERM');
@@ -209,7 +209,7 @@ test('the prompt and the system text reach Claude Code through stdin and a priva
   const prompt = 'Fix "it" & echo PWNED %PATH%\nsecond line';
   const system = 'You are Tests\n"quoted" & calc';
   await runClaude({ executable: '/bin/claude', profile, cwd: '/repo/wt', role: 'Tests', mode: 'work', prompt, system, settings }, done.spawn);
-  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setTimeout(resolve, 10));
   const [call] = done.calls;
   assert.ok(!call.args.some(arg => /PWNED|calc|second line|You are Tests/.test(arg)), 'no prompt or system text on the command line');
   assert.equal(call.options.stdio[0], 'pipe');
@@ -223,7 +223,7 @@ test('a .cmd install starts through cmd.exe only with arguments cmd.exe cannot r
   assert.deepEqual(launch('C:/bin/claude.exe', ['-p', 'a & b'], 'win32', 'cmd.exe'), { command: 'C:/bin/claude.exe', args: ['-p', 'a & b'] });
   const script = 'C:/npm/claude.cmd';
   assert.deepEqual(launch(script, ['-p', '--model', 'sonnet'], 'win32', 'C:/Windows/cmd.exe'),
-    { command: 'C:/Windows/cmd.exe', args: ['/d', '/s', '/c', script, '-p', '--model', 'sonnet'] });
+    { command: 'C:/Windows/cmd.exe', args: ['/d', '/s', '/c', 'call', script, '-p', '--model', 'sonnet'] });
   for (const bad of ['a & calc', '%PATH%', 'x | y', 'a > b', 'a < b', 'a ^ b', 'one\ntwo', 'one\rtwo']) {
     assert.throws(() => launch(script, ['--model', bad], 'win32', 'cmd.exe'), /\.cmd script.*claudeExecutable/s, bad);
   }
@@ -247,4 +247,36 @@ test('a terminal step keeps its task off a cmd.exe command line', () => {
   assert.ok(!script.args[2].includes('PWNED'), 'the task is not an argument');
   assert.ok(script.system.startsWith(step.system) && script.system.includes(step.prompt), 'the task travels in the file');
   assert.doesNotThrow(() => launch('C:/npm/claude.cmd', script.args, 'win32', 'cmd.exe'));
+});
+
+test('arguments reach a .cmd install unchanged, also from a folder with a space in its name', { skip: process.platform !== 'win32' }, t => {
+  const { spawnSync } = require('node:child_process');
+  const { mkdirSync, mkdtempSync, rmSync, writeFileSync } = require('node:fs');
+  const { tmpdir } = require('node:os');
+  const { join } = require('node:path');
+  const root = mkdtempSync(join(tmpdir(), 'xdev-cmd-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const args = [
+    'exec', '-c', 'default_permissions="xdev"', '-c', 'permissions.xdev.filesystem={ "C:\\\\Users\\\\First Last\\\\.ssh" = "deny" }',
+    '--json-schema', '{"type":"object","properties":{"a":{"type":"string"}}}', 'with space', 'trailing\\', 'quote"inside', '', '-'
+  ];
+  for (const folder of ['plain', 'First Last']) {
+    mkdirSync(join(root, folder));
+    writeFileSync(join(root, folder, 'echo.js'), 'process.stdout.write(JSON.stringify(process.argv.slice(2)));');
+    writeFileSync(join(root, folder, 'tool.cmd'), '@ECHO off\r\nnode "%~dp0\\echo.js" %*\r\n');
+    const start = launch(join(root, folder, 'tool.cmd'), args);
+    const result = spawnSync(start.command, start.args, { encoding: 'utf8', windowsHide: true });
+    assert.equal(result.status, 0, `${folder}: ${result.stderr}`);
+    assert.deepEqual(JSON.parse(result.stdout), args, folder);
+  }
+});
+
+test('a stop that comes right after the start is not missed', async () => {
+  const hanging = fakeSpawn(() => {});
+  const controller = new AbortController();
+  const request = { executable: '/bin/claude', profile, cwd: '/repo/wt', role: 'Tests', mode: 'work', prompt: 'p', system: 's', settings, signal: controller.signal };
+  const pending = runClaude(request, hanging.spawn);
+  controller.abort();
+  await assert.rejects(pending);
+  assert.ok(!hanging.calls.length || hanging.calls[0].child.killed, 'the CLI was not started, or was ended at once');
 });

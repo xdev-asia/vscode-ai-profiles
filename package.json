@@ -2,7 +2,7 @@
   "name": "xdev-ai",
   "displayName": "xDev AI",
   "description": "Manage AI accounts, open Claude Code, Codex, and Gemini terminals, and coordinate AI tasks in VS Code.",
-  "version": "0.23.0",
+  "version": "0.24.0",
   "publisher": "xdev-asia",
   "icon": "media/icon.png",
   "private": true,
@@ -747,6 +747,24 @@
           },
           "default": [],
           "markdownDescription": "Claude Code accounts in the worker pool, by id (`claude:<uuid>`, shown by the xDev AI MCP tool `xdev_accounts_list`) or by name as shown under Roles. Ids keep working after a rename. Empty uses every enabled Claude Code account. Disabled accounts are always left out. Used when `xdevAi.squad.accountPool` is not `role`."
+        },
+        "xdevAi.squad.codexModel": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "The model for Squad workers that run under a Codex account, such as a model id from Codex's `/model` list. Empty uses Codex's default. `xdevAi.squad.workerModels` is for Claude Code accounts."
+        },
+        "xdevAi.squad.codexWindowsSandbox": {
+          "type": "string",
+          "enum": [
+            "mxc",
+            "elevated"
+          ],
+          "default": "mxc",
+          "markdownEnumDescriptions": [
+            "Codex's MXC sandbox. Needs a recent Windows 11 build and no setup.",
+            "Codex's elevated sandbox. Needs the setup an administrator approves once, which Codex offers in its terminal."
+          ],
+          "markdownDescription": "On Windows, the sandbox Codex confines a Squad worker's commands with. Codex's unelevated sandbox cannot keep a worker out of other accounts' folders, so Squad does not use it. Without a working sandbox, a Codex worker's commands fail."
         },
         "xdevAi.squad.maxParallelRuns": {
           "type": "integer",

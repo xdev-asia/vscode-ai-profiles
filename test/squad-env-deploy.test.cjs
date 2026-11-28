@@ -20,12 +20,12 @@ test('.env files are parsed, kept inside the repository, and never change the wo
   const folder = await mkdtemp(join(tmpdir(), 'squad-env-'));
   t.after(() => rm(folder, { recursive: true, force: true }));
   await mkdir(join(folder, 'services', 'api'), { recursive: true });
-  await writeFile(join(folder, 'services', 'api', '.env'), 'DB_URL=postgres://x\nANTHROPIC_API_KEY=k\nCLAUDE_CONFIG_DIR=/x\nPATH=/evil\nFLAG=1\n');
+  await writeFile(join(folder, 'services', 'api', '.env'), 'DB_URL=postgres://x\nANTHROPIC_API_KEY=k\nCLAUDE_CONFIG_DIR=/x\nCODEX_HOME=/y\nPATH=/evil\nFLAG=1\n');
   await writeFile(join(folder, 'services', 'api', '.env.test'), 'FLAG=2\n');
   const setting = { 'services/api': ['.env', '.env.test', '../escape'], web: ['.env'] };
   const files = envFilesFor(setting, folder, 'services/api');
   assert.deepEqual(files.map(file => [file.file, file.names, file.skipped]), [
-    ['.env', ['DB_URL', 'FLAG'], ['ANTHROPIC_API_KEY', 'CLAUDE_CONFIG_DIR', 'PATH']],
+    ['.env', ['DB_URL', 'FLAG'], ['ANTHROPIC_API_KEY', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'PATH']],
     ['.env.test', ['FLAG'], []]
   ]);
   assert.deepEqual(loadEnv(files), { DB_URL: 'postgres://x', FLAG: '2' }, 'later files win; blocked names are left out');
