@@ -2,7 +2,7 @@
   "name": "xdev-ai",
   "displayName": "xDev AI",
   "description": "Manage AI accounts, open Claude Code, Codex, and Gemini terminals, and coordinate AI tasks in VS Code.",
-  "version": "0.19.0",
+  "version": "0.20.0",
   "publisher": "xdev-asia",
   "icon": "media/icon.png",
   "private": true,
@@ -747,6 +747,13 @@
           },
           "default": [],
           "markdownDescription": "Claude Code accounts in the worker pool, by id (`claude:<uuid>`, shown by the xDev AI MCP tool `xdev_accounts_list`) or by name as shown under Roles. Ids keep working after a rename. Empty uses every enabled Claude Code account. Disabled accounts are always left out. Used when `xdevAi.squad.accountPool` is not `role`."
+        },
+        "xdevAi.squad.maxParallelRuns": {
+          "type": "integer",
+          "default": 3,
+          "minimum": 1,
+          "maximum": 8,
+          "markdownDescription": "How many runs may have a step working at the same time. Each run has its own worktree and branch, so their workers do not touch each other's files. A plan marked parallel becomes one run per task. Set 1 to run one step at a time. Each working step uses its account's quota."
         },
         "xdevAi.squad.resumeFeedback": {
           "type": "boolean",

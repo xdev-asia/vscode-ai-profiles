@@ -29,10 +29,12 @@ for (const key of Object.keys(process.env)) if (/^(VSCODE_|ELECTRON_|CLAUDE|ANTH
   git('add', '.');
   git('-c', 'user.name=xDev e2e', '-c', 'user.email=e2e@example.invalid', 'commit', '-m', 'Initial commit');
 
-  // Stands in for Claude Code, so a terminal can open on a machine without it. It is never asked to do work.
+  // Stands in for Claude Code (fake-claude.cjs), so the suite needs no AI account: terminals open, and headless
+  // steps create the file their task names.
   const windows = process.platform === 'win32';
   const claude = join(work, windows ? 'claude.cmd' : 'claude');
-  writeFileSync(claude, windows ? '@echo off\r\necho stand-in for Claude Code\r\n' : '#!/bin/sh\necho "stand-in for Claude Code"\n');
+  const fake = join(__dirname, 'fake-claude.cjs');
+  writeFileSync(claude, windows ? `@echo off\r\nnode "${fake}" %*\r\n` : `#!/bin/sh\nexec node "${fake}" "$@"\n`);
   if (!windows) chmodSync(claude, 0o755);
 
   const holder = busy ? createServer().listen(0, '127.0.0.1') : undefined;

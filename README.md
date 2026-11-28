@@ -151,6 +151,7 @@ Assign a **Claude Code** terminal account (instead of an API profile) to a role 
   "xdevAi.squad.poolAccounts": ["dev-1", "dev-2", "dev-3"]
   ```
 
+- **Run independent tasks at the same time.** Several runs can be open, and up to `xdevAi.squad.maxParallelRuns` of them (3 by default, 8 at most) may have a step working at once. Each run has its own worktree and branch, so their workers do not touch each other's files. Start a step in one run while another works; each working run shows its own live feed and a **Stop this run** button. When Lead marks a plan **parallel**, approving it makes one run per task, and with automatic start they begin together. Use it for tasks that do not need each other's changes; you review, merge, and push each run on its own. Combine it with the account pool so each task uses a different account's quota. Set `1` to run one step at a time.
 - **Feedback continues the session.** **Request changes** resumes Implement's earlier session and sends only your feedback (`xdevAi.squad.resumeFeedback`).
 
 **Several windows.** Roles, runs, memory, and skills are shared by every window that opens the workspace, also across browsers in code-server (a file in the extension's global storage). While one window runs a step, the others show it and wait; if that window closes, the run is reported as interrupted.
@@ -226,6 +227,7 @@ The reviewer is the account assigned to Lead and must differ from the account th
 | `xdevAi.squad.cleanupAfterDays` | `7` | Remove runs whose work is merged or pushed after this many days. `0` turns it off. |
 | `xdevAi.squad.minFreeDiskGb` | `2` | Free disk Squad needs before creating worktrees or starting a step. `0` turns the check off. |
 | `xdevAi.squad.repositoryBaseBranches` | `{}` | Base branch per repository, overriding `xdevAi.squad.baseBranch`; its merge requests target it. |
+| `xdevAi.squad.maxParallelRuns` | `3` | How many runs may have a step working at the same time (1–8). |
 | `xdevAi.squad.workerEnvFiles` | `{}` | `.env` files per repository whose variables Implement and Tests get as environment variables. |
 | `xdevAi.squad.deployTargets` | `{}` | How each repository deploys (`from`, `to`, `health`), for **Deploy** and **Check health** on a run. |
 
@@ -310,6 +312,8 @@ A connected client can act as the Squad lead: it plans the work, hands each task
 | `run` | Also `xdev_squad_submit_plan`, `xdev_squad_approve_plan`, `xdev_squad_discard_plan`, `xdev_squad_run_step`, `xdev_squad_skip_step`, `xdev_squad_request_changes`, `xdev_squad_finish_run`, `xdev_squad_stop`, `xdev_squad_ask` (a message to Squad's own Lead or a role), and `xdev_artifact_save`. |
 
 A plan has one to eight tasks. Each task names a role (Implement, Review, Tests), a brief, and optionally an `account` id from `xdev_accounts_list`; without one the task uses the account pool or the role's account. A task for a Claude Code account may also name a `model`, so the lead matches cost to difficulty: `haiku` for simple mechanical work, `sonnet` for most coding, `opus` for the hardest tasks. Without it the task uses the model configured for its role (`xdevAi.squad.workerModels`). The plan and each step show the chosen model. Tasks run in the order given, one at a time, and a role may appear more than once. The plan and every step also show in **xDev Squad → Chat**, where you can take over at any point: **Worker runs** lists each run with the state of its steps and a live feed of the step that is running, and **Resume … session** opens a finished headless step as an interactive Claude Code session under its account.
+
+**Run tasks in parallel.** For tasks that do not need each other's changes, the lead sets `parallel: true` on the plan. Approving it returns `runs`, one run per task, each with its own worktree and branch. The lead starts each with `xdev_squad_run_step` and `waitSeconds: 0`, then calls `xdev_squad_wait`, which returns each time one of them ends (with a `runId` it waits for that run). `xdev_squad_status` lists what works now under `workingRuns`, and `xdev_squad_stop` takes a `runId` to stop one run. At most `xdevAi.squad.maxParallelRuns` runs work at once; one run still works on one step at a time. Ask, for example: “Use xDev AI to add these three endpoints in parallel, one per account, on haiku.”
 
 Workers follow the same rules as a run started in the panel: a git worktree on a local branch `xdev/squad/<id>`, the allowed commands, the spending cap, and the MCP servers granted in project settings. A long step returns `finished: false` after its wait time and keeps working; the client calls `xdev_squad_wait`. `xdev_squad_finish_run` commits to the local branch. Merging, pushing, and deploying stay in VS Code.
 
@@ -397,7 +401,7 @@ npm run test:host
 npm run package
 ```
 
-`npm test` runs the unit tests. `npm run test:host` downloads VS Code once into `.vscode-test/`, opens the extension in a window with its own profile and a throwaway folder, and drives it from the extension host: folder setup, the MCP server and its token, a client that confirms and leads Squad, shared artifacts, and a second run where another program holds the fixed port. It needs no AI account and starts no worker. On Linux without a display, run it under `xvfb-run -a`.
+`npm test` runs the unit tests. `npm run test:host` downloads VS Code once into `.vscode-test/`, opens the extension in a window with its own profile and a throwaway folder, and drives it from the extension host: folder setup, the MCP server and its token, a client that confirms and leads Squad, shared artifacts, and a second run where another program holds the fixed port. It needs no AI account: a stand-in for Claude Code does the work of the headless steps. On Linux without a display, run it under `xvfb-run -a`.
 
 ## Release an extension version
 

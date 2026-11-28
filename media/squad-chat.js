@@ -80,17 +80,21 @@ function mountSquadChat(vscode, roles) {
       'ai+human': 'Approving runs nothing yet. After each step, Lead\'s account reviews it; you still start every step.',
       ai: 'You start the first step. Each passing AI review then starts the next step; a review asking for changes, a blocked step, or an error stops and waits for you. Merging always waits for you.'
     }[approver.value] ?? '';
-    byId('plan-cost').textContent = `${approverText}${headless
+    const parallelText = plan?.parallel
+      ? `Parallel plan: each task becomes its own run, with its own worktree and branch, and up to ${snapshot.maxParallel ?? 1} work at the same time. You review and merge each run on its own. `
+      : '';
+    byId('plan-cost').textContent = `${parallelText}${approverText}${headless
       ? ` Claude Code steps use a new git worktree from ${workers?.baseBranch || 'your current branch'}${workers?.budgetUsd ? `, each headless step capped at $${workers.budgetUsd}` : ''}. Allowed commands: ${commands}.` : ''}`;
     renderRuns(snapshot.runs ?? []);
     renderBoard(state);
-    renderLive(snapshot.live, busy);
+    renderLive(snapshot.working ?? (snapshot.live ? [{ live: snapshot.live }] : []), busy);
     const profileFor = role => state.accounts.find(profile => profile.id === state.seats[role]?.account);
     const lead = profileFor('Lead');
     const leadUsable = lead?.kind === 'api' || (lead?.detail === 'Claude Code' && snapshot.workers);
     byId('chat-status').textContent = status || (plan ? 'Review the roles and briefs before running.' :
       leadUsable ? `Lead uses ${lead.name} · ${lead.detail}` : 'Assign an API profile or a Claude Code account to Lead under Roles to start planning.');
     byId('stop-chat').hidden = !busy || snapshot.remote;
+    byId('stop-chat').textContent = (snapshot.working ?? []).length > 1 ? 'Stop all' : 'Stop run';
     renderAssignAll(state, lead);
     const terminals = roles.filter(role => profileFor(role)?.kind === 'terminal');
     const selected = terminalRole.value;
@@ -136,8 +140,11 @@ function mountSquadChat(vscode, roles) {
   };
   let boardKey;
   function renderBoard(state) {
-    const live = snapshot.live;
-    const active = (snapshot.runs ?? []).find(run => run.status === 'active');
+    const lives = (snapshot.working ?? (snapshot.live ? [{ live: snapshot.live }] : [])).map(job => job.live).filter(Boolean);
+    const busyRuns = snapshot.busyRuns ?? [];
+    // Several runs can be open. The board follows one that is working now, else the newest open run.
+    const open = (snapshot.runs ?? []).filter(run => run.status === 'active');
+    const active = open.find(run => busyRuns.includes(run.id)) ?? open[0];
     const current = active ? active.steps.findIndex(step => step.status !== 'done' && step.status !== 'skipped') : -1;
     const members = boardRoles.filter(role => roles.includes(role)).map(role => {
       const profile = state.accounts.find(item => item.id === state.seats[role]?.account);
@@ -149,7 +156,7 @@ function mountSquadChat(vscode, roles) {
       let status = profile ? 'idle' : 'vacant';
       if (snapshot.plan?.jobs.some(job => job.role === role)) status = 'proposed';
       if (step) status = step.status === 'pending' ? (index === current ? 'pending' : 'queued') : step.status;
-      if (snapshot.busy && live?.role === role) status = role === 'Lead' && active ? 'reviewing' : 'working';
+      if (snapshot.busy && lives.some(live => live.role === role)) status = role === 'Lead' && active ? 'reviewing' : 'working';
       else if (snapshot.busy && role === 'Lead' && /^Lead/.test(snapshot.status)) status = /review/i.test(snapshot.status) ? 'reviewing' : 'planning';
       return { role, status, profile: profile ? `${profile.name} · ${profile.detail}` : 'Assign under Roles' };
     });
@@ -175,19 +182,33 @@ function mountSquadChat(vscode, roles) {
     const seconds = Math.max(0, Math.round((Date.now() - since) / 1000));
     return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, '0')}s`;
   }
-  function renderLive(live, busy) {
+  // One feed per piece of work in flight; several runs may work at the same time.
+  function renderLive(jobs, busy) {
     const box = byId('chat-live');
-    box.hidden = !busy || !live;
-    liveSince = box.hidden ? undefined : live.since;
+    const lives = busy ? jobs.map(job => job.live).filter(Boolean) : [];
+    box.hidden = !lives.length;
+    liveSince = lives[0]?.since;
     if (box.hidden) { liveKey = undefined; return; }
-    const key = JSON.stringify(live);
+    const key = JSON.stringify(lives);
     if (key === liveKey) return;
     liveKey = key;
+    if (lives.length === 1) {
+      box.replaceChildren(...liveFeed(lives[0], true));
+      return;
+    }
+    box.replaceChildren(...lives.map((live, position) => {
+      const item = element('div', undefined, 'live-item');
+      item.append(...liveFeed(live, position === 0));
+      return item;
+    }));
+  }
+  function liveFeed(live, first) {
     const head = element('div', undefined, 'live-head');
     const dot = element('span', undefined, 'pulse');
     dot.setAttribute('aria-hidden', 'true');
     const timer = element('span', elapsed(live.since), 'live-time');
-    timer.id = 'live-time';
+    timer.dataset.since = String(live.since);
+    if (first) timer.id = 'live-time';
     head.append(dot, element('strong', live.role), element('span', live.profile, 'subtle'), timer);
     const counts = [
       live.reads && `${live.reads} read${live.reads === 1 ? '' : 's'}`,
@@ -202,7 +223,7 @@ function mountSquadChat(vscode, roles) {
       list.append(row);
     }
     if (!live.items.length) list.append(element('li', 'Starting…', 'subtle'));
-    box.replaceChildren(head, ...(counts ? [element('p', counts, 'subtle live-counts')] : []), list);
+    return [head, ...(counts ? [element('p', counts, 'subtle live-counts')] : []), list];
   }
   // Keep the team board just below the tab bar, which is sticky in a narrow side bar.
   const header = document.querySelector('.top');
@@ -215,8 +236,11 @@ function mountSquadChat(vscode, roles) {
   placeBoard();
 
   setInterval(() => {
-    const timer = byId('live-time');
-    if (timer && liveSince) timer.textContent = elapsed(liveSince);
+    if (!liveSince) return;
+    for (const timer of document.querySelectorAll('#chat-live .live-time')) {
+      const since = Number(timer.dataset.since);
+      if (since) timer.textContent = elapsed(since);
+    }
   }, 1000);
 
   let toastTimer;
@@ -402,15 +426,19 @@ function mountSquadChat(vscode, roles) {
     byId('chat-runs').hidden = !runs.length;
     announce(runs);
     renderMetrics(snapshot.metrics);
-    const busy = Boolean(pending) || snapshot.busy;
+    // A run is locked only while its own step works; the other runs stay usable.
+    const blocked = Boolean(pending) || Boolean(snapshot.remote);
+    const busyRuns = new Set(snapshot.busyRuns ?? (snapshot.busy ? runs.map(run => run.id) : []));
     for (const id of diffs.keys()) if (!runs.some(run => run.id === id)) diffs.delete(id);
     const deployTargets = lastState?.sync?.deploy ?? {};
     const deployFor = target => deployTargets[target] ?? deployTargets[target.split('/').at(-1)];
-    const key = JSON.stringify(runs) + String(busy) + JSON.stringify([...diffs]) + JSON.stringify(deployTargets);
+    const key = JSON.stringify(runs) + String(blocked) + JSON.stringify([...busyRuns]) + JSON.stringify([...diffs]) + JSON.stringify(deployTargets);
     if (key === runsKey) return;
     runsKey = key;
     byId('run-list').replaceChildren(...runs.map(run => {
-      const item = element('li', undefined, `run ${run.status}`);
+      const working = busyRuns.has(run.id);
+      const busy = blocked || working;
+      const item = element('li', undefined, `run ${run.status}${working ? ' working' : ''}`);
       const trees = run.trees ?? [];
       const multiple = trees.length > 1;
       const branch = trees[0]?.branch;
@@ -496,6 +524,8 @@ function mountSquadChat(vscode, roles) {
         actions.append(control);
       };
       const active = run.status === 'active';
+      // With several runs working, each can be stopped on its own.
+      if (working && (snapshot.working ?? []).length > 1) button('Stop this run', 'stop', {}, Boolean(pending));
       if (active) button('Finish run', 'runFinish', {}, busy);
       if (branch) {
         const committed = trees.some(tree => tree.commit);
@@ -614,12 +644,13 @@ function mountSquadChat(vscode, roles) {
 
   function updateControls() {
     message.disabled = !snapshot;
-    byId('send-chat').disabled = !snapshot || snapshot.busy || Boolean(snapshot.plan || pending) || !message.value.trim();
+    const chatBusy = Boolean(snapshot && (snapshot.chatBusy ?? snapshot.busy));
+    byId('send-chat').disabled = !snapshot || chatBusy || Boolean(snapshot.plan || pending) || !message.value.trim();
     for (const id of ['stop-chat', 'open-chat-terminal', 'chat-add-profile', 'chat-assign-all']) {
       byId(id).disabled = !snapshot || Boolean(pending);
     }
-    byId('approve-plan').disabled = Boolean(pending || snapshot?.busy) || repoMissing();
-    byId('discard-plan').disabled = Boolean(pending || snapshot?.busy);
+    byId('approve-plan').disabled = Boolean(pending) || chatBusy || repoMissing();
+    byId('discard-plan').disabled = Boolean(pending) || chatBusy;
     const locked = !snapshot || Boolean(pending || snapshot.busy || snapshot.plan);
     byId('chat-session').disabled = locked || (snapshot.chats ?? []).length < 2;
     byId('new-chat').disabled = locked || !snapshot.entries.length;
