@@ -1,9 +1,9 @@
 import { spawn as spawnProcess, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { isAbsolute, join, relative } from 'node:path';
+import { isAbsolute, join, relative, sep } from 'node:path';
 import type { Role } from './squad';
-import { envDenyRules } from './squad-env';
+import { envDenyRules, rulePath } from './squad-env';
 import type { WorkerMcp } from './squad-mcp';
 import { terminalProfileEnv, type TerminalProfile } from './terminal-profiles';
 
@@ -78,6 +78,10 @@ export interface WorkerRequest {
   resume?: string;
   /** Keep the session of a plan, ask, or gate run so a later run can resume it. Work runs always keep theirs. */
   persist?: boolean;
+  /** Folders outside `cwd` the worker may read, such as the main checkout its worktree links to. It edits none of them. */
+  readDirs?: readonly string[];
+  /** The folder of every account. No worker reads another account's folder, or the sign-in files of its own. */
+  accounts?: readonly string[];
   /** Called for each tool the worker uses, while it runs. */
   onActivity?: (activity: WorkerActivity) => void;
 }
@@ -150,6 +154,10 @@ const gateSchema = {
 } as const;
 
 const readTools = ['Read', 'Glob', 'Grep'];
+/** Lets Edit and Write change files in the working directory only. A bare "Edit" would allow any path on the machine. */
+const editHere = 'Edit(./**)';
+/** Files in an account's folder that hold its sign-in. */
+const signInFiles = ['.credentials.json', '.claude.json', 'auth.json', 'oauth_creds.json'];
 const gitRead = ['Bash(git status:*)', 'Bash(git diff:*)', 'Bash(git log:*)', 'Bash(git show:*)'];
 const codegraphRead = ['Bash(codegraph explore:*)', 'Bash(codegraph node:*)', 'Bash(codegraph query:*)'];
 
@@ -157,11 +165,15 @@ const codegraphRead = ['Bash(codegraph explore:*)', 'Bash(codegraph node:*)', 'B
  * Tools each role may use. Built-in tools outside `tools` are not loaded at all, which keeps
  * tool schemas out of the context. In print mode Claude Code denies anything not allowed
  * instead of prompting, and reports the denial in the result.
+ *
+ * Read, Glob and Grep are loaded but not in `allowed`: Claude Code then lets them read the working directory
+ * and the folders added with `--add-dir`, and denies every other path. Allowing them by name would open the
+ * whole machine, including the sign-in files of the other accounts.
  */
 export function workerTools(
   role: Role, mode: WorkerMode, allowedCommands: readonly string[], codegraph = false
 ): { tools: string[]; allowed: string[] } {
-  const reads = [...readTools, ...gitRead, ...(codegraph ? codegraphRead : [])];
+  const reads = [...gitRead, ...(codegraph ? codegraphRead : [])];
   // Lead plans and answers questions with read-only access, so it can check files instead of guessing.
   if (mode === 'plan' || mode === 'ask' || mode === 'gate' || role === 'Lead' || role === 'Review') {
     return { tools: [...readTools, 'Bash'], allowed: reads };
@@ -170,8 +182,21 @@ export function workerTools(
   const commands = allowedCommands.includes('*') ? ['Bash'] : allowedCommands.map(command => `Bash(${command}:*)`);
   return {
     tools: [...readTools, 'Edit', 'Write', 'Bash'],
-    allowed: [...reads, 'Edit', 'Write', ...commands]
+    allowed: [...reads, editHere, ...commands]
   };
+}
+
+/**
+ * Rules that keep a worker out of account folders: all of another account's folder, and the sign-in files of its
+ * own, which Claude Code itself reads without the worker's tools.
+ */
+export function accountDenyRules(accounts: readonly string[], own?: string, platform: NodeJS.Platform = process.platform): string[] {
+  const key = (path: string) => rulePath(path, platform).replace(/\/+$/, '');
+  const mine = own ? key(own) : undefined;
+  return [...new Set(accounts.map(key))]
+    // A rule cannot hold a comma or a parenthesis; such a folder is still outside every folder the worker may read.
+    .filter(path => !/[,()]/.test(path))
+    .flatMap(path => path === mine ? signInFiles.map(file => `Read(${path}/${file})`) : [`Read(${path}/**)`]);
 }
 
 /** A Claude Code model alias (haiku, sonnet, opus) or model id for one task, or nothing when the text is not one. */
@@ -201,8 +226,11 @@ export interface WorkerFiles {
  * applies, so the user's and the project's own MCP servers are not loaded; only the servers in `files.mcp` start,
  * and only their listed tools are allowed.
  */
-export function workerArguments(request: Omit<WorkerRequest, 'executable' | 'profile' | 'cwd' | 'signal'>, files: WorkerFiles): string[] {
+export function workerArguments(
+  request: Omit<WorkerRequest, 'executable' | 'profile' | 'cwd' | 'signal'> & { profile?: Pick<TerminalProfile, 'configDir'> }, files: WorkerFiles
+): string[] {
   const { role, mode, settings, resume, persist } = request;
+  const denied = [...envDenyRules(settings.denyRead ?? []), ...accountDenyRules(request.accounts ?? [], request.profile?.configDir)];
   const { tools, allowed } = workerTools(role, mode, settings.allowedCommands.filter(validCommand), settings.codegraph);
   const mcp = files.mcp ? runMcp(mode, settings) : undefined;
   if (mcp) allowed.push(...mcp.allowed);
@@ -217,7 +245,8 @@ export function workerArguments(request: Omit<WorkerRequest, 'executable' | 'pro
   ];
   if (mcp) args.push('--mcp-config', files.mcp!);
   if (allowed.length) args.push('--allowedTools', allowed.join(','));
-  if (settings.denyRead?.length) args.push('--disallowedTools', envDenyRules(settings.denyRead).join(','));
+  for (const dir of request.readDirs ?? []) args.push('--add-dir', dir);
+  if (denied.length) args.push('--disallowedTools', denied.join(','));
   if (settings.budgetUsd > 0) args.push('--max-budget-usd', String(settings.budgetUsd));
   if (settings.model) args.push('--model', settings.model);
   if (resume) args.push('--resume', resume);
@@ -288,7 +317,8 @@ const activityText = 160;
 function shortPath(value: unknown, cwd: string): string {
   if (typeof value !== 'string') return '';
   const path = isAbsolute(value) ? relative(cwd, value) : value;
-  return (path.startsWith('..') ? value : path || '.').slice(-activityText);
+  // Shown with forward slashes on every platform.
+  return (path.startsWith('..') ? value : path.split(sep).join('/') || '.').slice(-activityText);
 }
 
 /** Describes one tool call from the stream for the live activity feed. */

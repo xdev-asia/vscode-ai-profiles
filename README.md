@@ -119,6 +119,8 @@ Assign a **Claude Code** terminal account (instead of an API profile) to a role 
 6. Not right yet? Under **Changes**, write what to change in **Request changes** (click **Comment** on a file to start a line). Implement gets it as a new step in the same worktree; a finished run reopens and commits again on the same branch.
 7. Click **Push & MR** to push the branch of every committed repository. xDev asks for the target branch (default `xdevAi.squad.mergeRequestTarget`, else the remote's default branch) and shows the remote and the number of commits before pushing. On GitLab it opens or updates a merge request with git push options, so no API token is needed; **Open MR** opens it. Other remotes are only pushed (`xdevAi.squad.mergeRequests`).
 
+**What a worker can reach.** A worker reads its worktree, your checkout of the same repository, and the shared artifacts. It edits files only in its worktree. Reading or writing anywhere else is denied and shown in the run. No worker can read the folder of another account, or the sign-in files of its own. These rules cover Claude Code's file tools; a role you allow every shell command (`"*"`) can still reach other files through the shell, so allow only the commands the work needs.
+
 **Measure it.** Each step shows its time, cost, and retries, and each run its time to commit. Above Worker runs, a 30-day summary shows the number of runs, the median time to commit, the share of steps that passed first time, files changed, and cost.
 
 **See the squad at work.** The team board at the top of Chat shows each role's account and state: proposed, up next, working, done, blocked. While a headless step runs, a live feed lists the files it reads and edits and the commands it runs, with a timer. A short notice appears when a step ends.
@@ -319,7 +321,7 @@ Signing in, bypass sessions, deletions, and SDLC stage approval ask for your yes
 
 1. The tool makes no change. It returns a confirmation id with the title and detail of the request.
 2. The client shows you the request and, after your yes, calls `xdev_confirm`. Its permission prompt for that call is your confirmation. While the request waits, VS Code shows a notice and a status bar entry (**MCP: 1 to confirm**): **Review** opens a dialog where you approve or decline, and **Cancel** on the notice declines. The notice closes by itself when the request is answered, in the client or in VS Code, or expires.
-3. A confirmation works once and expires after 10 minutes.
+3. A confirmation works once and expires after 10 minutes. It does not run if you lowered the access level while it waited.
 
 Keep permission prompts on in a client you use this way: a client that skips its prompts can call `xdev_confirm` without you. Adding an API profile still needs VS Code, where you type the key.
 

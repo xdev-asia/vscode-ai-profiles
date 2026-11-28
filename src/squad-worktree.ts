@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { access, lstat, mkdir, symlink } from 'node:fs/promises';
-import { dirname, isAbsolute, join, normalize, sep } from 'node:path';
+import { dirname, isAbsolute, join, normalize, resolve, sep } from 'node:path';
 
 export interface RunWorktree {
   repo: string;
@@ -121,9 +121,10 @@ export function mergeRequestUrl(output: string): string | undefined {
   return requests.find(link => /\/(merge_requests|pull)\/\d+/.test(link)) ?? requests[0];
 }
 
-/** Stages every change in a worktree except the folders linked from the main checkout. */
-function stageAll(worktree: Pick<RunWorktree, 'linked'>): string[] {
-  return ['add', '-A', '--', '.', ...(worktree.linked ?? []).map(path => `:(exclude)${path}`)];
+/** A path as one key, so the same folder compares equal however it is written: git prints C:/a/b where Node has C:\a\b. */
+export function pathKey(path: string, platform: NodeJS.Platform = process.platform): string {
+  const full = resolve(path);
+  return platform === 'win32' ? full.toLowerCase() : full;
 }
 
 /** A branch name safe to pass to git as a value. */
@@ -297,7 +298,7 @@ export class Worktrees {
 
   /** Commits whatever the workers left in the worktree to its branch, locally. */
   async commit(worktree: RunWorktree, message: string): Promise<WorktreeChanges> {
-    await this.run(stageAll(worktree), worktree.path);
+    await this.stageAll(worktree);
     const staged = (await this.run(['diff', '--cached', '--name-only'], worktree.path)).split('\n').filter(Boolean);
     if (staged.length) {
       const email = (await this.run(['config', 'user.email'], worktree.path).catch(() => '')).trim();
@@ -312,13 +313,28 @@ export class Worktrees {
 
   /** Stages everything so new files show up, then lists the run's changes against its base commit. */
   async changes(worktree: RunWorktree): Promise<FileChange[]> {
-    await this.run(stageAll(worktree), worktree.path);
+    await this.stageAll(worktree);
     return parseDiff(await this.run(['diff', '--cached', '--no-renames', '--no-color', worktree.base], worktree.path));
   }
 
   async changedFiles(worktree: RunWorktree): Promise<string[]> {
-    await this.run(stageAll(worktree), worktree.path);
+    await this.stageAll(worktree);
     return (await this.run(['diff', '--cached', '--no-renames', '--name-only', worktree.base], worktree.path)).split('\n').filter(Boolean).slice(0, 200);
+  }
+
+  /**
+   * Stages every change in a worktree except the folders linked from the main checkout. A linked folder that
+   * git already ignores is left out of the command: git skips it anyway, and refuses a command that names an
+   * ignored path. That is the usual case on Windows, where a linked node_modules is a folder that
+   * "node_modules/" in .gitignore matches.
+   */
+  private async stageAll(worktree: Pick<RunWorktree, 'path' | 'linked'>): Promise<void> {
+    const excluded: string[] = [];
+    for (const path of worktree.linked ?? []) {
+      const ignored = await this.run(['check-ignore', '-q', '--', path], worktree.path).then(() => true, () => false);
+      if (!ignored) excluded.push(`:(exclude)${path}`);
+    }
+    await this.run(['add', '-A', '--', '.', ...excluded], worktree.path);
   }
 
   /** Restores one file to the base commit, or deletes it when the run added it. */
@@ -336,11 +352,12 @@ export class Worktrees {
    */
   async leftovers(repo: string, known: ReadonlySet<string>): Promise<LeftoverWorktree[]> {
     const listing = await this.run(['worktree', 'list', '--porcelain'], repo).catch(() => '');
+    const tracked = new Set([...known].map(path => pathKey(path)));
     const found: LeftoverWorktree[] = [];
     for (const block of listing.split(/\n\n+/)) {
       const path = /^worktree (.+)$/m.exec(block)?.[1];
       const branch = /^branch refs\/heads\/(xdev\/squad\/[\w-]+)$/m.exec(block)?.[1];
-      if (!path || !branch || known.has(path)) continue;
+      if (!path || !branch || tracked.has(pathKey(path))) continue;
       const merged = await this.run(['merge-base', '--is-ancestor', branch, 'HEAD'], repo).then(() => true, () => false);
       const changed = Number((await this.run(['log', '-1', '--format=%ct', branch], repo).catch(() => '0')).trim()) * 1000;
       found.push({ repo, path, branch, merged, changed });

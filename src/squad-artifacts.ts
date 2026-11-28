@@ -66,7 +66,7 @@ export function artifactLink(input: unknown): string | undefined {
 export class SquadArtifacts {
   private writes = Promise.resolve();
 
-  constructor(private readonly dir: string) {}
+  constructor(readonly dir: string) {}
 
   /** Newest first. */
   async list(): Promise<SquadArtifact[]> {

@@ -89,7 +89,19 @@ export function loadEnv(files: readonly EnvFile[]): Record<string, string> {
   return env;
 }
 
-/** Claude Code permission rules that deny reading these files: "//" starts an absolute path. */
-export function envDenyRules(paths: readonly string[]): string[] {
-  return paths.map(path => `Read(/${path.split(sep).join('/').replace(/^\/?/, '/')})`);
+/**
+ * An absolute path as a Claude Code permission rule names it: "//" starts at the filesystem root, and on
+ * Windows the drive is a lower-case folder, so C:\Users\a is //c/Users/a. A rule written "//C:/Users/a"
+ * matches nothing there.
+ */
+export function rulePath(path: string, platform: NodeJS.Platform = process.platform): string {
+  const posix = platform === 'win32'
+    ? path.replace(/\\/g, '/').replace(/^([A-Za-z]):/, (_, drive: string) => `/${drive.toLowerCase()}`)
+    : path;
+  return `/${posix.replace(/^\/*/, '/')}`;
+}
+
+/** Claude Code permission rules that deny reading these files. */
+export function envDenyRules(paths: readonly string[], platform: NodeJS.Platform = process.platform): string[] {
+  return paths.map(path => `Read(${rulePath(path, platform)})`);
 }

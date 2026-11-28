@@ -409,7 +409,7 @@ test('Lead gets the code map and repositories, the plan suggests a repository, a
   assert.deepEqual(plan.repos, repos);
 
   await (await chat.approve(plan.id, undefined, 'human', 'services/billing-api')).finished;
-  assert.equal(worktrees.created[0].repo, '/repo/services/billing-api', 'the user can override the suggestion');
+  assert.equal(worktrees.created[0].repo, join('/repo', 'services', 'billing-api'), 'the user can override the suggestion');
   const runId = chat.snapshot().runs[0].id;
   assert.equal(chat.snapshot().runs[0].trees[0].target, 'services/billing-api');
   await (await chat.runStep(runId)).finished;
@@ -449,7 +449,7 @@ test('approving needs a repository when the workspace has several and the plan n
   await assert.rejects(chat.approve(plan.id), /Choose the repository/);
   await assert.rejects(chat.approve(plan.id, undefined, 'human', '../etc'), /Choose the repository/);
   await (await chat.approve(plan.id, undefined, 'human', 'b')).finished;
-  assert.equal(worktrees.created[0].repo, '/repo/b');
+  assert.equal(worktrees.created[0].repo, join('/repo', 'b'));
 });
 
 test('worktree changes list staged and new files, and discard restores or deletes them', async t => {
@@ -537,7 +537,7 @@ test('one run spans repositories: a worktree per repository, steps in their own,
   await (await chat.approve(plan.id, undefined, 'human', ['', '', 'api'])).finished;
 
   const [run] = chat.snapshot().runs;
-  assert.deepEqual(run.trees.map(tree => [tree.target, tree.path]), [['api', `/repo/api/.wt/${run.id.slice(0, 8)}/1-api`], ['web', `/repo/web/.wt/${run.id.slice(0, 8)}/2-web`]]);
+  assert.deepEqual(run.trees.map(tree => [tree.target, tree.path]), [['api', `${join('/repo', 'api')}/.wt/${run.id.slice(0, 8)}/1-api`], ['web', `${join('/repo', 'web')}/.wt/${run.id.slice(0, 8)}/2-web`]]);
   assert.match(chat.snapshot().entries.at(-1).text, /ready in 2 repositories \(api, web\)/);
   for (let step = 0; step < 3; step++) await (await chat.runStep(run.id)).finished;
   const [api, web, review] = runs.slice(1);

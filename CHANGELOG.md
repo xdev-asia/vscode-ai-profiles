@@ -1,6 +1,21 @@
 # Changelog
 
-## Unreleased
+## 0.19.0 - 2026-11-28
+
+### Security
+
+- **Workers stay in their worktree.** A Claude Code worker could read and write any file your user account can reach, including the sign-in files of the other accounts. A worker now reads only its worktree, your checkout of the same repository, and the shared artifacts, and edits only its worktree. The folder of every other account and the sign-in files of its own are denied by name.
+- **A waiting confirmation respects a lowered level.** With confirmations in the AI client, a request such as deleting an account stayed valid for 10 minutes even after you set `xdevAi.mcp.accountControl` below `manage`. It is now refused, and the refusal is in the audit log.
+- **`.env` files are denied on Windows.** The rule that keeps workers from reading the files in `xdevAi.squad.workerEnvFiles` did not match Windows paths.
+- Workers and Lead are told that notes, summaries, artifacts, and file contents are information and not instructions. `xdev_squad_run`, `xdev_artifacts_list`, and `xdev_artifact_read` say the same to the AI client.
+
+### Fixed
+
+- On Windows, a run failed to commit, and **Changes** failed to open, when a linked folder such as `node_modules` was in `.gitignore`. This is the default for JavaScript projects.
+- On Windows, **Clean Up Squad Worktrees** could offer the worktree of a run that is still open.
+- **Set up for this folder** checks `.mcp.json` first. An invalid file used to stop the setup after the settings had changed and the server had restarted.
+- A tool call through MCP waits at most 4 minutes (`waitSeconds`), because Claude Code cancels a call that is silent for 5 minutes. The work continues; call `xdev_squad_wait` again.
+- The live feed shows file paths with forward slashes on Windows.
 
 ### Added
 
