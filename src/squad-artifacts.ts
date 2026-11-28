@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 export const artifactKinds = ['markdown', 'html', 'text', 'json'] as const;
@@ -10,6 +10,9 @@ export const artifactDescriptionLimit = 300;
 export const artifactContentLimit = 200_000;
 export const artifactLimit = 100;
 const linkLimit = 500;
+/** How long a change waits for another window's change, and when a lock is taken to be left behind. */
+const lockWaitMs = 10_000;
+const lockStaleMs = 30_000;
 const extensions: Record<ArtifactKind, string> = { markdown: 'md', html: 'html', text: 'txt', json: 'json' };
 
 export interface SquadArtifact {
@@ -120,8 +123,9 @@ export class SquadArtifacts {
         id: existing?.id ?? randomUUID(), name, kind: kind ?? existing?.kind ?? 'markdown',
         description: description || existing?.description || '', author: by, time: existing?.time ?? now, updated: now,
         version: (existing?.version ?? 0) + 1, size: content.length,
-        // A new save without a link keeps the page the artifact already points to.
-        ...(link ?? existing?.link ? { link: link ?? existing?.link } : {}),
+        // A save without a link keeps the page only for its own author, who can update that page. When another
+        // account replaces the content, the page still shows the old document, so the link is dropped.
+        ...(link ?? (existing?.author === by ? existing.link : undefined) ? { link: link ?? existing?.link } : {}),
         ...(run ?? existing?.run ? { run: run ?? existing?.run } : {})
       };
       if (existing && existing.kind !== next.kind) await rm(this.file(existing), { force: true });
@@ -162,16 +166,43 @@ export class SquadArtifacts {
     }));
   }
 
+  /**
+   * Holds the index for one change. Every VS Code window that opens the project writes the same index, and
+   * each reads it before it writes, so two windows must not do that at the same time. The lock is a folder,
+   * which the file system creates for one caller only; a lock left by a window that died is taken over.
+   */
+  private async lock(): Promise<() => Promise<void>> {
+    const path = join(this.dir, 'index.lock');
+    const end = Date.now() + lockWaitMs;
+    for (;;) {
+      try {
+        await mkdir(path);
+        return () => rmdir(path).catch(() => undefined);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      }
+      const age = await stat(path).then(info => Date.now() - info.mtimeMs, () => 0);
+      if (age > lockStaleMs) await rmdir(path).catch(() => undefined);
+      else if (Date.now() > end) throw new Error('The shared artifacts are being changed by another window. Try again.');
+      else await new Promise(resolve => setTimeout(resolve, 25));
+    }
+  }
+
   private update<T>(change: (artifacts: SquadArtifact[]) => Promise<T>): Promise<T> {
     const pending = this.writes.then(async () => {
       await mkdir(this.dir, { recursive: true });
-      const artifacts = await this.list();
-      const result = await change(artifacts);
-      // Written beside the index and renamed, so a reader never sees half a file.
-      const draft = join(this.dir, `index.${randomUUID()}.tmp`);
-      await writeFile(draft, JSON.stringify(artifacts, null, 1), 'utf8');
-      await rename(draft, join(this.dir, 'index.json'));
-      return result;
+      const unlock = await this.lock();
+      try {
+        const artifacts = await this.list();
+        const result = await change(artifacts);
+        // Written beside the index and renamed, so a reader never sees half a file.
+        const draft = join(this.dir, `index.${randomUUID()}.tmp`);
+        await writeFile(draft, JSON.stringify(artifacts, null, 1), 'utf8');
+        await rename(draft, join(this.dir, 'index.json'));
+        return result;
+      } finally {
+        await unlock();
+      }
     });
     this.writes = pending.then(() => undefined, () => undefined);
     return pending;

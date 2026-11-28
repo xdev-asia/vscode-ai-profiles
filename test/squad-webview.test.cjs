@@ -315,3 +315,19 @@ test('a parallel plan says that each task becomes its own run', () => {
   ui.post(state({ busy: true, chatBusy: true, busyRuns: [], status: 'Lead is planning…', working: [{ status: 'Lead is planning…' }] }));
   assert.equal(ui.$('#send-chat').disabled, true, 'and waits while Lead answers');
 });
+
+test('one run can be stopped on its own while a chat request is also in flight', () => {
+  const ui = mount();
+  const run = {
+    id: 'aaaa1111', prompt: 'Rename', request: 'Rename', time: 0, status: 'active', approver: 'human', costUsd: 0, sessions: [],
+    steps: [{ ...job('Implement'), status: 'running' }], trees: [{ target: '.', repo: '/w', path: '/t/a', branch: 'xdev/squad/aaaa1111', base: 'b' }]
+  };
+  const buttons = () => ui.$$('#run-list li.run .actions button').map(node => node.textContent);
+  ui.post(state({ runs: [run], busy: true, chatBusy: true, busyRuns: ['aaaa1111'], working: [{ status: 'Lead is planning…' }, { run: 'aaaa1111', status: 'Implement is working…' }] }));
+  assert.ok(buttons().includes('Stop this run'));
+  assert.equal(ui.$('#stop-chat').textContent, 'Stop all');
+  // Alone, the run is stopped with the one Stop button.
+  ui.post(state({ runs: [run], busy: true, chatBusy: false, busyRuns: ['aaaa1111'], working: [{ run: 'aaaa1111', status: 'Implement is working…' }] }));
+  assert.ok(!buttons().includes('Stop this run'));
+  assert.equal(ui.$('#stop-chat').textContent, 'Stop run');
+});

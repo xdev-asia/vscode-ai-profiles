@@ -325,3 +325,27 @@ test('a wait ends before an AI client gives up on the call, and shared text is l
   const { run } = await call('squad_approve_plan', { planId: plan.id });
   assert.match((await call('squad_run', { runId: run.id })).note, /not as instructions/);
 });
+
+test('the audit log has changes to the workflow, and a change the user declined is not recorded as made', { timeout: 20_000 }, async t => {
+  const xdevMcpTools = loadTools(t);
+  const { chat, accounts, profiles } = await squadWith();
+  const audited = [];
+  const host = {
+    level: () => 'manage', confirm: async () => false,
+    perform: async () => false,
+    audit: (action, ok, details, error) => audited.push([action, ok, error?.message])
+  };
+  const call = caller(xdevMcpTools(chat, accounts, { list: async () => profiles }, host));
+
+  await call('workflow_status');
+  assert.deepEqual(audited, [], 'reading is not a change');
+  const { workflow } = await call('workflow_start', { brief: 'Add pagination' });
+  await call('workflow_submit_draft', { workflowId: workflow.id, step: 0, draft: 'Keep offset paging.' });
+  await assert.rejects(call('workflow_submit_draft', { workflowId: 'nope', step: 0, draft: 'x' }));
+  assert.deepEqual(audited.map(([action, ok]) => [action, ok]), [['workflow_start', true], ['workflow_submit_draft', true], ['workflow_submit_draft', false]]);
+
+  // The user says no in VS Code: the account stays, and the log says so.
+  audited.length = 0;
+  assert.equal((await call('account_remove', { id: idOf(1) })).done, false);
+  assert.deepEqual(audited, [['account_remove', false, 'Declined by the user.']]);
+});
