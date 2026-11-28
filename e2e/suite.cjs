@@ -172,7 +172,7 @@ exports.run = async () => {
     }
   });
 
-  await step('a parallel plan becomes one run per task, each with its own worktree and branch', async () => {
+  await step('a parallel plan becomes one run per task, and their steps work at the same time, each committing to its own branch', async () => {
     const { client: session, call } = await client();
     try {
       const { plan } = await call('xdev_squad_submit_plan', {
@@ -185,9 +185,21 @@ exports.run = async () => {
       if (trees.length !== 2 || trees.some(tree => !tree)) throw new Error(`expected two runs with a worktree: ${JSON.stringify(approved)}`);
       if (new Set(trees.map(tree => tree.branch)).size !== 2) throw new Error('the runs share a branch');
       for (const tree of trees) if (!existsSync(join(tree.worktree, 'README.md'))) throw new Error(`no checkout in ${tree.worktree}`);
-      const status = await call('xdev_squad_status');
-      for (const run of approved.runs) await within(call('xdev_squad_finish_run', { runId: run.id }), 60_000, 'Finishing a run');
-      return `${trees.map(tree => tree.branch).join(', ')}; open runs before finishing: ${status.runs?.filter(run => run.status === 'active').length ?? '?'}`;
+      // Both runs start without waiting; the stand-in worker takes a few seconds, so they overlap.
+      for (const run of approved.runs) await call('xdev_squad_run_step', { runId: run.id, waitSeconds: 0 });
+      const working = await until(async () => {
+        const { workingRuns } = await call('xdev_squad_status');
+        return workingRuns?.length === 2 && workingRuns;
+      }, 10_000, 'Two runs working at the same time');
+      const ended = [];
+      for (const run of approved.runs) {
+        const state = await within(call('xdev_squad_wait', { runId: run.id, seconds: 60 }), 70_000, 'Waiting for a run');
+        if (!state.finished || state.run.status !== 'done') throw new Error(`run ${run.id} did not finish: ${JSON.stringify(state.run)}`);
+        const tree = state.run.repositories[0];
+        if (!tree.commit || tree.filesChanged !== 1) throw new Error(`run ${run.id} did not commit one file: ${JSON.stringify(tree)}`);
+        ended.push(`${tree.branch}: ${state.run.steps[0].summary}`);
+      }
+      return `${working.length} runs worked at the same time; ${ended.join('; ')}`;
     } finally {
       await session.close();
     }

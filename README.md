@@ -401,7 +401,7 @@ npm run test:host
 npm run package
 ```
 
-`npm test` runs the unit tests. `npm run test:host` downloads VS Code once into `.vscode-test/`, opens the extension in a window with its own profile and a throwaway folder, and drives it from the extension host: folder setup, the MCP server and its token, a client that confirms and leads Squad, shared artifacts, and a second run where another program holds the fixed port. It needs no AI account and starts no worker. On Linux without a display, run it under `xvfb-run -a`.
+`npm test` runs the unit tests. `npm run test:host` downloads VS Code once into `.vscode-test/`, opens the extension in a window with its own profile and a throwaway folder, and drives it from the extension host: folder setup, the MCP server and its token, a client that confirms and leads Squad, shared artifacts, and a second run where another program holds the fixed port. It needs no AI account: a stand-in for Claude Code does the work of the headless steps. On Linux without a display, run it under `xvfb-run -a`.
 
 ## Release an extension version
 
