@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { realpathSync } from 'node:fs';
 import { access, lstat, mkdir, symlink } from 'node:fs/promises';
 import { dirname, isAbsolute, join, normalize, resolve, sep } from 'node:path';
 
@@ -121,9 +122,17 @@ export function mergeRequestUrl(output: string): string | undefined {
   return requests.find(link => /\/(merge_requests|pull)\/\d+/.test(link)) ?? requests[0];
 }
 
-/** A path as one key, so the same folder compares equal however it is written: git prints C:/a/b where Node has C:\a\b. */
+/**
+ * A path as one key, so the same folder compares equal however it is written. git prints the real path with
+ * forward slashes: C:/Users/someone/x where Node may hold C:\Users\SOMEON~1\x, or /private/tmp/x for /tmp/x.
+ */
 export function pathKey(path: string, platform: NodeJS.Platform = process.platform): string {
-  const full = resolve(path);
+  let full = resolve(path);
+  try {
+    full = realpathSync.native(full);
+  } catch {
+    // The folder is gone; compare the path as written.
+  }
   return platform === 'win32' ? full.toLowerCase() : full;
 }
 

@@ -137,7 +137,15 @@ test('every Squad worker gets the account folders to stay out of and only existi
   assert.equal(runs.at(-1).readDirs, undefined);
 });
 
-test('a folder is one key however its path is written', () => {
+test('a folder is one key however its path is written', async t => {
+  // An existing folder is compared by its real path, which is what git prints.
+  const { realpathSync, symlinkSync } = require('node:fs');
+  const real = await mkdtemp(join(tmpdir(), 'xdev-key-'));
+  t.after(() => rm(real, { recursive: true, force: true }));
+  await mkdir(join(real, 'tree'));
+  symlinkSync(join(real, 'tree'), join(real, 'link'), 'junction');
+  assert.equal(pathKey(join(real, 'link')), pathKey(realpathSync.native(join(real, 'tree'))), 'a link and its target are one folder');
+
   assert.equal(pathKey('C:/Users/Dev/trees/aaaa', 'win32'), pathKey('C:/Users/Dev/trees/aaaa/', 'win32'));
   if (process.platform === 'win32') {
     assert.equal(pathKey('C:/Users/Dev/trees/aaaa'), pathKey('c:\\users\\dev\\trees\\AAAA'), 'git prints forward slashes; Windows ignores case');
