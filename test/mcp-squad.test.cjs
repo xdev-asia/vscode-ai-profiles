@@ -105,7 +105,7 @@ test('an MCP client leads Squad: it hands tasks to accounts, runs the steps, and
     { role: 'Review', brief: 'Review the endpoint' }
   ];
   await assert.rejects(call('squad_submit_plan', { request: 'Add a health endpoint', summary: 'Two steps', tasks: [{ role: 'Tests', brief: 'Test it' }] }), /Tests has no account/);
-  await assert.rejects(call('squad_submit_plan', { request: 'Add a health endpoint', summary: 'Two steps', tasks: [{ role: 'Implement', brief: 'x', account: 'nobody' }] }), /not a Claude Code account/);
+  await assert.rejects(call('squad_submit_plan', { request: 'Add a health endpoint', summary: 'Two steps', tasks: [{ role: 'Implement', brief: 'x', account: 'nobody' }] }), /not a Claude Code or Codex account/);
   const { plan } = await call('squad_submit_plan', { request: 'Add a health endpoint', summary: 'Implement twice, then review', tasks });
   assert.deepEqual(plan.tasks.map(task => [task.role, task.account]), [
     ['Implement', 'Tests account'], ['Implement', 'Lead account'], ['Review', 'Review account']

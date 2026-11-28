@@ -22,7 +22,8 @@ import { registerSquadTools } from './squad-tools';
 import { squadPage } from './squad-html';
 import { memoryTextLimit } from './squad-memory';
 import { exploreCode, findRepositories, hasCodegraph } from './squad-codegraph';
-import { launch, runClaude, terminalArguments, validCommand, workerSummary, type WorkerSettings } from './squad-worker';
+import { codexWindowsSandboxes, runWorker } from './squad-codex';
+import { launch, terminalArguments, validCommand, workerSummary, type WorkerSettings } from './squad-worker';
 import { git, validBranch, Worktrees, type MergeRequestMode } from './squad-worktree';
 import { mergeSkills, readSyncFolder, syncProfileSkills, writeSyncFolder } from './skill-sync';
 
@@ -145,8 +146,12 @@ function workerSettings(role: Role, repo?: string): WorkerSettings {
   const model = typeof models[role] === 'string' && /^[\w.:[\]-]{1,80}$/.test(models[role] as string) ? models[role] as string : undefined;
   const budget = Number(squadSetting<number>('workerBudgetUsd', 1));
   const minutes = Number(squadSetting<number>('workerTimeoutMinutes', 20));
+  const codexModel = squadSetting<string>('codexModel', '').trim();
+  const sandbox = codexWindowsSandboxes.find(candidate => candidate === squadSetting<string>('codexWindowsSandbox', 'mxc'));
   return {
     model,
+    ...(/^[\w.:[\]-]{1,80}$/.test(codexModel) ? { codexModel } : {}),
+    ...(sandbox ? { codexWindowsSandbox: sandbox } : {}),
     budgetUsd: Number.isFinite(budget) && budget >= 0 ? Math.min(budget, 50) : 1,
     allowedCommands: commandsFor(repo),
     timeoutMs: (Number.isFinite(minutes) ? Math.min(Math.max(minutes, 1), 120) : 20) * 60_000,
@@ -277,15 +282,12 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
       : join((context.storageUri ?? context.globalStorageUri).fsPath, 'squad-worktrees');
     this.stateFile = key ? join(context.globalStorageUri.fsPath, 'squad-state', `${key}.json`) : undefined;
     const host: WorkerHost = {
-      profiles: () => profiles.list('claude'),
-      executable: async () => {
-        const executable = await findTerminalExecutable('claude', vscode.workspace.getConfiguration('xdevAi').get<string>('claudeExecutable') ?? '');
-        if (!executable) throw new Error('Claude Code was not found on the workspace host. Set xdevAi.claudeExecutable.');
-        return executable;
-      },
+      // Every provider's accounts: a worker is kept out of all their folders. Claude Code and Codex accounts can work.
+      profiles: () => profiles.list(),
+      executable: provider => this.cliExecutable(provider === 'codex' ? 'codex' : 'claude'),
       folder: workspaceFolder,
       settings: workerSettings,
-      run: request => runClaude(request),
+      run: request => runWorker(request),
       worktrees: this.worktrees = new Worktrees(worktreeRoot),
       repositoryCommands,
       baseBranch: repo => baseBranchFor(repo),
@@ -1148,9 +1150,15 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
     return (await vscode.window.showQuickPick(trees.map(tree => ({ label: tree.target, description: tree.path, tree })), { title }))?.tree;
   }
 
-  private async claudeExecutable(): Promise<string> {
-    const executable = await findTerminalExecutable('claude', vscode.workspace.getConfiguration('xdevAi').get<string>('claudeExecutable') ?? '');
-    if (!executable) throw new Error('Claude Code was not found on the workspace host. Set xdevAi.claudeExecutable.');
+  private claudeExecutable(): Promise<string> {
+    return this.cliExecutable('claude');
+  }
+
+  /** The CLI of a provider on the workspace host, from its setting or the usual install folders. */
+  private async cliExecutable(provider: 'claude' | 'codex'): Promise<string> {
+    const setting = `${provider}Executable`;
+    const executable = await findTerminalExecutable(provider, vscode.workspace.getConfiguration('xdevAi').get<string>(setting) ?? '');
+    if (!executable) throw new Error(`${terminalProviders[provider].name} was not found on the workspace host. Set xdevAi.${setting}.`);
     return executable;
   }
 
@@ -1397,9 +1405,11 @@ class SquadView implements vscode.WebviewViewProvider, vscode.Disposable {
     if (!session) throw new Error('This worker session is no longer available.');
     const tree = run.trees?.find(candidate => candidate.target === session.repo) ?? run.trees?.[0];
     if (!tree) throw new Error('This run has no git worktree.');
-    const profile: TerminalProfile | undefined = (await this.profiles.list('claude')).find(candidate => terminalProfileId(candidate) === session.profileId);
-    if (!profile) throw new Error('The Claude Code account for this session was removed.');
-    this.openClaudeTerminal(`${session.role} · ${session.profile}`, profile, tree.path, await this.claudeExecutable(), ['--resume', session.sessionId]);
+    const profile: TerminalProfile | undefined = (await this.profiles.list()).find(candidate => terminalProfileId(candidate) === session.profileId);
+    if (!profile || (profile.provider !== 'claude' && profile.provider !== 'codex')) throw new Error('The account for this session was removed.');
+    // Codex keeps the sign-in of an account from xDev AI in a file in the account's folder.
+    const args = profile.provider === 'codex' ? ['-c', 'cli_auth_credentials_store=file', 'resume', session.sessionId] : ['--resume', session.sessionId];
+    this.openClaudeTerminal(`${session.role} · ${session.profile}`, profile, tree.path, await this.cliExecutable(profile.provider), args);
   }
 
   private async startRequest(role: Role, profileId: string, brief: string): Promise<void> {

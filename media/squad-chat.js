@@ -54,7 +54,7 @@ function mountSquadChat(vscode, roles) {
       const badge = document.createElement('span');
       badge.className = `badge ${job.kind}`;
       badge.textContent = job.kind === 'claude'
-        ? (job.role === 'Review' ? 'Claude Code · reads the repo' : 'Claude Code · edits the worktree')
+        ? `${cliName(job)} · ${job.role === 'Review' ? 'reads the repo' : 'edits the worktree'}`
         : 'Text API · no file access';
       const brief = document.createElement('p');
       brief.textContent = job.brief;
@@ -84,15 +84,15 @@ function mountSquadChat(vscode, roles) {
       ? `Parallel plan: each task becomes its own run, with its own worktree and branch, and ${(snapshot.maxParallel ?? 1) > 1 ? `up to ${snapshot.maxParallel} work at the same time` : 'they work one at a time'}. You review and merge each run on its own, or combine them when they are finished. `
       : '';
     byId('plan-cost').textContent = `${parallelText}${approverText}${headless
-      ? ` Claude Code steps use a new git worktree from ${workers?.baseBranch || 'your current branch'}${workers?.budgetUsd ? `, each headless step capped at $${workers.budgetUsd}` : ''}. Allowed commands: ${commands}.` : ''}`;
+      ? ` Claude Code steps use a new git worktree from ${workers?.baseBranch || 'your current branch'}${workers?.budgetUsd ? `, each headless step capped at $${workers.budgetUsd}` : ''}. Allowed commands: ${commands}.${(plan?.jobs ?? []).some(isCodex) ? ' Codex steps run their commands in Codex\'s sandbox instead of the allowed list, without network access and without a budget cap.' : ''}` : ''}`;
     renderRuns(snapshot.runs ?? []);
     renderBoard(state);
     renderLive(snapshot.working ?? (snapshot.live ? [{ live: snapshot.live }] : []), busy, snapshot.runs ?? []);
     const profileFor = role => state.accounts.find(profile => profile.id === state.seats[role]?.account);
     const lead = profileFor('Lead');
-    const leadUsable = lead?.kind === 'api' || (lead?.detail === 'Claude Code' && snapshot.workers);
+    const leadUsable = lead?.kind === 'api' || (['Claude Code', 'Codex'].includes(lead?.detail) && snapshot.workers);
     byId('chat-status').textContent = status || (plan ? 'Review the roles and briefs before running.' :
-      leadUsable ? `Lead uses ${lead.name} · ${lead.detail}` : 'Assign an API profile or a Claude Code account to Lead under Roles to start planning.');
+      leadUsable ? `Lead uses ${lead.name} · ${lead.detail}` : 'Assign an API profile, a Claude Code account, or a Codex account to Lead under Roles to start planning.');
     byId('stop-chat').hidden = !busy || snapshot.remote;
     byId('stop-chat').textContent = (snapshot.working ?? []).length > 1 ? 'Stop all' : 'Stop run';
     renderAssignAll(state, lead);
@@ -182,6 +182,9 @@ function mountSquadChat(vscode, roles) {
     const seconds = Math.max(0, Math.round((Date.now() - since) / 1000));
     return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, '0')}s`;
   }
+  // A headless step runs the CLI of its account: the account id starts with the provider.
+  const isCodex = job => job.kind === 'claude' && (job.cli === 'codex' || String(job.accountId ?? '').startsWith('codex:'));
+  const cliName = job => isCodex(job) ? 'Codex' : 'Claude Code';
   const clipped = (text, limit) => text.length > limit ? text.slice(0, limit) + '…' : text;
   // One feed per piece of work in flight; several runs may work at the same time.
   function renderLive(jobs, busy, runs = []) {
@@ -593,7 +596,7 @@ function mountSquadChat(vscode, roles) {
           const where = multiple && session.repo ? ` (${session.repo})` : '';
           button(`Resume ${session.role}${where}`, 'runResume', { session: session.sessionId }, busy);
           // Reading does not change the run, so it stays available while a step works.
-          button(`Transcript ${session.role}${where}`, 'runTranscript', { session: session.sessionId }, Boolean(pending));
+          if (!String(session.profileId ?? '').startsWith('codex:')) button(`Transcript ${session.role}${where}`, 'runTranscript', { session: session.sessionId }, Boolean(pending));
         }
       }
       button('Remove', 'runRemove', {}, busy);
@@ -663,7 +666,7 @@ function mountSquadChat(vscode, roles) {
       add(step.kind === 'claude' ? (again ? 'Run again' : 'Run headless') : (again ? 'Ask again' : 'Ask API'), 'stepRun',
         () => ({ brief: brief.value }), true);
       // A merge step stays headless: Squad opens the merge before the worker and commits it after.
-      if (step.kind === 'claude' && !step.resolves) add('Open in terminal', 'stepTerminal', () => ({ brief: brief.value }));
+      if (step.kind === 'claude' && !step.resolves && !isCodex(step)) add('Open in terminal', 'stepTerminal', () => ({ brief: brief.value }));
     }
     if (step.status !== 'running') add('Skip step', 'stepSkip', () => ({}));
     box.append(actions);

@@ -104,7 +104,7 @@ If VS Code reports that the workflow command is missing after an update, check *
 
 ### Run Claude Code workers on the repository
 
-Assign a **Claude Code** terminal account (instead of an API profile) to a role under **Roles**. **Use for all roles** under the profile gives every role the same account; a fresh workspace also offers this in Chat. That role then runs Claude Code headless (`claude -p`) under the account's own sign-in, and can read the repository and, for Implement and Tests, edit files and run allowed commands. A Claude Code account on Lead plans with the same subscription, without file tools.
+Assign a **Claude Code** terminal account (instead of an API profile) to a role under **Roles**. A **Codex** account works too; see [Run Codex workers on the repository](#run-codex-workers-on-the-repository) for what differs. **Use for all roles** under the profile gives every role the same account; a fresh workspace also offers this in Chat. That role then runs Claude Code headless (`claude -p`) under the account's own sign-in, and can read the repository and, for Implement and Tests, edit files and run allowed commands. A Claude Code account on Lead plans with the same subscription, without file tools.
 
 1. Open a workspace folder that is a git repository with at least one commit, or a folder that holds several repositories.
 2. Send a request to Lead and review the plan. Each task shows whether it runs as **Claude Code** or **Text API**, and the plan shows the spending cap and allowed commands. In a folder with several repositories, each Claude Code task shows its **Repository**. Lead picks it (a backend API and the screen that calls it get one Implement task each); otherwise xDev suggests one from the brief. Change it before approving.
@@ -234,12 +234,29 @@ The reviewer is the account assigned to Lead and must differ from the account th
 | `xdevAi.squad.minFreeDiskGb` | `2` | Free disk Squad needs before creating worktrees or starting a step. `0` turns the check off. |
 | `xdevAi.squad.repositoryBaseBranches` | `{}` | Base branch per repository, overriding `xdevAi.squad.baseBranch`; its merge requests target it. |
 | `xdevAi.squad.maxParallelRuns` | `3` | How many runs may have a step working at the same time (1–8). |
+| `xdevAi.squad.codexModel` | `""` | The model for workers under a Codex account. Empty uses Codex's default. |
+| `xdevAi.squad.codexWindowsSandbox` | `mxc` | On Windows, the sandbox for a Codex worker's commands: `mxc` or `elevated`. |
 | `xdevAi.squad.workerEnvFiles` | `{}` | `.env` files per repository whose variables Implement and Tests get as environment variables. |
 | `xdevAi.squad.deployTargets` | `{}` | How each repository deploys (`from`, `to`, `health`), for **Deploy** and **Check health** on a run. |
 
 Workers do not use `--dangerously-skip-permissions` or `--bare` (bare mode ignores claude.ai sign-in). Built-in tools a role does not need are not loaded, and only the MCP servers granted in `xdevAi.squad.mcpServers` start (`--strict-mcp-config` with `--mcp-config`), which keeps each request small. [Claude Code headless mode](https://code.claude.com/docs/en/headless) · [CLI reference](https://code.claude.com/docs/en/cli-reference)
 
 Each account's own plan and usage limits apply. A step starts only when you start it, or when a passing AI review starts the next one under the **AI** approver. Each run works on one step at a time, and up to `xdevAi.squad.maxParallelRuns` runs work at once.
+
+### Run Codex workers on the repository
+
+A role can also use a **Codex** terminal account. Assign it under **Roles**, or name it as a task's `account` when an AI client leads. The role then runs Codex headless (`codex exec`) under that account's sign-in, in the same worktrees, with the same steps: plan, run, answer a blocked worker, request changes, combine, resolve conflicts, AI review. A plan can mix both, for example Codex on Implement and Claude Code on Review, so each role uses a different subscription.
+
+What differs from a Claude Code worker:
+
+- **A sandbox instead of the allowed commands.** Codex confines a worker's commands with its own sandbox, and `xdevAi.squad.allowedCommands` does not apply. Lead, Review, and every plan, question, and AI review run read-only. Implement and Tests also write in their worktree and the temporary folder. Commands have no network access, and nothing is approved during a run: what the sandbox refuses fails.
+- **What a command can read.** A Codex command can read the machine, as in Codex itself, except what xDev AI denies: the folder of every other account, the worker's own sign-in file, the project's .env files from `xdevAi.squad.workerEnvFiles`, and the usual places of credentials in your home folder (`.ssh`, `.aws`, `.azure`, `.kube`, `.gnupg`, `.netrc`, `.git-credentials`, `.config/gh`, `.config/gcloud`, `.claude`, `.codex`, `.gemini`). A Claude Code worker reads only its worktree and the main checkout, which is stricter. Files that builds read, such as `.npmrc` and `.gitconfig`, stay readable.
+- **Windows.** The sandbox must be able to deny reads. xDev AI uses Codex's MXC sandbox, which needs a recent Windows 11 build and which Codex still marks as under development; set `xdevAi.squad.codexWindowsSandbox` to `elevated` to use the sandbox an administrator sets up once from a Codex terminal. Codex's unelevated sandbox cannot deny reads, so Squad does not use it. When no sandbox works, the worker's commands fail and its report says so.
+- **Your Codex config is not loaded.** The run ignores the account's `config.toml` and command rules, so its MCP servers, plugins, and model setting do not apply. MCP servers granted in `xdevAi.squad.mcpServers` are for Claude Code workers only. Project instructions in `AGENTS.md` are still read.
+- **Model, cost, and limits.** Set the model in `xdevAi.squad.codexModel`, or per task from an AI client; the aliases `haiku`, `sonnet`, and `opus` are refused for a Codex account, and Lead does not choose a model for it. Codex reports no cost, so a Codex step shows none and `xdevAi.squad.workerBudgetUsd` does not cap it. The time limit applies.
+- **Not yet for Codex steps.** **Open in terminal** and **Transcript** are for Claude Code steps. **Resume** opens the Codex session in a terminal (`codex resume`), where you can read it. The account pool spreads work over Claude Code accounts only.
+
+Codex workers were tried on Windows 11 with Codex CLI 0.166. On macOS and Linux the same permissions profile is passed to Codex's own sandboxes; that path has unit tests but was not run on those systems.
 
 ### Share memory between agents
 

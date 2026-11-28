@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.24.0 - 2026-11-28
+
+### Added
+
+- **Codex accounts as Squad workers.** A role with a Codex terminal account runs `codex exec` headless in the run's worktree, so Squad can use a ChatGPT subscription next to Claude Code ones: Lead, Implement, Review, Tests, AI review, answering a blocked worker, request changes, and resolving conflicts. An AI client names a Codex account as a task's `account`.
+- A Codex worker's commands run in Codex's sandbox: read-only for reading roles, the worktree for Implement and Tests, no network. They cannot read other accounts' folders, the worker's sign-in file, the project's .env files, or the usual credential folders in the home folder.
+- Settings `xdevAi.squad.codexModel` and `xdevAi.squad.codexWindowsSandbox`.
+
+### Changed
+
+- A worker is kept out of the folders of every terminal account, also Codex and Gemini CLI ones. Before, only Claude Code account folders were listed.
+
 ## 0.23.0 - 2026-11-28
 
 ### Added

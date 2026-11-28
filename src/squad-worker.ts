@@ -51,6 +51,10 @@ export interface WorkerSettings {
   env?: Record<string, string>;
   /** Absolute paths of the project's .env files, which no role may read. */
   denyRead?: readonly string[];
+  /** The model for Codex workers; Codex's own default when empty. `model` is for Claude Code. */
+  codexModel?: string;
+  /** The sandbox Codex confines a worker's commands with on Windows. */
+  codexWindowsSandbox?: 'mxc' | 'elevated';
 }
 
 /**
@@ -90,7 +94,7 @@ export interface WorkerRequest {
   onActivity?: (activity: WorkerActivity) => void;
 }
 
-type Spawn = (command: string, args: readonly string[], options: SpawnOptions) => ChildProcess;
+export type Spawn = (command: string, args: readonly string[], options: SpawnOptions) => ChildProcess;
 
 export const summaryLimit = 2_000;
 export const memoryNoteLimit = 300;
@@ -161,11 +165,16 @@ const gateSchema = {
   required: ['verdict', 'reason']
 } as const;
 
+/** The shape of the answer a run must give: a plan, a verdict, or a worker's report. */
+export function workerSchema(mode: WorkerMode): object {
+  return mode === 'plan' ? planSchema : mode === 'gate' ? gateSchema : reportSchema;
+}
+
 const readTools = ['Read', 'Glob', 'Grep'];
 /** Lets Edit and Write change files in the working directory only. A bare "Edit" would allow any path on the machine. */
 const editHere = 'Edit(./**)';
 /** Files in an account's folder that hold its sign-in. */
-const signInFiles = ['.credentials.json', '.claude.json', 'auth.json', 'oauth_creds.json'];
+export const signInFiles = ['.credentials.json', '.claude.json', 'auth.json', 'oauth_creds.json'];
 const gitRead = ['Bash(git status:*)', 'Bash(git diff:*)', 'Bash(git log:*)', 'Bash(git show:*)'];
 const codegraphRead = ['Bash(codegraph explore:*)', 'Bash(codegraph node:*)', 'Bash(codegraph query:*)'];
 
@@ -245,7 +254,7 @@ export function workerArguments(
   const args = [
     '-p',
     '--output-format', 'stream-json', '--verbose',
-    '--json-schema', JSON.stringify(mode === 'plan' ? planSchema : mode === 'gate' ? gateSchema : reportSchema),
+    '--json-schema', JSON.stringify(workerSchema(mode)),
     '--append-system-prompt-file', files.system,
     '--tools', tools.join(','),
     '--permission-mode', 'default',
@@ -268,13 +277,14 @@ export function workerArguments(
  * An argument holding any of them is refused rather than handed to cmd.exe.
  */
 export function launch(
-  executable: string, args: readonly string[], platform: NodeJS.Platform = process.platform, comSpec: string | undefined = process.env.ComSpec
+  executable: string, args: readonly string[], platform: NodeJS.Platform = process.platform, comSpec: string | undefined = process.env.ComSpec,
+  product: { name: string; setting: string } = { name: 'Claude Code', setting: 'xdevAi.claudeExecutable' }
 ): { command: string; args: string[] } {
   if (platform !== 'win32' || !/\.cmd$/i.test(executable)) return { command: executable, args: [...args] };
   const unsafe = [executable, ...args].find(value => /[%&|<>^\r\n]/.test(value));
   if (unsafe !== undefined) {
-    throw new Error(`Claude Code is installed as a .cmd script, and Windows cannot pass this value to it safely: ${unsafe.slice(0, 80)}. `
-      + 'Set xdevAi.claudeExecutable to a claude.exe instead.');
+    throw new Error(`${product.name} is installed as a .cmd script, and Windows cannot pass this value to it safely: ${unsafe.slice(0, 80)}. `
+      + `Set ${product.setting} to the .exe instead.`);
   }
   return { command: comSpec ?? 'cmd.exe', args: ['/d', '/s', '/c', executable, ...args] };
 }
@@ -322,7 +332,7 @@ interface ResultMessage {
 
 const activityText = 160;
 
-function shortPath(value: unknown, cwd: string): string {
+export function shortPath(value: unknown, cwd: string): string {
   if (typeof value !== 'string') return '';
   const path = isAbsolute(value) ? relative(cwd, value) : value;
   // Shown with forward slashes on every platform.
@@ -469,32 +479,38 @@ export function parseGateOutput(stdout: string): { verdict: 'pass' | 'changes'; 
   return { verdict: gate.verdict, reason: gate.reason.trim().slice(0, 1_000), costUsd: typeof message.total_cost_usd === 'number' ? message.total_cost_usd : 0 };
 }
 
+/** One run of a CLI that reads its input once and prints JSON lines. */
+export interface ProcessRun {
+  /** The CLI's name, for messages. */
+  name: string;
+  start: { command: string; args: string[] };
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  input: string;
+  signal?: AbortSignal;
+  timeoutMs: number;
+  spawn?: Spawn;
+  /** What to try when the CLI exits with an error and no answer. */
+  hint: string;
+  /** Called with each JSON object the CLI prints, and the line it came from. */
+  line(event: Record<string, unknown>, text: string): void;
+  /** Whether the output holds the answer already; a failing exit code then does not matter. */
+  done(): boolean;
+}
+
 /**
- * Runs Claude Code once in print mode under the given terminal profile. Events stream as JSON lines:
- * tool calls feed `onActivity`, and the final result line is returned for the parse functions.
+ * Starts a CLI, writes `input` to its standard input, and feeds each JSON line it prints to `line`. Rejects when
+ * it cannot start, is stopped through `signal`, runs longer than `timeoutMs`, prints too much on one line, or
+ * exits with an error before `done`.
  */
-export function runClaude(request: WorkerRequest, spawn: Spawn = spawnProcess): Promise<string> {
-  const { executable, profile, cwd, settings, signal } = request;
-  if (profile.provider !== 'claude') return Promise.reject(new Error('Headless workers need a Claude Code terminal account.'));
-  signal?.throwIfAborted();
-  // The system text and the server definitions (which may hold tokens) go in private files, and the prompt goes
-  // to standard input, so none of them is on the command line.
-  const mcp = runMcp(request.mode, settings);
-  const folder = mkdtempSync(join(tmpdir(), 'xdev-squad-run-'));
-  const cleanup = () => rmSync(folder, { recursive: true, force: true });
-  return new Promise<string>((resolve, reject) => {
-    const files: WorkerFiles = { system: join(folder, 'system.md'), ...(mcp ? { mcp: join(folder, 'mcp.json') } : {}) };
-    writeFileSync(files.system, request.system, { mode: 0o600 });
-    if (files.mcp) writeFileSync(files.mcp, JSON.stringify({ mcpServers: mcp!.servers }), { mode: 0o600 });
-    const start = launch(executable, workerArguments(request, files));
-    const child = spawn(start.command, start.args, {
-      cwd, env: workerEnvironment(profile, { ...process.env, ...settings.env }), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true
-    });
+export function runProcess(run: ProcessRun): Promise<void> {
+  const { name, start, signal } = run;
+  return new Promise<void>((resolve, reject) => {
+    const child = (run.spawn ?? spawnProcess)(start.command, start.args, { cwd: run.cwd, env: run.env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
     // A CLI that exits before reading its input closes the pipe; the close handler reports that failure.
     child.stdin?.on('error', () => undefined);
-    child.stdin?.end(request.prompt);
+    child.stdin?.end(run.input);
     let buffer = '';
-    let result = '';
     let stderr = '';
     let settled = false;
     let ending: Error | undefined;
@@ -506,7 +522,7 @@ export function runClaude(request: WorkerRequest, spawn: Spawn = spawnProcess): 
       clearTimeout(grace);
       signal?.removeEventListener('abort', abort);
       if (error) reject(error);
-      else resolve(result);
+      else resolve();
     };
     /**
      * Ends the CLI and, on Windows, every process under it: a CLI installed as a .cmd script runs under cmd.exe,
@@ -528,28 +544,18 @@ export function runClaude(request: WorkerRequest, spawn: Spawn = spawnProcess): 
       else grace = setTimeout(() => finish(error), stopGraceMs);
     };
     const abort = () => end(signal?.reason instanceof Error ? signal.reason : new Error('The worker was stopped.'));
-    const timer = setTimeout(() => end(new Error(`The worker did not finish within ${Math.round(settings.timeoutMs / 60_000)} minutes.`)), settings.timeoutMs);
+    const timer = setTimeout(() => end(new Error(`The worker did not finish within ${Math.round(run.timeoutMs / 60_000)} minutes.`)), run.timeoutMs);
     signal?.addEventListener('abort', abort, { once: true });
-    const calls = new Map<string, WorkerActivity>();
     const line = (text: string) => {
       const trimmed = text.trim();
       if (!trimmed.startsWith('{')) return;
-      let event: { type?: unknown };
+      let event: unknown;
       try {
-        event = JSON.parse(trimmed) as { type?: unknown };
+        event = JSON.parse(trimmed);
       } catch {
         return;
       }
-      if (event.type === 'result') result = trimmed;
-      else if (request.onActivity) {
-        for (const activity of streamActivities(event, cwd, calls)) {
-          try {
-            request.onActivity(activity);
-          } catch {
-            // The activity feed is informational; never let it break the run.
-          }
-        }
-      }
+      if (event && typeof event === 'object') run.line(event as Record<string, unknown>, trimmed);
     };
     child.stdout?.setEncoding('utf8').on('data', (chunk: string) => {
       buffer += chunk;
@@ -561,14 +567,53 @@ export function runClaude(request: WorkerRequest, spawn: Spawn = spawnProcess): 
     child.stderr?.setEncoding('utf8').on('data', (chunk: string) => {
       stderr = (stderr + chunk).slice(-2_000);
     });
-    child.on('error', error => finish(new Error(`Could not start Claude Code: ${error.message}`)));
+    child.on('error', error => finish(new Error(`Could not start ${name}: ${error.message}`)));
     child.on('close', code => {
       line(buffer);
       buffer = '';
       if (ending) return finish(ending);
-      if (code === 0 || result) return finish();
+      if (code === 0 || run.done()) return finish();
       const detail = stderr.trim().split('\n').at(-1)?.slice(0, 300);
-      finish(new Error(`Claude Code exited with code ${code}${detail ? `: ${detail}` : ''}. Sign in to the terminal account again if its session expired.`));
+      finish(new Error(`${name} exited with code ${code}${detail ? `: ${detail}` : ''}. ${run.hint}`));
     });
-  }).finally(cleanup);
+  });
+}
+
+/**
+ * Runs Claude Code once in print mode under the given terminal profile. Events stream as JSON lines:
+ * tool calls feed `onActivity`, and the final result line is returned for the parse functions.
+ */
+export function runClaude(request: WorkerRequest, spawn: Spawn = spawnProcess): Promise<string> {
+  const { executable, profile, cwd, settings, signal } = request;
+  if (profile.provider !== 'claude') return Promise.reject(new Error('Headless workers need a Claude Code terminal account.'));
+  signal?.throwIfAborted();
+  // The system text and the server definitions (which may hold tokens) go in private files, and the prompt goes
+  // to standard input, so none of them is on the command line.
+  const mcp = runMcp(request.mode, settings);
+  const folder = mkdtempSync(join(tmpdir(), 'xdev-squad-run-'));
+  let result = '';
+  const calls = new Map<string, WorkerActivity>();
+  return Promise.resolve().then(() => {
+    const files: WorkerFiles = { system: join(folder, 'system.md'), ...(mcp ? { mcp: join(folder, 'mcp.json') } : {}) };
+    writeFileSync(files.system, request.system, { mode: 0o600 });
+    if (files.mcp) writeFileSync(files.mcp, JSON.stringify({ mcpServers: mcp!.servers }), { mode: 0o600 });
+    return runProcess({
+      name: 'Claude Code', start: launch(executable, workerArguments(request, files)), cwd,
+      env: workerEnvironment(profile, { ...process.env, ...settings.env }), input: request.prompt, signal, timeoutMs: settings.timeoutMs, spawn,
+      hint: 'Sign in to the terminal account again if its session expired.',
+      line: (event, text) => {
+        if (event.type === 'result') result = text;
+        else if (request.onActivity) {
+          for (const activity of streamActivities(event, cwd, calls)) {
+            try {
+              request.onActivity(activity);
+            } catch {
+              // The activity feed is informational; never let it break the run.
+            }
+          }
+        }
+      },
+      done: () => Boolean(result)
+    });
+  }).then(() => result).finally(() => rmSync(folder, { recursive: true, force: true }));
 }

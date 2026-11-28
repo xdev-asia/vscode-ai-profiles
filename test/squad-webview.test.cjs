@@ -462,3 +462,28 @@ test('a step that merges a left-out run has no Open in terminal', () => {
   ui.post(state({ runs: [run], busyRuns: [], working: [] }));
   assert.deepEqual(ui.$$('#run-list .step-controls button').map(node => node.textContent), ['Run headless', 'Skip step']);
 });
+
+test('a Codex task and step are named as Codex, without the terminal and transcript of Claude Code steps', () => {
+  const codex = { id: 'codex:9', kind: 'terminal', name: 'gpt', detail: 'Codex' };
+  const ui = mount();
+  ui.post({ ...state({ plan: { id: 'p1', repos: ['.'], jobs: [{ ...job('Implement', '.'), profile: 'gpt', cli: 'codex' }, job('Review', '.')] } }), accounts: [...accounts, codex] });
+  assert.deepEqual(ui.$$('#chat-jobs .badge').map(node => node.textContent), ['Codex · edits the worktree', 'Claude Code · reads the repo']);
+  assert.match(ui.$('#plan-cost').textContent, /Codex steps run their commands in Codex's sandbox instead of the allowed list, without network access and without a budget cap\.$/);
+
+  // Lead may be a Codex account.
+  const lead = mount();
+  lead.post({ ...state({}), accounts: [...accounts, codex], seats: { ...assigned, Lead: { ...assigned.Lead, account: 'codex:9' } } });
+  assert.equal(lead.$('#chat-status').textContent, 'Lead uses gpt · Codex');
+
+  const run = {
+    id: 'r1', prompt: 'Health endpoint', request: 'Health endpoint', time: 0, status: 'active', approver: 'human', costUsd: 0,
+    sessions: [{ role: 'Implement', profileId: 'codex:9', profile: 'gpt', sessionId: 'thread-1', repo: '.' }, { role: 'Review', profileId: 'claude:1', profile: 'alex', sessionId: 'sess-2', repo: '.' }],
+    steps: [{ ...job('Implement'), profile: 'gpt', accountId: 'codex:9', status: 'blocked', question: 'v1 or v2?' }],
+    trees: [{ target: '.', repo: '/w', path: '/t/a', branch: 'xdev/squad/r1', base: 'b' }]
+  };
+  const second = mount();
+  second.post(state({ runs: [run], busyRuns: [], working: [] }));
+  assert.deepEqual(second.$$('#run-list .step-controls button').map(node => node.textContent), ['Send answer', 'Run again', 'Skip step'], 'no Open in terminal for a Codex step');
+  const actions = second.$$('#run-list li.run .actions button').map(node => node.textContent);
+  assert.ok(actions.includes('Resume Implement') && actions.includes('Transcript Review') && !actions.includes('Transcript Implement'));
+});

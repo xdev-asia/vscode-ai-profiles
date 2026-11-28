@@ -15,7 +15,7 @@ import {
 } from './mcp-control';
 import type { McpConnection, McpTool } from './mcp-transport';
 import { artifactContentLimit, artifactDescriptionLimit, artifactKinds, artifactNameLimit, type SquadArtifact } from './squad-artifacts';
-import { approvers, chatPromptLimit, poolModes, type LiveActivity, type PoolMode, type RunRecord, type RunStep, type SquadChat, type SquadChatEntry } from './squad-chat';
+import { approvers, chatPromptLimit, poolModes, workerCli, type LiveActivity, type PoolMode, type RunRecord, type RunStep, type SquadChat, type SquadChatEntry } from './squad-chat';
 import {
   maxNoteLength, maxTags, terminalProfileId, terminalProviderIds, type TerminalProfile, type TerminalProfiles, type TerminalProvider
 } from './terminal-profiles';
@@ -510,7 +510,7 @@ export function xdevMcpTools(squad: SquadChat, accounts: Accounts, profiles: Ter
   // Squad control: the connected client acts as the lead. It plans, hands tasks to accounts, and reads results.
   const squadLevel = () => host?.squadLevel?.() ?? 'off';
   const stepView = (step: RunStep, index: number, brief: boolean) => ({
-    index, role: step.role, account: step.profile, kind: step.kind ?? 'api', repo: step.repo, model: step.model, status: step.status,
+    index, role: step.role, account: step.profile, kind: step.kind ?? 'api', cli: workerCli(step), repo: step.repo, model: step.model, status: step.status,
     // In a combined run: the left-out run this step merges, resolving its conflicts.
     resolvesRunId: step.resolves,
     ...(brief ? {} : {
@@ -539,7 +539,7 @@ export function xdevMcpTools(squad: SquadChat, accounts: Accounts, profiles: Ter
   });
   const planView = () => {
     const plan = squad.pendingPlan();
-    return plan ? { id: plan.id, parallel: plan.parallel, tasks: plan.jobs.map(({ role, brief, profile, kind, repo, model }) => ({ role, account: profile, kind, repo, model, brief })) } : null;
+    return plan ? { id: plan.id, parallel: plan.parallel, tasks: plan.jobs.map(job => ({ role: job.role, account: job.profile, kind: job.kind, cli: job.kind === 'claude' ? job.cli ?? 'claude' : undefined, repo: job.repo, model: job.model, brief: job.brief })) } : null;
   };
   const entryView = ({ author, profile, text }: SquadChatEntry) => ({ author, account: profile, text: clip(text, 2_000) });
   const liveView = (live: LiveActivity) => ({
@@ -676,9 +676,9 @@ export function xdevMcpTools(squad: SquadChat, accounts: Accounts, profiles: Ter
     properties: {
       role: { type: 'string', enum: ['Implement', 'Review', 'Tests'], description: 'Implement edits files, Review reads the diff, Tests adds and runs tests.' },
       brief: { type: 'string', maxLength: 4_000, description: 'What to do, written so the worker can act without this conversation: files, symbols, and the expected result.' },
-      account: { type: 'string', maxLength: 200, description: 'Claude Code account id from xdev_accounts_list that does this task. Without it the task uses the account pool or the role’s account.' },
+      account: { type: 'string', maxLength: 200, description: 'Claude Code or Codex account id from xdev_accounts_list that does this task. Without it the task uses the account pool or the role’s account.' },
       repo: { type: 'string', maxLength: 300, description: 'The repository the task works in, when the workspace holds several.' },
-      model: { type: 'string', maxLength: 80, description: 'The Claude Code model for this task, to match cost to difficulty: haiku for simple mechanical work (renames, small edits, running tests), sonnet for most coding, opus only for the hardest tasks. Without it the task uses the model configured for its role.' }
+      model: { type: 'string', maxLength: 80, description: 'The Claude Code model for this task, to match cost to difficulty: haiku for simple mechanical work (renames, small edits, running tests), sonnet for most coding, opus only for the hardest tasks. Without it the task uses the model configured for its role. For a Codex account, leave it out or give a Codex model id; the Claude aliases are refused.' }
     }
   };
   const squadRunTools = [
@@ -720,7 +720,7 @@ export function xdevMcpTools(squad: SquadChat, accounts: Accounts, profiles: Ter
       await squad.discard(planId);
       return { done: true };
     }),
-    squadRunTool('squad_run_step', 'Run the current step of a run once: its account’s Claude Code works headless in the worktree (or its text API answers) and stops. Optionally replace the step’s brief. Returns the step’s result, or finished false when it is still working after waitSeconds. Steps of different runs can work at the same time: start each with waitSeconds 0, then call xdev_squad_wait.', {
+    squadRunTool('squad_run_step', 'Run the current step of a run once: its account’s Claude Code or Codex works headless in the worktree (or its text API answers) and stops. Optionally replace the step’s brief. Returns the step’s result, or finished false when it is still working after waitSeconds. Steps of different runs can work at the same time: start each with waitSeconds 0, then call xdev_squad_wait.', {
       ...runArg, brief: { type: 'string', maxLength: 4_000 }, ...waitArg
     }, async ({ runId, brief, waitSeconds }, signal) => {
       await squad.runStep(runId, brief || undefined);

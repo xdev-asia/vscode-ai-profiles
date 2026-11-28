@@ -137,7 +137,7 @@ test('runClaude spawns the CLI in the worktree and can be stopped', async () => 
   const hanging = fakeSpawn(() => {});
   const controller = new AbortController();
   const pending = runClaude({ ...request, signal: controller.signal }, hanging.spawn);
-  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setTimeout(resolve, 10));
   controller.abort();
   await assert.rejects(pending);
   assert.equal(hanging.calls[0].child.killed, 'SIGTERM');
@@ -147,7 +147,7 @@ test('runClaude spawns the CLI in the worktree and can be stopped', async () => 
   const stopper = new AbortController();
   let settled = false;
   const stopping = runClaude({ ...request, signal: stopper.signal }, slow.spawn).catch(error => { settled = true; return error; });
-  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setTimeout(resolve, 10));
   stopper.abort();
   await new Promise(resolve => setTimeout(resolve, 50));
   assert.equal(slow.calls[0].child.killed, 'SIGTERM');
@@ -209,7 +209,7 @@ test('the prompt and the system text reach Claude Code through stdin and a priva
   const prompt = 'Fix "it" & echo PWNED %PATH%\nsecond line';
   const system = 'You are Tests\n"quoted" & calc';
   await runClaude({ executable: '/bin/claude', profile, cwd: '/repo/wt', role: 'Tests', mode: 'work', prompt, system, settings }, done.spawn);
-  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setTimeout(resolve, 10));
   const [call] = done.calls;
   assert.ok(!call.args.some(arg => /PWNED|calc|second line|You are Tests/.test(arg)), 'no prompt or system text on the command line');
   assert.equal(call.options.stdio[0], 'pipe');
